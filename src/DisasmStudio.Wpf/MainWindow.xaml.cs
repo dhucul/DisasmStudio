@@ -289,7 +289,24 @@ public partial class MainWindow : Window
 
     private void OnImportActivate(object sender, MouseButtonEventArgs e)
     {
-        if (ImportList.SelectedItem is ImportItem im) { CenterTabs.SelectedIndex = 2; _nav.Navigate(im.Va); }
+        if (ImportList.SelectedItem is not ImportItem im || _result is null) return;
+
+        // Jump to the code that calls this import, not the (useless) IAT slot in hex. List every
+        // caller in the Xrefs panel. Fall back to hex only if nothing references it.
+        var refs = _result.Xrefs.To(im.Va);
+        if (refs.Count > 0)
+        {
+            CenterTabs.SelectedIndex = 0;          // Linear
+            _nav.Navigate(refs[0].From);
+            SideTabs.SelectedIndex = 0;            // Xrefs — set after navigating so it isn't overwritten
+            XrefList.ItemsSource = refs.Select(x => new XrefItem(x)).ToList();
+            XrefHeader.Text = $"{im.Va:X}  {im.Name} — {refs.Count} caller(s)";
+        }
+        else
+        {
+            CenterTabs.SelectedIndex = 2;
+            _nav.Navigate(im.Va);
+        }
     }
     private void OnSectionActivate(object sender, MouseButtonEventArgs e)
     {

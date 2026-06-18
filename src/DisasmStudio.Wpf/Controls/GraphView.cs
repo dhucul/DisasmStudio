@@ -255,16 +255,17 @@ public sealed class GraphView : FrameworkElement
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
-        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        // Mouse wheel zooms the graph about the cursor (Shift+wheel pans vertically instead).
+        if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0)
         {
-            var before = ToGraph(e.GetPosition(this));
-            _scale = Math.Clamp(_scale * (e.Delta > 0 ? 1.1 : 1 / 1.1), 0.15, 4.0);
-            var after = ToGraph(e.GetPosition(this));
-            _offset += (after - before) * _scale;
+            _offset -= new Vector(0, Math.Sign(e.Delta) * 60);
         }
         else
         {
-            _offset -= new Vector(0, Math.Sign(e.Delta) * 60);
+            Point screen = e.GetPosition(this);
+            Point g = ToGraph(screen);                                   // graph point under the cursor
+            _scale = Math.Clamp(_scale * (e.Delta > 0 ? 1.15 : 1 / 1.15), 0.12, 6.0);
+            _offset = new Vector(screen.X - g.X * _scale, screen.Y - g.Y * _scale); // keep it under the cursor
         }
         InvalidateVisual();
         e.Handled = true;
