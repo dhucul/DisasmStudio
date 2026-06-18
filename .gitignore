@@ -1,0 +1,9 @@
+## .NET / Visual Studio
+bin/
+obj/
+.vs/
+*.user
+*.suo
+artifacts/
+[Dd]ebug/
+[Rr]elease/

@@ -1,0 +1,301 @@
+using System.Globalization;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+using DisasmStudio.Core.Analysis;
+using DisasmStudio.Core.Disasm;
+using DisasmStudio.Wpf.Services;
+
+namespace DisasmStudio.Wpf.Controls;
+
+/// <summary>
+/// A per-function control-flow graph: basic blocks as rounded cards of token-coloured instructions,
+/// connected by colour-coded edges (taken / fall-through / jump). Bounded to one function, so cost
+/// is independent of total file size. Pan by dragging, zoom with Ctrl+wheel about the cursor,
+/// fit-to-view on load. Clicking a block syncs the linear view.
+/// </summary>
+public sealed class GraphView : FrameworkElement
+{
+    private AnalysisResult? _result;
+    private Function? _function;
+    private readonly List<BasicBlock> _blocks = [];
+    private readonly Dictionary<ulong, BasicBlock> _byStart = [];
+    private readonly Dictionary<ulong, List<Line>> _lines = [];
+
+    private double _scale = 1.0;
+    private Vector _offset;
+    private Point _lastDrag;
+    private bool _dragging;
+
+    private readonly Typeface _typeface =
+        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+    private const double FontSize = 12.5;
+    private double _rowHeight = 15;
+    private double _charWidth = 7.5;
+    private const double Pad = 8;
+    private const double HeaderH = 18;
+
+    public event Action<ulong>? BlockSelected;
+
+    private sealed record Line(string Text, AsmToken[] Tokens, double Width);
+
+    public GraphView()
+    {
+        ClipToBounds = true;
+        Focusable = true;
+        MeasureFont();
+    }
+
+    public void SetFunction(AnalysisResult result, Function function)
+    {
+        _result = result;
+        _function = function;
+        if (!function.BlocksBuilt) CfgBuilder.Build(result.Image, function);
+
+        _blocks.Clear();
+        _byStart.Clear();
+        _lines.Clear();
+        _blocks.AddRange(function.Blocks);
+        foreach (var b in _blocks) _byStart[b.Start] = b;
+
+        BuildLines(result);
+        Layout();
+        FitToView();
+        InvalidateVisual();
+    }
+
+    public void Clear()
+    {
+        _function = null;
+        _blocks.Clear();
+        _byStart.Clear();
+        _lines.Clear();
+        InvalidateVisual();
+    }
+
+    private void MeasureFont()
+    {
+        double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        var ft = new FormattedText("0", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+            _typeface, FontSize, Brushes.White, dpi);
+        _charWidth = ft.WidthIncludingTrailingWhitespace;
+        _rowHeight = Math.Ceiling(ft.Height) + 2;
+    }
+
+    private void BuildLines(AnalysisResult result)
+    {
+        double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        var dis = new Disassembler(result.Image);
+        var fmt = new AsmFormatter(result.Names);
+
+        foreach (var block in _blocks)
+        {
+            var list = new List<Line>(block.InstrVas.Count);
+            foreach (var va in block.InstrVas)
+            {
+                if (!dis.TryDecodeAt(va, out var instr)) continue;
+                var tokens = fmt.Format(instr).ToArray();
+                string text = va.ToString("X8") + "  " + string.Concat(tokens.Select(t => t.Text));
+                var ft = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                    _typeface, FontSize, Brushes.White, dpi);
+                list.Add(new Line(text, tokens, ft.WidthIncludingTrailingWhitespace));
+            }
+            _lines[block.Start] = list;
+        }
+    }
+
+    // ---- layout (simple BFS layering) ----
+    private void Layout()
+    {
+        if (_blocks.Count == 0 || _function is null) return;
+
+        // Size each block from its lines.
+        foreach (var b in _blocks)
+        {
+            var lines = _lines[b.Start];
+            double w = 60;
+            foreach (var l in lines) w = Math.Max(w, l.Width);
+            b.Width = w + Pad * 2;
+            b.Height = HeaderH + Math.Max(1, lines.Count) * _rowHeight + Pad;
+        }
+
+        // Rank = BFS distance from the entry block.
+        var rank = new Dictionary<ulong, int>();
+        var queue = new Queue<ulong>();
+        ulong entry = _byStart.ContainsKey(_function.Va) ? _function.Va : _blocks[0].Start;
+        rank[entry] = 0;
+        queue.Enqueue(entry);
+        while (queue.Count > 0)
+        {
+            ulong s = queue.Dequeue();
+            int next = rank[s] + 1;
+            foreach (var e in _byStart[s].Out)
+            {
+                if (!_byStart.ContainsKey(e.ToBlockStart)) continue;
+                if (rank.TryAdd(e.ToBlockStart, next)) queue.Enqueue(e.ToBlockStart);
+            }
+        }
+        int fallback = 0;
+        foreach (var b in _blocks) if (!rank.ContainsKey(b.Start)) rank[b.Start] = ++fallback + 100;
+
+        // Group by rank, lay rows top-to-bottom, centre each row.
+        var byRank = _blocks.GroupBy(b => rank[b.Start]).OrderBy(g => g.Key).ToList();
+        const double hGap = 36, vGap = 44;
+        double y = 20;
+        double maxRowWidth = byRank.Select(g => g.Sum(b => b.Width) + (g.Count() - 1) * hGap).DefaultIfEmpty(0).Max();
+        foreach (var grp in byRank)
+        {
+            var row = grp.OrderBy(b => b.Start).ToList();
+            double rowWidth = row.Sum(b => b.Width) + (row.Count - 1) * hGap;
+            double x = 20 + (maxRowWidth - rowWidth) / 2;
+            double rowHeight = row.Max(b => b.Height);
+            foreach (var b in row) { b.X = x; b.Y = y; x += b.Width + hGap; }
+            y += rowHeight + vGap;
+        }
+    }
+
+    private void FitToView()
+    {
+        if (_blocks.Count == 0 || ActualWidth <= 0) { _scale = 1; _offset = default; return; }
+        double minX = _blocks.Min(b => b.X), minY = _blocks.Min(b => b.Y);
+        double maxX = _blocks.Max(b => b.X + b.Width), maxY = _blocks.Max(b => b.Y + b.Height);
+        double gw = maxX - minX + 40, gh = maxY - minY + 40;
+        _scale = Math.Min(1.5, Math.Min(ActualWidth / gw, ActualHeight / gh));
+        if (_scale <= 0 || double.IsInfinity(_scale)) _scale = 1;
+        _offset = new Vector((ActualWidth - gw * _scale) / 2 - minX * _scale + 20 * _scale,
+                             20 - minY * _scale);
+    }
+
+    // ---- rendering ----
+    protected override void OnRender(DrawingContext dc)
+    {
+        dc.DrawRectangle(SyntaxTheme.Background, null, new Rect(0, 0, ActualWidth, ActualHeight));
+        if (_blocks.Count == 0) return;
+
+        double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        dc.PushTransform(new TranslateTransform(_offset.X, _offset.Y));
+        dc.PushTransform(new ScaleTransform(_scale, _scale));
+
+        DrawEdges(dc);
+        foreach (var b in _blocks) DrawBlock(dc, b, dpi);
+
+        dc.Pop();
+        dc.Pop();
+    }
+
+    private void DrawEdges(DrawingContext dc)
+    {
+        foreach (var b in _blocks)
+        {
+            double sx = b.X + b.Width / 2, sy = b.Y + b.Height;
+            foreach (var e in b.Out)
+            {
+                if (!_byStart.TryGetValue(e.ToBlockStart, out var t)) continue;
+                double tx = t.X + t.Width / 2, ty = t.Y;
+                var brush = e.Kind switch
+                {
+                    EdgeKind.Taken => SyntaxTheme.EdgeTaken,
+                    EdgeKind.Jump => SyntaxTheme.EdgeJump,
+                    _ => SyntaxTheme.EdgeFall,
+                };
+                var pen = new Pen(brush, 1.4);
+                double midY = ty > sy ? (sy + ty) / 2 : sy + 24;
+                var fig = new PathFigure { StartPoint = new Point(sx, sy) };
+                fig.Segments.Add(new LineSegment(new Point(sx, midY), true));
+                fig.Segments.Add(new LineSegment(new Point(tx, midY), true));
+                fig.Segments.Add(new LineSegment(new Point(tx, ty), true));
+                var geo = new PathGeometry();
+                geo.Figures.Add(fig);
+                dc.DrawGeometry(null, pen, geo);
+                // Arrowhead into the target.
+                dc.DrawLine(pen, new Point(tx, ty), new Point(tx - 4, ty - 6));
+                dc.DrawLine(pen, new Point(tx, ty), new Point(tx + 4, ty - 6));
+            }
+        }
+    }
+
+    private void DrawBlock(DrawingContext dc, BasicBlock b, double dpi)
+    {
+        var rect = new Rect(b.X, b.Y, b.Width, b.Height);
+        dc.DrawRoundedRectangle(SyntaxTheme.BlockBg, new Pen(SyntaxTheme.BlockBorder, 1), rect, 5, 5);
+        dc.DrawRoundedRectangle(SyntaxTheme.BlockHeader, null, new Rect(b.X, b.Y, b.Width, HeaderH), 5, 5);
+
+        string header = _result?.NameFor(b.Start) ?? $"loc_{b.Start:X}";
+        DrawText(dc, header, b.X + Pad, b.Y + 1, SyntaxTheme.FuncName, dpi);
+
+        double y = b.Y + HeaderH + 1;
+        foreach (var line in _lines[b.Start])
+        {
+            double x = b.X + Pad;
+            // Address prefix.
+            int split = line.Text.IndexOf("  ", StringComparison.Ordinal);
+            string addr = split > 0 ? line.Text[..split] : "";
+            x = DrawText(dc, addr + "  ", x, y, SyntaxTheme.Address, dpi);
+            foreach (var tok in line.Tokens)
+                x = DrawText(dc, tok.Text, x, y, SyntaxTheme.BrushFor(tok.Kind), dpi);
+            y += _rowHeight;
+        }
+    }
+
+    private double DrawText(DrawingContext dc, string text, double x, double y, Brush brush, double dpi)
+    {
+        var ft = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+            _typeface, FontSize, brush, dpi);
+        dc.DrawText(ft, new Point(x, y));
+        return x + ft.WidthIncludingTrailingWhitespace;
+    }
+
+    // ---- interaction ----
+    private Point ToGraph(Point screen) => new((screen.X - _offset.X) / _scale, (screen.Y - _offset.Y) / _scale);
+
+    protected override void OnMouseWheel(MouseWheelEventArgs e)
+    {
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            var before = ToGraph(e.GetPosition(this));
+            _scale = Math.Clamp(_scale * (e.Delta > 0 ? 1.1 : 1 / 1.1), 0.15, 4.0);
+            var after = ToGraph(e.GetPosition(this));
+            _offset += (after - before) * _scale;
+        }
+        else
+        {
+            _offset -= new Vector(0, Math.Sign(e.Delta) * 60);
+        }
+        InvalidateVisual();
+        e.Handled = true;
+    }
+
+    protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
+    {
+        Focus();
+        _lastDrag = e.GetPosition(this);
+        _dragging = true;
+        CaptureMouse();
+
+        var g = ToGraph(_lastDrag);
+        foreach (var b in _blocks)
+            if (g.X >= b.X && g.X <= b.X + b.Width && g.Y >= b.Y && g.Y <= b.Y + b.Height)
+            { BlockSelected?.Invoke(b.Start); break; }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        if (!_dragging) return;
+        var p = e.GetPosition(this);
+        _offset += p - _lastDrag;
+        _lastDrag = p;
+        InvalidateVisual();
+    }
+
+    protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
+    {
+        if (_dragging) { _dragging = false; ReleaseMouseCapture(); }
+    }
+
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        MeasureFont();
+        if (_result is not null && _function is not null) { BuildLines(_result); Layout(); }
+        InvalidateVisual();
+    }
+}

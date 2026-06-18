@@ -1,0 +1,36 @@
+namespace DisasmStudio.Core.Analysis;
+
+/// <summary>How control reaches one block from another.</summary>
+public enum EdgeKind { FallThrough, Taken, Jump }
+
+/// <summary>An edge in a function's control-flow graph, identified by target block start VA.</summary>
+public readonly record struct CfgEdge(ulong ToBlockStart, EdgeKind Kind);
+
+/// <summary>A straight-line run of instructions ending at a branch/return (or the next leader).</summary>
+public sealed class BasicBlock
+{
+    public required ulong Start { get; init; }
+    public ulong End { get; set; }                 // exclusive
+    public List<ulong> InstrVas { get; } = [];
+    public List<CfgEdge> Out { get; } = [];
+
+    // Layout fields filled by the graph view (kept here so layout is computed once).
+    public double X, Y, Width, Height;
+}
+
+/// <summary>
+/// A discovered function. Its control-flow blocks are built lazily on first request (graph open),
+/// so listing thousands of functions stays instant — only the one being viewed pays for its CFG.
+/// </summary>
+public sealed class Function
+{
+    public required ulong Va { get; init; }
+    public required string Name { get; set; }
+    private List<BasicBlock>? _blocks;
+
+    public bool BlocksBuilt => _blocks is not null;
+    public IReadOnlyList<BasicBlock> Blocks => _blocks ?? [];
+    internal void SetBlocks(List<BasicBlock> b) => _blocks = b;
+
+    public override string ToString() => $"{Name} @ {Va:X}";
+}

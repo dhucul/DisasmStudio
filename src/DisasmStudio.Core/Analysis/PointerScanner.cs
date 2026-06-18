@@ -1,0 +1,38 @@
+using DisasmStudio.Core.Formats;
+
+namespace DisasmStudio.Core.Analysis;
+
+/// <summary>
+/// Builds, once during analysis, a map from a string VA to a data slot that points at it — i.e. a
+/// <c>const char* table[]</c> entry. Lets the UI resolve strings that code reaches only through a
+/// pointer (no direct reference to the string itself): cross-references to that slot then reveal the
+/// code that loads it. Runs on the analysis (background) thread so the per-click lookup is O(1) and
+/// never touches the disk-backed mapping on the UI thread.
+/// </summary>
+public static class PointerScanner
+{
+    public static Dictionary<ulong, ulong> BuildStringPointerMap(
+        IBinaryImage img, IReadOnlySet<ulong> stringStarts, long maxBytes = 64 * 1024 * 1024,
+        CancellationToken token = default)
+    {
+        var map = new Dictionary<ulong, ulong>();
+        if (stringStarts.Count == 0) return map;
+
+        int ptr = img.Bitness / 8; // 4 or 8
+        long scanned = 0;
+        foreach (var s in img.Sections)
+        {
+            if (!s.IsReadable || s.IsExecutable || s.FileSize <= 0) continue;
+            var buf = img.ReadBytesAtVa(s.StartVa, s.FileSize);
+            for (int i = 0; i + ptr <= buf.Length; i += ptr) // pointers are aligned
+            {
+                if ((i & 0xFFFFF) == 0 && token.IsCancellationRequested) return map;
+                ulong val = ptr == 8 ? BitConverter.ToUInt64(buf, i) : BitConverter.ToUInt32(buf, i);
+                if (stringStarts.Contains(val)) map.TryAdd(val, s.StartVa + (ulong)i);
+            }
+            scanned += buf.Length;
+            if (scanned >= maxBytes) break;
+        }
+        return map;
+    }
+}
