@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private AnalysisResult? _result;
     private CancellationTokenSource? _cts;
     private ulong[] _funcStarts = [];
+    private string? _projectPath;
 
     private ObservableCollection<FunctionItem> _functions = [];
     private ObservableCollection<StringItem> _strings = [];
@@ -64,8 +65,75 @@ public partial class MainWindow : Window
         await LoadFile(dlg.FileName);
     }
 
+    private async void OnOpenProject(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog { Title = "Open project", Filter = "DisasmStudio project|*.dsproj|All files|*.*" };
+        if (dlg.ShowDialog(this) != true) return;
+
+        ProjectFile proj;
+        try { proj = ProjectFile.Load(dlg.FileName); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+
+        IBinaryImage image;
+        try
+        {
+            image = proj.Format == "Raw"
+                ? RawImage.Load(proj.BinaryPath, proj.RawBaseVa, proj.RawBitness)
+                : BinaryLoader.Load(proj.BinaryPath);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Couldn't load the binary referenced by this project:\n{proj.BinaryPath}\n\n{ex.Message}",
+                "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        _projectPath = dlg.FileName;
+        await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab);
+        Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(image.FilePath)})";
+    }
+
+    private void OnSaveProject(object sender, RoutedEventArgs e)
+    {
+        if (_image is null)
+        {
+            MessageBox.Show(this, "Open a binary first.", "Save project", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        string? path = _projectPath;
+        if (path is null)
+        {
+            var dlg = new SaveFileDialog
+            {
+                Title = "Save project",
+                Filter = "DisasmStudio project|*.dsproj",
+                FileName = Path.GetFileNameWithoutExtension(_image.FilePath) + ".dsproj",
+            };
+            if (dlg.ShowDialog(this) != true) return;
+            path = dlg.FileName;
+        }
+
+        var proj = new ProjectFile
+        {
+            BinaryPath = _image.FilePath,
+            Format = _image.FormatName,
+            RawBaseVa = _image.Format == BinaryFormat.Raw ? _image.ImageBase : 0,
+            RawBitness = _image.Format == BinaryFormat.Raw ? _image.Bitness : 0,
+            CurrentVa = _nav.Current ?? _image.EntryVa,
+            CenterTab = CenterTabs.SelectedIndex,
+        };
+        try { proj.Save(path); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+
+        _projectPath = path;
+        Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(_image.FilePath)})";
+        StatusText.Text = $"Saved project to {path}";
+    }
+
     private async Task LoadFile(string path)
     {
+        _projectPath = null; // opening a binary directly starts an unsaved session
         IBinaryImage image;
         try
         {
@@ -86,7 +154,7 @@ public partial class MainWindow : Window
         await StartAnalysis(image);
     }
 
-    private async Task StartAnalysis(IBinaryImage image)
+    private async Task StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0)
     {
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
@@ -115,8 +183,9 @@ public partial class MainWindow : Window
             Hex.SetImage(image);
             _funcStarts = result.Functions.Select(f => f.Va).ToArray();
 
-            ulong target = image.EntryVa != 0 ? image.EntryVa
-                : result.Functions.Count > 0 ? result.Functions[0].Va : image.MinVa;
+            ulong target = initialVa ?? (image.EntryVa != 0 ? image.EntryVa
+                : result.Functions.Count > 0 ? result.Functions[0].Va : image.MinVa);
+            if (initialTab is >= 0 and <= 2) CenterTabs.SelectedIndex = initialTab;
             _nav.Navigate(target);
         }
         catch (OperationCanceledException) { }

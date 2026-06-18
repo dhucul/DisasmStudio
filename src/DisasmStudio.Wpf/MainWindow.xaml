@@ -10,6 +10,8 @@
                 BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1" Padding="8,6">
             <StackPanel Orientation="Horizontal">
                 <Button x:Name="OpenBtn" Content="Open…" Click="OnOpen" />
+                <Button Content="Open Project…" Click="OnOpenProject" Margin="6,0,0,0" />
+                <Button Content="Save Project…" Click="OnSaveProject" Margin="6,0,0,0" />
                 <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
                 <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" />
                 <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,0,0,0" />

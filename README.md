@@ -33,6 +33,9 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   `VirtualAlloc(…, flAllocationType=MEM_COMMIT, flProtect=PAGE_EXECUTE_READWRITE)`. Shown inline in
   both linear and graph views.
 - **Side panels:** Functions, Strings, Imports, Sections, and live Cross-references.
+- **Projects:** save the session as a `.dsproj` (binary reference, load options, and current view
+  state) via *Save Project…* and reopen it with *Open Project…* — it re-analyses on open (fast, always
+  consistent with the engine). The format is versioned to carry future user edits (renames, comments).
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
 - **High-DPI:** per-monitor-v2 aware; DPI-correct text and pixel-snapped lines that re-render sharply
