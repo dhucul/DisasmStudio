@@ -14,6 +14,7 @@ public sealed class PeImage : IBinaryImage
     private readonly List<NamedSymbol> _symbols = [];
     private readonly List<ImportEntry> _imports = [];
     private readonly Dictionary<ulong, ImportEntry> _importsByIat = [];
+    private readonly List<ulong> _runtimeFunctions = [];
 
     private readonly int _peHeader;
 
@@ -27,6 +28,7 @@ public sealed class PeImage : IBinaryImage
         _sections = ReadSections();
         ParseImports();
         ParseExports();
+        ParseExceptions();
         ImportsByIatVa = _importsByIat;
     }
 
@@ -43,6 +45,7 @@ public sealed class PeImage : IBinaryImage
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => _imports;
+    public IReadOnlyList<ulong> FunctionStarts => _runtimeFunctions;
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; }
     public int BackingLength => _f.Length;
 
@@ -273,6 +276,21 @@ public sealed class PeImage : IBinaryImage
             string name = _f.ReadAsciiZ(RvaToOffset(nameRva));
             if (name.Length == 0) name = $"export_{ordinalBase + ord}";
             _symbols.Add(new NamedSymbol(ImageBase + funcRva, name, NamedSymbolKind.Export));
+        }
+    }
+
+    // ---- exception directory (.pdata RUNTIME_FUNCTION table, x64) ----
+    private void ParseExceptions()
+    {
+        var (rva, size) = DataDir(3); // Exception
+        if (rva == 0 || size == 0) return;
+        int off = RvaToOffset(rva);
+        if (off < 0) return;
+        int count = (int)(size / 12); // sizeof(RUNTIME_FUNCTION) = 12 (BeginAddress, EndAddress, UnwindInfo)
+        for (int i = 0; i < count && i < 4_000_000; i++)
+        {
+            uint begin = _f.ReadU32(off + i * 12);
+            if (begin != 0) _runtimeFunctions.Add(ImageBase + begin);
         }
     }
 

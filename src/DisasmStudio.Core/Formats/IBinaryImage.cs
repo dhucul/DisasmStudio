@@ -25,6 +25,10 @@ public interface IBinaryImage
     IReadOnlyList<NamedSymbol> Symbols { get; }
     IReadOnlyList<ImportEntry> Imports { get; }
 
+    /// <summary>Function start VAs from format metadata (PE x64 .pdata RUNTIME_FUNCTIONs); empty otherwise.
+    /// The authoritative function list for x64 — used to seed code discovery and classification.</summary>
+    IReadOnlyList<ulong> FunctionStarts { get; }
+
     /// <summary>IAT slot VA → import, so an indirect <c>call [slot]</c> can be named.</summary>
     IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; }
 

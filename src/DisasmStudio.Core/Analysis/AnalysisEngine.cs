@@ -155,6 +155,15 @@ public static class AnalysisEngine
         foreach (var d in PointerScanner.CollectCodePointers(image, token: token)) if (ptrSeen.Add(d)) ptrTargets.Add(d);
         var code = CodeMap.Compute(image, CodeSeeds(image, ptrTargets), jumpTables, token);
 
+        // Gap scan: find function prologues in the unmarked .text gaps (chiefly indirectly-called
+        // functions — on a CET build these begin with endbr64) and descend from them. Name + list them.
+        progress?.Report("Scanning gaps for functions…");
+        foreach (var f in CodeMap.GapScan(image, code, jumpTables, token))
+        {
+            names.TryAdd(f, $"sub_{f:X}");
+            ptrTargets.Add(f);
+        }
+
         // Classified linear index: real instructions, with padding / jump tables / literals collapsed
         // into data lines instead of disassembled junk.
         progress?.Report("Classifying code vs data…");
@@ -189,6 +198,7 @@ public static class AnalysisEngine
         var names = new Dictionary<ulong, string>();
         foreach (var sym in image.Symbols) names[sym.Va] = sym.Name;      // imports, exports, ELF funcs
         if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) names.TryAdd(image.EntryVa, "start");
+        foreach (var f in image.FunctionStarts) names.TryAdd(f, $"sub_{f:X}");   // .pdata functions
         foreach (var t in callTargets) names.TryAdd(t, $"sub_{t:X}");
         foreach (var t in branchTargets) names.TryAdd(t, $"loc_{t:X}");
         return names;
@@ -198,6 +208,7 @@ public static class AnalysisEngine
     private static IEnumerable<ulong> CodeSeeds(IBinaryImage image, List<ulong> ptrTargets)
     {
         if (image.EntryVa != 0) yield return image.EntryVa;
+        foreach (var f in image.FunctionStarts) yield return f;   // PE x64 .pdata — authoritative function list
         foreach (var sym in image.Symbols)
             if (sym.Kind is NamedSymbolKind.Function or NamedSymbolKind.Export) yield return sym.Va;
         foreach (var d in ptrTargets) yield return d;   // code pointers stored in data (gap functions)
@@ -212,6 +223,7 @@ public static class AnalysisEngine
         foreach (var sym in image.Symbols)
             if (sym.Kind is NamedSymbolKind.Function or NamedSymbolKind.Export && image.IsExecutableVa(sym.Va))
                 seeds.Add(sym.Va);
+        foreach (var f in image.FunctionStarts) if (image.IsExecutableVa(f)) seeds.Add(f);
         foreach (var t in callTargets) seeds.Add(t);
         // Gap pass: a code pointer stored in data (callback / vtable entry) that the code map confirmed
         // is real code, and isn't merely a jump-table case, is an indirect-only function.

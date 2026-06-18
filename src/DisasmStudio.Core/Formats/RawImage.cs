@@ -19,6 +19,7 @@ public sealed class RawImage : IBinaryImage
     public IReadOnlyList<Section> Sections { get; }
     public IReadOnlyList<NamedSymbol> Symbols => [];
     public IReadOnlyList<ImportEntry> Imports => [];
+    public IReadOnlyList<ulong> FunctionStarts => [];
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; } = new Dictionary<ulong, ImportEntry>();
     public int BackingLength => _f.Length;
 

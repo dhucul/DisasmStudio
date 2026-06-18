@@ -12,8 +12,10 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
 - **Linear view:** a custom, virtualized listing that decodes and formats only the rows on screen,
   so it scrolls smoothly over multi-million-instruction images. Soft syntax colouring, named branch
   targets (`sub_`/`loc_`/imports/exports), inline string comments, and a branch-arrow gutter.
-- **Code/data classification:** a recursive-descent code map (from entry, exports, jump tables, and
-  code pointers found in data — vtables/callbacks) determines what's really code; everything else in
+- **Code/data classification:** a recursive-descent code map (from entry, exports, the PE x64 `.pdata`
+  function table, jump tables, and code pointers found in data — vtables/callbacks), plus a gap scan
+  that recognises function prologues (incl. `endbr64`) in the unreached `.text` gaps to recover
+  indirectly-called functions, determines what's really code; everything else in
   `.text` — int3 padding, jump tables, literals — renders as data (`db`/`dd`/`dq`/strings) instead of
   disassembled junk. Typically ~97% code, ~3% data. The same pass discovers indirect-only functions
   (e.g. COM vtable methods) that have no direct callers.

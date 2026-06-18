@@ -24,6 +24,7 @@ public sealed class ElfImage : IBinaryImage
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => [];
+    public IReadOnlyList<ulong> FunctionStarts => [];   // ELF function starts come from .symtab/.dynsym (Symbols)
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; } = new Dictionary<ulong, ImportEntry>();
     public int BackingLength => _f.Length;
 
