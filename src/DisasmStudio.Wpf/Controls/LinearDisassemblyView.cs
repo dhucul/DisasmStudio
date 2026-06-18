@@ -32,7 +32,9 @@ public sealed class LinearDisassemblyView : Grid
     private ulong[] _labelVa = [];
 
     private long _topDisplay;       // first visible display line
-    private long _caretInstr = -1;  // selected instruction index, or -1
+    private long _caretInstr = -1;  // caret instruction index, or -1
+    private long _selAnchor = -1;   // selection anchor; range = [min,max] of anchor & caret
+    private bool _dragging;
 
     private readonly Typeface _typeface =
         new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
@@ -69,6 +71,7 @@ public sealed class LinearDisassemblyView : Grid
     {
         _result = result;
         _caretInstr = -1;
+        _selAnchor = -1;
         _topDisplay = 0;
         if (result is null) { _dis = null; _fmt = null; _labelInstrLines = []; _labelVa = []; }
         else
@@ -88,6 +91,7 @@ public sealed class LinearDisassemblyView : Grid
         if (_result is null) return;
         long line = _result.Linear.IndexOf(va);
         _caretInstr = line;
+        _selAnchor = line;
         long disp = DisplayIndexOfInstr(line);
         long firstThird = Math.Max(0, VisibleRows / 3);
         _topDisplay = Math.Clamp(disp - firstThird, 0, Math.Max(0, DisplayCount - 1));
@@ -191,13 +195,22 @@ public sealed class LinearDisassemblyView : Grid
     private double BytesX => AddrX + (_addrDigits + 2) * _charWidth;
     private double DisasmX => BytesX + 25 * _charWidth;
 
-    private void MoveCaret(long newInstr)
+    private void MoveCaret(long newInstr, bool extend = false)
     {
         if (_result is null) return;
         _caretInstr = Math.Clamp(newInstr, 0, _result.Linear.Count - 1);
+        if (!extend || _selAnchor < 0) _selAnchor = _caretInstr;   // collapse selection unless extending
         EnsureCaretVisible();
         _surface.InvalidateVisual();
         SelectionChanged?.Invoke(_result.Linear.VaAt(_caretInstr));
+    }
+
+    /// <summary>Selected instruction-line range [Lo, Hi], or (-1,-1) when nothing is selected.</summary>
+    private (long Lo, long Hi) SelRange()
+    {
+        if (_caretInstr < 0) return (-1, -1);
+        long a = _selAnchor < 0 ? _caretInstr : _selAnchor;
+        return (Math.Min(a, _caretInstr), Math.Max(a, _caretInstr));
     }
 
     private void EnsureCaretVisible()
@@ -222,15 +235,62 @@ public sealed class LinearDisassemblyView : Grid
     private ulong CaretVa => _result is not null && _caretInstr >= 0 ? _result.Linear.VaAt(_caretInstr) : 0;
 
     // ---- hit testing ----
-    private void OnClick(Point p)
+    private void OnClick(Point p, bool extend = false)
     {
         if (_result is null) return;
-        long display = _topDisplay + (long)(p.Y / _rowHeight);
-        if (display >= DisplayCount) return;
+        long display = Math.Clamp(_topDisplay + (long)(p.Y / _rowHeight), 0, Math.Max(0, DisplayCount - 1));
         var (_, instrLine) = ContentAt(display);
         _caretInstr = instrLine;
+        if (!extend || _selAnchor < 0) _selAnchor = instrLine;   // shift-click extends; plain click collapses
         _surface.InvalidateVisual();
         SelectionChanged?.Invoke(_result.Linear.VaAt(instrLine));
+    }
+
+    /// <summary>Extend the selection to the line under the cursor (drag), auto-scrolling at the edges.</summary>
+    private void DragTo(Point p)
+    {
+        if (_result is null) return;
+        if (p.Y < 0) ScrollByLines(-1);
+        else if (p.Y >= _surface.ActualHeight) ScrollByLines(1);
+        double cy = Math.Clamp(p.Y, 0, Math.Max(0, _surface.ActualHeight - 1));
+        OnClick(new Point(p.X, cy), extend: true);
+    }
+
+    private void SelectAll()
+    {
+        if (_result is null || _result.Linear.Count == 0) return;
+        _selAnchor = 0;
+        _caretInstr = _result.Linear.Count - 1;
+        _surface.InvalidateVisual();
+    }
+
+    /// <summary>Copy the selected lines (address + disassembly / data + comment) to the clipboard, as text.</summary>
+    private void CopySelection()
+    {
+        if (_result is null || _dis is null || _fmt is null) return;
+        var (lo, hi) = SelRange();
+        if (lo < 0) return;
+        long cap = Math.Min(hi, lo + 200_000);   // bound a runaway select-all copy
+        var sb = new System.Text.StringBuilder();
+        for (long line = lo; line <= cap; line++) sb.AppendLine(LineToText(line));
+        try { Clipboard.SetText(sb.ToString()); } catch { /* clipboard busy */ }
+    }
+
+    private string LineToText(long line)
+    {
+        ulong va = _result!.Linear.VaAt(line);
+        string addr = va.ToString("X" + _addrDigits);
+        if (_result.Linear.IsDataAt(line))
+        {
+            long rawLen = line + 1 < _result.Linear.Count ? (long)(_result.Linear.VaAt(line + 1) - va) : 1;
+            var bytes = _result.Image.ReadBytesAtVa(va, (int)Math.Clamp(rawLen, 1, 256));
+            var (d, v, _) = ClassifyData(va, bytes);
+            return $"{addr}  {d}{v}";
+        }
+        if (!_dis!.TryDecodeAt(va, out var instr)) return $"{addr}  ??";
+        string text = _fmt!.FormatText(instr);
+        if (_result.Comments.TryGetValue(va, out var c)) text += "   ; " + c;
+        return $"{addr}  {text}";
     }
 
     // ---- rendering ----
@@ -242,7 +302,7 @@ public sealed class LinearDisassemblyView : Grid
 
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
         int rows = (int)(height / _rowHeight) + 1;
-        var snap = new GuidelineSet();
+        var (selLo, selHi) = SelRange();
 
         for (int r = 0; r < rows; r++)
         {
@@ -258,8 +318,7 @@ public sealed class LinearDisassemblyView : Grid
                 continue;
             }
 
-            bool isCaret = instrLine == _caretInstr;
-            if (isCaret)
+            if (selLo >= 0 && instrLine >= selLo && instrLine <= selHi)
                 dc.DrawRectangle(SyntaxTheme.Selection, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
 
             if (_result.Linear.IsDataAt(instrLine)) DrawData(dc, instrLine, va, y, dpi);
@@ -324,34 +383,27 @@ public sealed class LinearDisassemblyView : Grid
         if (bytes.Length > 8) hexCol.Append('+');
         Draw(dc, hexCol.ToString(), BytesX, y, SyntaxTheme.Bytes, dpi);
 
-        string directive, value;
-        var valueBrush = SyntaxTheme.Bytes;
-        if ((bytes.Length == 4 || bytes.Length == 8) &&
-            _result.Image.IsMappedVa(bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0)))
-        {
-            ulong v = bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
-            directive = bytes.Length == 8 ? "dq " : "dd ";
-            string? name = _result.NameFor(v);
-            value = name ?? $"0x{v:X}";
-            valueBrush = name is not null ? SyntaxTheme.Symbol : SyntaxTheme.Number;
-        }
-        else if (TryFormatString(bytes, out string str))
-        {
-            directive = "db ";
-            value = str;
-            valueBrush = SyntaxTheme.Symbol;
-        }
-        else
-        {
-            directive = "db ";
-            var sb = new System.Text.StringBuilder();
-            for (int i = 0; i < bytes.Length && i < 16; i++) { if (i > 0) sb.Append(", "); sb.Append("0x").Append(bytes[i].ToString("X2")); }
-            if (bytes.Length > 16) sb.Append(", …");
-            value = sb.ToString();
-        }
-
+        var (directive, value, valueBrush) = ClassifyData(va, bytes);
         double x = Draw(dc, directive, DisasmX, y, SyntaxTheme.Keyword, dpi);
         Draw(dc, value, x, y, valueBrush, dpi);
+    }
+
+    /// <summary>Decide how a data run renders: db "string" / dd|dq pointer (named if known) / db byte row.</summary>
+    private (string Directive, string Value, Brush Brush) ClassifyData(ulong va, byte[] bytes)
+    {
+        if ((bytes.Length == 4 || bytes.Length == 8) &&
+            _result!.Image.IsMappedVa(bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0)))
+        {
+            ulong v = bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
+            string? name = _result.NameFor(v);
+            return (bytes.Length == 8 ? "dq " : "dd ", name ?? $"0x{v:X}", name is not null ? SyntaxTheme.Symbol : SyntaxTheme.Number);
+        }
+        if (TryFormatString(bytes, out string str)) return ("db ", str, SyntaxTheme.Symbol);
+
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < bytes.Length && i < 16; i++) { if (i > 0) sb.Append(", "); sb.Append("0x").Append(bytes[i].ToString("X2")); }
+        if (bytes.Length > 16) sb.Append(", …");
+        return ("db ", sb.ToString(), SyntaxTheme.Bytes);
     }
 
     private static bool TryFormatString(byte[] b, out string text)
@@ -428,12 +480,19 @@ public sealed class LinearDisassemblyView : Grid
     private void BuildContextMenu()
     {
         var menu = new ContextMenu();
+        var copy = new MenuItem { Header = "Copy", InputGestureText = "Ctrl+C" };
+        copy.Click += (_, _) => CopySelection();
+        var selectAll = new MenuItem { Header = "Select all", InputGestureText = "Ctrl+A" };
+        selectAll.Click += (_, _) => SelectAll();
         var xref = new MenuItem { Header = "Show xrefs to this address" };
         xref.Click += (_, _) => { if (CaretVa != 0) ShowXrefsRequested?.Invoke(CaretVa); };
         var graph = new MenuItem { Header = "Open function in graph" };
         graph.Click += (_, _) => { if (CaretVa != 0) OpenInGraphRequested?.Invoke(CaretVa); };
         var follow = new MenuItem { Header = "Follow target", InputGestureText = "Enter" };
         follow.Click += (_, _) => FollowCaret();
+        menu.Items.Add(copy);
+        menu.Items.Add(selectAll);
+        menu.Items.Add(new Separator());
         menu.Items.Add(follow);
         menu.Items.Add(xref);
         menu.Items.Add(graph);
@@ -453,30 +512,50 @@ public sealed class LinearDisassemblyView : Grid
         protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
         {
             Focus();
-            _owner.OnClick(e.GetPosition(this));
+            _owner.OnClick(e.GetPosition(this), extend: (Keyboard.Modifiers & ModifierKeys.Shift) != 0);
             if (e.ClickCount == 2) _owner.FollowCaret();
+            else { _owner._dragging = true; CaptureMouse(); }
             e.Handled = true;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (_owner._dragging && e.LeftButton == MouseButtonState.Pressed)
+                _owner.DragTo(e.GetPosition(this));
+        }
+
+        protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
+        {
+            if (_owner._dragging) { _owner._dragging = false; ReleaseMouseCapture(); }
         }
 
         protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
         {
             Focus();
-            _owner.OnClick(e.GetPosition(this));
+            // Don't collapse an existing multi-line selection when right-clicking inside it.
+            var (lo, hi) = _owner.SelRange();
+            long line = _owner._topDisplay + (long)(e.GetPosition(this).Y / _owner._rowHeight);
+            var (_, instr) = _owner.ContentAt(Math.Clamp(line, 0, Math.Max(0, _owner.DisplayCount - 1)));
+            if (!(lo >= 0 && instr >= lo && instr <= hi)) _owner.OnClick(e.GetPosition(this));
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (_owner._result is null) return;
+            bool ext = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+            bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
             switch (e.Key)
             {
-                case Key.Down: _owner.MoveCaret(_owner._caretInstr + 1); break;
-                case Key.Up: _owner.MoveCaret(_owner._caretInstr - 1); break;
-                case Key.PageDown: _owner.MoveCaret(_owner._caretInstr + _owner.VisibleRows); break;
-                case Key.PageUp: _owner.MoveCaret(_owner._caretInstr - _owner.VisibleRows); break;
-                case Key.Home: _owner.MoveCaret(0); break;
-                case Key.End: _owner.MoveCaret(_owner._result.Linear.Count - 1); break;
+                case Key.Down: _owner.MoveCaret(_owner._caretInstr + 1, ext); break;
+                case Key.Up: _owner.MoveCaret(_owner._caretInstr - 1, ext); break;
+                case Key.PageDown: _owner.MoveCaret(_owner._caretInstr + _owner.VisibleRows, ext); break;
+                case Key.PageUp: _owner.MoveCaret(_owner._caretInstr - _owner.VisibleRows, ext); break;
+                case Key.Home: _owner.MoveCaret(0, ext); break;
+                case Key.End: _owner.MoveCaret(_owner._result.Linear.Count - 1, ext); break;
                 case Key.Enter: _owner.FollowCaret(); break;
-                case Key.G when (Keyboard.Modifiers & ModifierKeys.Control) != 0: _owner.GoToRequested?.Invoke(); break;
+                case Key.C when ctrl: _owner.CopySelection(); break;
+                case Key.A when ctrl: _owner.SelectAll(); break;
+                case Key.G when ctrl: _owner.GoToRequested?.Invoke(); break;
                 default: return;
             }
             e.Handled = true;
