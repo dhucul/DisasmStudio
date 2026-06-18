@@ -35,4 +35,33 @@ public static class PointerScanner
         }
         return map;
     }
+
+    /// <summary>
+    /// Collect aligned pointer-sized values in the data sections that point into executable memory —
+    /// code pointers (vtable entries, callback tables, jump tables). Used to seed the code map so
+    /// methods reachable only through a vtable aren't mis-classified as data. On 64-bit the executable
+    /// range is tiny relative to 2^64, so a data value landing in it is almost always a real pointer.
+    /// </summary>
+    public static List<ulong> CollectCodePointers(IBinaryImage img, long maxBytes = 64 * 1024 * 1024,
+        CancellationToken token = default)
+    {
+        var result = new List<ulong>();
+        var seen = new HashSet<ulong>();
+        int ptr = img.Bitness / 8;
+        long scanned = 0;
+        foreach (var s in img.Sections)
+        {
+            if (!s.IsReadable || s.IsExecutable || s.FileSize <= 0) continue;
+            var buf = img.ReadBytesAtVa(s.StartVa, s.FileSize);
+            for (int i = 0; i + ptr <= buf.Length; i += ptr)
+            {
+                if ((i & 0xFFFFF) == 0 && token.IsCancellationRequested) return result;
+                ulong v = ptr == 8 ? BitConverter.ToUInt64(buf, i) : BitConverter.ToUInt32(buf, i);
+                if (img.IsExecutableVa(v) && seen.Add(v)) result.Add(v);
+            }
+            scanned += buf.Length;
+            if (scanned >= maxBytes) break;
+        }
+        return result;
+    }
 }

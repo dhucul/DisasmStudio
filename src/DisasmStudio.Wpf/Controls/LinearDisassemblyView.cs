@@ -212,6 +212,7 @@ public sealed class LinearDisassemblyView : Grid
     private void FollowCaret()
     {
         if (_result is null || _dis is null || _caretInstr < 0) return;
+        if (_result.Linear.IsDataAt(_caretInstr)) return;   // data line — nothing to follow
         ulong va = _result.Linear.VaAt(_caretInstr);
         if (!_dis.TryDecodeAt(va, out var instr)) return;
         if (FlowAnalysis.DirectBranchTarget(instr) is ulong t && _result.Image.IsMappedVa(t))
@@ -261,7 +262,8 @@ public sealed class LinearDisassemblyView : Grid
             if (isCaret)
                 dc.DrawRectangle(SyntaxTheme.Selection, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
 
-            DrawInstruction(dc, va, y, dpi);
+            if (_result.Linear.IsDataAt(instrLine)) DrawData(dc, instrLine, va, y, dpi);
+            else DrawInstruction(dc, va, y, dpi);
         }
 
         DrawBranchArrows(dc, rows);
@@ -306,6 +308,83 @@ public sealed class LinearDisassemblyView : Grid
             Draw(dc, "   ; " + comment, x + _charWidth, y, SyntaxTheme.Comment, dpi);
     }
 
+    // A data run (padding / jump table / literal) classified out of the code: render as a string,
+    // an aligned pointer (dd/dq, named if known), or a db byte row.
+    private void DrawData(DrawingContext dc, long line, ulong va, double y, double dpi)
+    {
+        Draw(dc, va.ToString("X" + _addrDigits), AddrX, y, SyntaxTheme.Address, dpi);
+
+        long rawLen = line + 1 < _result!.Linear.Count ? (long)(_result.Linear.VaAt(line + 1) - va) : 1;
+        int len = (int)Math.Clamp(rawLen, 1, 256);
+        var bytes = _result.Image.ReadBytesAtVa(va, len);
+        if (bytes.Length == 0) { Draw(dc, "??", DisasmX, y, SyntaxTheme.Comment, dpi); return; }
+
+        var hexCol = new System.Text.StringBuilder();
+        for (int i = 0; i < bytes.Length && i < 8; i++) hexCol.Append(bytes[i].ToString("x2")).Append(' ');
+        if (bytes.Length > 8) hexCol.Append('+');
+        Draw(dc, hexCol.ToString(), BytesX, y, SyntaxTheme.Bytes, dpi);
+
+        string directive, value;
+        var valueBrush = SyntaxTheme.Bytes;
+        if ((bytes.Length == 4 || bytes.Length == 8) &&
+            _result.Image.IsMappedVa(bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0)))
+        {
+            ulong v = bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
+            directive = bytes.Length == 8 ? "dq " : "dd ";
+            string? name = _result.NameFor(v);
+            value = name ?? $"0x{v:X}";
+            valueBrush = name is not null ? SyntaxTheme.Symbol : SyntaxTheme.Number;
+        }
+        else if (TryFormatString(bytes, out string str))
+        {
+            directive = "db ";
+            value = str;
+            valueBrush = SyntaxTheme.Symbol;
+        }
+        else
+        {
+            directive = "db ";
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < bytes.Length && i < 16; i++) { if (i > 0) sb.Append(", "); sb.Append("0x").Append(bytes[i].ToString("X2")); }
+            if (bytes.Length > 16) sb.Append(", …");
+            value = sb.ToString();
+        }
+
+        double x = Draw(dc, directive, DisasmX, y, SyntaxTheme.Keyword, dpi);
+        Draw(dc, value, x, y, valueBrush, dpi);
+    }
+
+    private static bool TryFormatString(byte[] b, out string text)
+    {
+        text = "";
+        bool ascii = b.Length >= 3;
+        for (int i = 0; ascii && i < b.Length; i++)
+            if (b[i] is not (>= 0x20 and < 0x7F or 0x09) && !(b[i] == 0 && i == b.Length - 1)) ascii = false;
+        if (ascii) { text = Quote(b, wide: false); return true; }
+
+        if (b.Length >= 6 && b.Length % 2 == 0)
+        {
+            bool wide = true;
+            for (int i = 0; wide && i < b.Length; i += 2)
+                if (b[i + 1] != 0 || b[i] is not (>= 0x20 and < 0x7F or 0x09 or 0)) wide = false;
+            if (wide) { text = Quote(b, wide: true); return true; }
+        }
+        return false;
+    }
+
+    private static string Quote(byte[] b, bool wide)
+    {
+        var sb = new System.Text.StringBuilder(wide ? "L\"" : "\"");
+        for (int i = 0; i < b.Length; i += wide ? 2 : 1)
+        {
+            byte c = b[i];
+            if (c == 0) break;
+            sb.Append(c is >= 0x20 and < 0x7F ? (char)c : '.');
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
     private void DrawBranchArrows(DrawingContext dc, int rows)
     {
         if (_result is null || _dis is null) return;
@@ -317,7 +396,7 @@ public sealed class LinearDisassemblyView : Grid
             long display = _topDisplay + r;
             if (display >= DisplayCount) break;
             var (isLabel, instrLine) = ContentAt(display);
-            if (isLabel) continue;
+            if (isLabel || _result.Linear.IsDataAt(instrLine)) continue;
             ulong va = _result.Linear.VaAt(instrLine);
             if (!_dis.TryDecodeAt(va, out var instr)) continue;
             if (FlowAnalysis.DirectBranchTarget(instr) is not ulong target) continue;

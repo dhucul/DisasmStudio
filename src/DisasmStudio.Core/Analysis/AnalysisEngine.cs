@@ -24,7 +24,7 @@ public static class AnalysisEngine
         var warnings = new List<string>();
 
         progress?.Report("Disassembling (linear sweep)…");
-        var linear = new LinearIndex();
+        var sweepIndex = new LinearIndex();   // full instruction stream — used for backtracking analyses
         var xrefs = new XrefDatabase();
         var callTargets = new HashSet<ulong>();
         var branchTargets = new HashSet<ulong>();
@@ -48,15 +48,15 @@ public static class AnalysisEngine
 
             while (va < end)
             {
-                if ((linear.Count & 0x3FFFF) == 0 && token.IsCancellationRequested)
+                if ((sweepIndex.Count & 0x3FFFF) == 0 && token.IsCancellationRequested)
                 {
                     warnings.Add("Analysis cancelled — partial result.");
                     goto done;
                 }
-                if (linear.Count >= MaxInstructions) { capped = true; goto done; }
+                if (sweepIndex.Count >= MaxInstructions) { capped = true; goto done; }
 
                 if (!dis.TryDecodeAt(va, out var instr)) { va++; continue; }
-                linear.Add(va);
+                sweepIndex.Add(va);
                 ulong ip = instr.IP;
 
                 if (FlowAnalysis.IsDirectCall(instr))
@@ -109,7 +109,7 @@ public static class AnalysisEngine
         foreach (var jva in indirectJmps)
         {
             if (token.IsCancellationRequested) break;
-            if (!JumpTableRecovery.TryRecover(image, linear, dis, jva, out var tgts)) continue;
+            if (!JumpTableRecovery.TryRecover(image, sweepIndex, dis, jva, out var tgts)) continue;
             jumpTables[jva] = tgts;
             comments[jva] = $"switch ({tgts.Length} cases)";
             foreach (var t in tgts) { xrefs.Add(jva, t, XrefKind.Jump); branchTargets.Add(t); }
@@ -143,12 +143,29 @@ public static class AnalysisEngine
                 if (x.Kind == XrefKind.Call) apiCalls.Add((x.From, name));
         var stringByVa = new Dictionary<ulong, FoundString>(strings.Count);
         foreach (var s in strings) stringByVa.TryAdd(s.Va, s);
-        ApiAnnotator.Annotate(image, linear, apiCalls, names, stringByVa, comments);
+        ApiAnnotator.Annotate(image, sweepIndex, apiCalls, names, stringByVa, comments);
+
+        // Recursive-descent code map from legitimate roots (entry, exports/symbols, and code pointers
+        // referenced from data). Whatever it leaves unmarked inside .text is data.
+        progress?.Report("Mapping reachable code…");
+        var ptrTargets = new List<ulong>();
+        var ptrSeen = new HashSet<ulong>();
+        foreach (var d in dataTargets) if (image.IsExecutableVa(d) && ptrSeen.Add(d)) ptrTargets.Add(d);
+        // Code pointers living in data (vtables, callback/jump tables) — reach methods no instruction names.
+        foreach (var d in PointerScanner.CollectCodePointers(image, token: token)) if (ptrSeen.Add(d)) ptrTargets.Add(d);
+        var code = CodeMap.Compute(image, CodeSeeds(image, ptrTargets), jumpTables, token);
+
+        // Classified linear index: real instructions, with padding / jump tables / literals collapsed
+        // into data lines instead of disassembled junk.
+        progress?.Report("Classifying code vs data…");
+        var linear = BuildClassifiedIndex(image, code, stringByVa, token);
 
         progress?.Report("Identifying functions…");
-        var (functions, byVa) = BuildFunctions(image, names, callTargets);
+        var jumpTargets = new HashSet<ulong>();
+        foreach (var ts in jumpTables.Values) foreach (var t in ts) jumpTargets.Add(t);
+        var (functions, byVa) = BuildFunctions(image, names, callTargets, ptrTargets, code, jumpTargets);
 
-        progress?.Report($"Done — {linear.Count:N0} instructions, {functions.Count:N0} functions, {strings.Count:N0} strings.");
+        progress?.Report($"Done — {functions.Count:N0} functions, {strings.Count:N0} strings, {jumpTables.Count:N0} switches.");
 
         return new AnalysisResult
         {
@@ -177,8 +194,18 @@ public static class AnalysisEngine
         return names;
     }
 
+    /// <summary>Legitimate roots for the recursive-descent code map.</summary>
+    private static IEnumerable<ulong> CodeSeeds(IBinaryImage image, List<ulong> ptrTargets)
+    {
+        if (image.EntryVa != 0) yield return image.EntryVa;
+        foreach (var sym in image.Symbols)
+            if (sym.Kind is NamedSymbolKind.Function or NamedSymbolKind.Export) yield return sym.Va;
+        foreach (var d in ptrTargets) yield return d;   // code pointers stored in data (gap functions)
+    }
+
     private static (List<Function>, Dictionary<ulong, Function>) BuildFunctions(IBinaryImage image,
-        IReadOnlyDictionary<ulong, string> names, HashSet<ulong> callTargets)
+        IReadOnlyDictionary<ulong, string> names, HashSet<ulong> callTargets,
+        List<ulong> ptrTargets, CodeBitmap code, HashSet<ulong> jumpTargets)
     {
         var seeds = new SortedSet<ulong>();
         if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) seeds.Add(image.EntryVa);
@@ -186,6 +213,10 @@ public static class AnalysisEngine
             if (sym.Kind is NamedSymbolKind.Function or NamedSymbolKind.Export && image.IsExecutableVa(sym.Va))
                 seeds.Add(sym.Va);
         foreach (var t in callTargets) seeds.Add(t);
+        // Gap pass: a code pointer stored in data (callback / vtable entry) that the code map confirmed
+        // is real code, and isn't merely a jump-table case, is an indirect-only function.
+        foreach (var d in ptrTargets)
+            if (code.IsCode(d) && !jumpTargets.Contains(d)) seeds.Add(d);
 
         var functions = new List<Function>(seeds.Count);
         var byVa = new Dictionary<ulong, Function>(seeds.Count);
@@ -196,6 +227,65 @@ public static class AnalysisEngine
             byVa[va] = fn;
         }
         return (functions, byVa);
+    }
+
+    /// <summary>
+    /// Walk the executable sections producing the display index: a code line per real instruction, and
+    /// data runs (referenced strings as one line; aligned pointers as dd/dq; otherwise db rows ≤16 B)
+    /// for everything the code map left unmarked. Each data run stops at the next code start.
+    /// </summary>
+    private static LinearIndex BuildClassifiedIndex(IBinaryImage image, CodeBitmap code,
+        IReadOnlyDictionary<ulong, FoundString> stringByVa, CancellationToken token)
+    {
+        var index = new LinearIndex();
+        var dis = new Disassembler(image);
+        foreach (var sec in image.Sections.Where(s => s.IsExecutable && s.FileSize > 0).OrderBy(s => s.StartVa))
+        {
+            ulong va = sec.StartVa;
+            ulong end = sec.StartVa + (sec.VirtualSize > 0 ? Math.Min(sec.VirtualSize, (ulong)sec.FileSize) : (ulong)sec.FileSize);
+            while (va < end)
+            {
+                if ((index.Count & 0x3FFFF) == 0 && token.IsCancellationRequested) return index;
+
+                if (code.IsCode(va))
+                {
+                    if (dis.TryDecodeAt(va, out var ins) && ins.Length > 0) { index.Add(va); va += (ulong)ins.Length; }
+                    else { index.Add(va, isData: true); va++; } // defensive — code map only marks decodable
+                    continue;
+                }
+
+                // Data gap [va, gapEnd): emit it as string / pointer / db-row lines.
+                ulong gapEnd = code.NextCode(va, end);
+                while (va < gapEnd)
+                {
+                    if (stringByVa.TryGetValue(va, out var fs))
+                    {
+                        ulong slen = (ulong)Math.Max(1, fs.Wide ? fs.Length * 2 : fs.Length);
+                        index.Add(va, isData: true);
+                        va += Math.Min(slen, gapEnd - va);
+                    }
+                    else
+                    {
+                        ulong rem = gapEnd - va;
+                        ulong chunk =
+                            va % 8 == 0 && rem >= 8 && IsPointer(image, va, 8) ? 8 :
+                            va % 4 == 0 && rem >= 4 && IsPointer(image, va, 4) ? 4 :
+                            Math.Min(16, rem);
+                        index.Add(va, isData: true);
+                        va += Math.Max(1, chunk);
+                    }
+                }
+            }
+        }
+        return index;
+    }
+
+    private static bool IsPointer(IBinaryImage image, ulong va, int size)
+    {
+        var b = image.ReadBytesAtVa(va, size);
+        if (b.Length < size) return false;
+        ulong v = size == 8 ? BitConverter.ToUInt64(b, 0) : BitConverter.ToUInt32(b, 0);
+        return image.IsMappedVa(v);
     }
 
     private static string Preview(FoundString fs)
