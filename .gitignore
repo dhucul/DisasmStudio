@@ -7,3 +7,6 @@ obj/
 artifacts/
 [Dd]ebug/
 [Rr]elease/
+
+## scratch / verification harnesses
+.smoke*/

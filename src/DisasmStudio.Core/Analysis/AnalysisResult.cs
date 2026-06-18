@@ -17,6 +17,9 @@ public sealed class AnalysisResult
     public required XrefDatabase Xrefs { get; init; }
     public required IReadOnlyList<FoundString> Strings { get; init; }
 
+    /// <summary>Indirect-jmp VA → recovered switch/jump-table case targets (so the CFG can follow them).</summary>
+    public required IReadOnlyDictionary<ulong, ulong[]> JumpTables { get; init; }
+
     /// <summary>String VA → a data slot pointing at it (a pointer-table entry), for resolving strings
     /// reached only through a pointer. Precomputed so a double-click never scans on the UI thread.</summary>
     public required IReadOnlyDictionary<ulong, ulong> StringPointerSlots { get; init; }

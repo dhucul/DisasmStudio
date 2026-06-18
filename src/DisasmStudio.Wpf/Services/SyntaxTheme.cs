@@ -44,6 +44,7 @@ public static class SyntaxTheme
     public static readonly Brush EdgeTaken = B(0x7F, 0xA8, 0x7B);    // soft green (branch taken)
     public static readonly Brush EdgeFall = B(0x79, 0x82, 0x8F);     // grey (fall-through)
     public static readonly Brush EdgeJump = B(0x6B, 0x8F, 0xD6);     // blue (unconditional)
+    public static readonly Brush EdgeSwitch = B(0xB4, 0x8E, 0xAD);   // soft violet (switch/jump-table case)
     public static readonly Brush BlockBg = B(0x16, 0x1B, 0x22);
     public static readonly Brush BlockBorder = B(0x3A, 0x44, 0x52);
     public static readonly Brush BlockHeader = B(0x1B, 0x22, 0x30);

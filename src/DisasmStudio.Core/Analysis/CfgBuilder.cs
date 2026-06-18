@@ -14,7 +14,7 @@ public static class CfgBuilder
 {
     private const int MaxInstructions = 200_000;
 
-    public static void Build(IBinaryImage image, Function fn)
+    public static void Build(IBinaryImage image, Function fn, IReadOnlyDictionary<ulong, ulong[]>? jumpTables = null)
     {
         if (fn.BlocksBuilt) return;
 
@@ -50,10 +50,15 @@ public static class CfgBuilder
                     { leaders.Add(t); work.Push(t); }
                     break; // no fall-through
                 }
+                case FlowControl.IndirectBranch:
+                    // A recovered jump table turns an indirect jmp into real, followable case targets.
+                    if (jumpTables is not null && jumpTables.TryGetValue(va, out var cases))
+                        foreach (var t in cases)
+                            if (image.IsExecutableVa(t)) { leaders.Add(t); work.Push(t); }
+                    break;
                 case FlowControl.Return:
                 case FlowControl.Interrupt:
                 case FlowControl.Exception:
-                case FlowControl.IndirectBranch:
                     break; // path ends here
                 default:
                     work.Push(fall); // Next / Call / IndirectCall — execution continues after
@@ -61,10 +66,11 @@ public static class CfgBuilder
             }
         }
 
-        fn.SetBlocks(SplitIntoBlocks(insns, leaders));
+        fn.SetBlocks(SplitIntoBlocks(insns, leaders, jumpTables));
     }
 
-    private static List<BasicBlock> SplitIntoBlocks(SortedDictionary<ulong, Instruction> insns, HashSet<ulong> leaders)
+    private static List<BasicBlock> SplitIntoBlocks(SortedDictionary<ulong, Instruction> insns, HashSet<ulong> leaders,
+        IReadOnlyDictionary<ulong, ulong[]>? jumpTables)
     {
         var blocks = new List<BasicBlock>();
         BasicBlock? cur = null;
@@ -85,7 +91,7 @@ public static class CfgBuilder
 
             if (FlowAnalysis.IsBlockTerminator(instr))
             {
-                AddTerminatorEdges(instr, va, insns, cur);
+                AddTerminatorEdges(instr, va, insns, cur, jumpTables);
                 terminated = true;
             }
         }
@@ -93,7 +99,7 @@ public static class CfgBuilder
     }
 
     private static void AddTerminatorEdges(in Instruction instr, ulong va,
-        SortedDictionary<ulong, Instruction> insns, BasicBlock block)
+        SortedDictionary<ulong, Instruction> insns, BasicBlock block, IReadOnlyDictionary<ulong, ulong[]>? jumpTables)
     {
         ulong fall = va + (ulong)instr.Length;
         switch (instr.FlowControl)
@@ -106,6 +112,11 @@ public static class CfgBuilder
             case FlowControl.UnconditionalBranch:
                 if (FlowAnalysis.DirectBranchTarget(instr) is ulong j && insns.ContainsKey(j))
                     block.Out.Add(new CfgEdge(j, EdgeKind.Jump));
+                break;
+            case FlowControl.IndirectBranch:
+                if (jumpTables is not null && jumpTables.TryGetValue(va, out var cases))
+                    foreach (var c in cases)
+                        if (insns.ContainsKey(c)) block.Out.Add(new CfgEdge(c, EdgeKind.Switch));
                 break;
         }
     }

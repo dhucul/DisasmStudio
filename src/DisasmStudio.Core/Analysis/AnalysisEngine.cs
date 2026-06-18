@@ -32,6 +32,9 @@ public static class AnalysisEngine
         var comments = new Dictionary<ulong, string>();
         var dis = new Disassembler(image);
         var dataRefs = new List<ulong>();
+        var apiCalls = new List<(ulong CallVa, string Import)>();   // call [iat] sites
+        var thunks = new Dictionary<ulong, string>();               // jmp [iat] thunk VA → import name
+        var indirectJmps = new List<ulong>();                       // candidate switch dispatchers
         bool capped = false;
 
         foreach (var sec in image.Sections)
@@ -76,11 +79,41 @@ public static class AnalysisEngine
                     dataTargets.Add(d);
                 }
 
+                // Recognise Windows API references: call/jmp through an IAT slot.
+                if ((instr.Mnemonic is Mnemonic.Call or Mnemonic.Jmp) && instr.Op0Kind == OpKind.Memory)
+                {
+                    ulong slot = instr.IsIPRelativeMemoryOperand ? instr.IPRelativeMemoryAddress
+                        : instr.MemoryBase == Register.None && instr.MemoryIndex == Register.None ? instr.MemoryDisplacement64 : 0;
+                    if (slot != 0 && image.ImportsByIatVa.TryGetValue(slot, out var imp))
+                    {
+                        if (instr.Mnemonic == Mnemonic.Call) apiCalls.Add((ip, imp.Name));
+                        else thunks[ip] = imp.Name; // jmp [iat] is an import thunk — its callers are the call sites
+                    }
+                }
+
+                // Collect indirect branches (both jmp reg and jmp [mem]) as switch-dispatch candidates —
+                // a separate check, not chained off the IAT block above, so memory-form jmps are included.
+                if (instr.FlowControl == FlowControl.IndirectBranch && indirectJmps.Count < 200_000)
+                    indirectJmps.Add(ip);
+
                 va += (ulong)instr.Length;
             }
         }
     done:
         if (capped) warnings.Add($"Instruction cap ({MaxInstructions:N0}) reached — linear view truncated.");
+
+        // Recover jump tables (compiled switches) so their case targets become followed, labelled CFG
+        // edges instead of dead-ending the control flow at the indirect jmp.
+        progress?.Report("Recovering jump tables…");
+        var jumpTables = new Dictionary<ulong, ulong[]>();
+        foreach (var jva in indirectJmps)
+        {
+            if (token.IsCancellationRequested) break;
+            if (!JumpTableRecovery.TryRecover(image, linear, dis, jva, out var tgts)) continue;
+            jumpTables[jva] = tgts;
+            comments[jva] = $"switch ({tgts.Length} cases)";
+            foreach (var t in tgts) { xrefs.Add(jva, t, XrefKind.Jump); branchTargets.Add(t); }
+        }
 
         // Scan strings now that data-reference targets are known, so executable sections (where some
         // builds keep read-only literals merged into .text) yield only the strings code points at.
@@ -102,6 +135,16 @@ public static class AnalysisEngine
         progress?.Report("Resolving symbols…");
         var names = BuildNames(image, callTargets, branchTargets);
 
+        // Annotate Windows API call sites (IDA/BN-style) with parameters + recovered argument values.
+        // Direct calls into jmp[iat] thunks resolve via the thunk's callers.
+        progress?.Report("Annotating API calls…");
+        foreach (var (thunkVa, name) in thunks)
+            foreach (var x in xrefs.To(thunkVa))
+                if (x.Kind == XrefKind.Call) apiCalls.Add((x.From, name));
+        var stringByVa = new Dictionary<ulong, FoundString>(strings.Count);
+        foreach (var s in strings) stringByVa.TryAdd(s.Va, s);
+        ApiAnnotator.Annotate(image, linear, apiCalls, names, stringByVa, comments);
+
         progress?.Report("Identifying functions…");
         var (functions, byVa) = BuildFunctions(image, names, callTargets);
 
@@ -115,6 +158,7 @@ public static class AnalysisEngine
             FunctionByVa = byVa,
             Xrefs = xrefs,
             Strings = strings,
+            JumpTables = jumpTables,
             StringPointerSlots = stringPointerSlots,
             Names = names,
             Comments = comments,

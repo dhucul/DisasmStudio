@@ -37,7 +37,7 @@ public sealed class GraphView : FrameworkElement
 
     public event Action<ulong>? BlockSelected;
 
-    private sealed record Line(string Text, AsmToken[] Tokens, double Width);
+    private sealed record Line(string Text, AsmToken[] Tokens, double Width, string? Comment);
 
     public GraphView()
     {
@@ -50,7 +50,7 @@ public sealed class GraphView : FrameworkElement
     {
         _result = result;
         _function = function;
-        if (!function.BlocksBuilt) CfgBuilder.Build(result.Image, function);
+        if (!function.BlocksBuilt) CfgBuilder.Build(result.Image, function, result.JumpTables);
 
         _blocks.Clear();
         _byStart.Clear();
@@ -96,9 +96,11 @@ public sealed class GraphView : FrameworkElement
                 if (!dis.TryDecodeAt(va, out var instr)) continue;
                 var tokens = fmt.Format(instr).ToArray();
                 string text = va.ToString("X8") + "  " + string.Concat(tokens.Select(t => t.Text));
-                var ft = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                result.Comments.TryGetValue(va, out var comment);
+                string measured = comment is null ? text : text + "   ; " + comment;
+                var ft = new FormattedText(measured, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
                     _typeface, FontSize, Brushes.White, dpi);
-                list.Add(new Line(text, tokens, ft.WidthIncludingTrailingWhitespace));
+                list.Add(new Line(text, tokens, ft.WidthIncludingTrailingWhitespace, comment));
             }
             _lines[block.Start] = list;
         }
@@ -196,6 +198,7 @@ public sealed class GraphView : FrameworkElement
                 {
                     EdgeKind.Taken => SyntaxTheme.EdgeTaken,
                     EdgeKind.Jump => SyntaxTheme.EdgeJump,
+                    EdgeKind.Switch => SyntaxTheme.EdgeSwitch,
                     _ => SyntaxTheme.EdgeFall,
                 };
                 var pen = new Pen(brush, 1.4);
@@ -233,6 +236,8 @@ public sealed class GraphView : FrameworkElement
             x = DrawText(dc, addr + "  ", x, y, SyntaxTheme.Address, dpi);
             foreach (var tok in line.Tokens)
                 x = DrawText(dc, tok.Text, x, y, SyntaxTheme.BrushFor(tok.Kind), dpi);
+            if (line.Comment is not null)
+                DrawText(dc, "   ; " + line.Comment, x, y, SyntaxTheme.Comment, dpi);
             y += _rowHeight;
         }
     }

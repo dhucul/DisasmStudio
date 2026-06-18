@@ -1,7 +1,7 @@
 namespace DisasmStudio.Core.Analysis;
 
 /// <summary>How control reaches one block from another.</summary>
-public enum EdgeKind { FallThrough, Taken, Jump }
+public enum EdgeKind { FallThrough, Taken, Jump, Switch }
 
 /// <summary>An edge in a function's control-flow graph, identified by target block start VA.</summary>
 public readonly record struct CfgEdge(ulong ToBlockStart, EdgeKind Kind);

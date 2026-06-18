@@ -13,9 +13,25 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   so it scrolls smoothly over multi-million-instruction images. Soft syntax colouring, named branch
   targets (`sub_`/`loc_`/imports/exports), inline string comments, and a branch-arrow gutter.
 - **Graph view:** per-function control-flow graph — basic-block cards of coloured instructions with
-  colour-coded edges (taken / fall-through / jump). Pan (drag), zoom (Ctrl+wheel), fit-to-view,
-  click-to-sync with the linear view.
+  colour-coded edges (taken / fall-through / jump / switch-case). Pan (drag), zoom (Ctrl+wheel),
+  fit-to-view, click-to-sync with the linear view.
+- **Jump-table (switch) recovery:** indirect `jmp`s that dispatch through a jump table are resolved
+  statically — recovering the table base (`lea`/displacement), the case count (`cmp` bound), and the
+  entries from the binary's data. Handles absolute-pointer tables (`jmp [base+idx*8]`, x64/x86) and
+  MSVC/GCC RVA-offset tables (`mov [tab+idx*4]; add; jmp reg`). Case targets become real CFG edges +
+  `loc_` labels, and the `jmp` is annotated `; switch (N cases)`. True dynamic dispatch (vtables,
+  function pointers) is left indirect, as it should be.
 - **Hex view:** on-demand, virtualized over the whole address space.
+- **Windows API awareness (IDA/BN-style):** a bundled database of ~100 common Win32 prototypes
+  annotates each API call site with the function's parameters and, where it can prove them, the
+  argument *values* — recovered by a short backward scan of the registers (x64 rcx/rdx/r8/r9, plus
+  x64 stack args at `[rsp+0x20+…]`) or stack pushes (x86) feeding the call. Integer arguments are
+  decoded into symbolic constants: access masks (`FILE_ACCESS`, `PROCESS_ACCESS`, `REGSAM`,
+  `TOKEN_ACCESS`, `FILE_MAP`), share modes, page protections (`PAGE_*`), allocation types (`MEM_*`),
+  creation dispositions, and file flags/attributes (`FILE_FLAG_*`/`FILE_ATTRIBUTE_*`). e.g.
+  `RegOpenKeyExW(hKey, lpSubKey=L"Software\\…", samDesired=KEY_READ)`,
+  `VirtualAlloc(…, flAllocationType=MEM_COMMIT, flProtect=PAGE_EXECUTE_READWRITE)`. Shown inline in
+  both linear and graph views.
 - **Side panels:** Functions, Strings, Imports, Sections, and live Cross-references.
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
