@@ -63,6 +63,9 @@ public interface IBinaryImage
     bool IsPatchedAt(int offset);
     bool IsDirty { get; }
     int PatchCount { get; }
+    /// <summary>Undo the most recent patch; false if nothing to undo.</summary>
+    bool Undo();
+    bool CanUndo { get; }
     /// <summary>Write the original bytes plus all edits to a new file.</summary>
     void SavePatchedAs(string path);
 }

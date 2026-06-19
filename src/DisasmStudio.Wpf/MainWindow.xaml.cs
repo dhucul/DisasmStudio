@@ -57,6 +57,17 @@ public partial class MainWindow : Window
         Linear.PatchRequested += OnPatchInstruction;
         Hex.Edited += OnImageEdited;
         Graph.BlockSelected += va => _nav.Navigate(va);
+        PreviewKeyDown += OnWindowPreviewKeyDown;
+    }
+
+    private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Z && (Keyboard.Modifiers & ModifierKeys.Control) != 0
+            && Keyboard.FocusedElement is not TextBox)   // let text fields keep their own undo
+        {
+            UndoLastPatch();
+            e.Handled = true;
+        }
     }
 
     // ---- patching ----
@@ -95,14 +106,25 @@ public partial class MainWindow : Window
             return;
         }
         OnImageEdited();
-        _ = StartAnalysis(_image, va, 0);   // re-analyze with the patch applied; stay on this address
+        _ = StartAnalysis(_image, va, CenterTabs.SelectedIndex, fresh: false);   // re-analyze with the patch; keep the lists
     }
 
     private void OnImageEdited()
     {
-        bool dirty = _image?.IsDirty == true;
-        SavePatchedBtn.IsEnabled = dirty;
-        if (dirty) Hex.InvalidateView();
+        SavePatchedBtn.IsEnabled = _image?.IsDirty == true;
+        UndoBtn.IsEnabled = _image?.CanUndo == true;
+        Hex.InvalidateView();
+    }
+
+    private void OnUndoPatch(object sender, RoutedEventArgs e) => UndoLastPatch();
+
+    private void UndoLastPatch()
+    {
+        if (_image is null || !_image.CanUndo) return;
+        _image.Undo();
+        OnImageEdited();
+        ulong va = _nav.Current ?? _image.EntryVa;
+        _ = StartAnalysis(_image, va, CenterTabs.SelectedIndex, fresh: false);   // re-analyze in place; keep the lists
     }
 
     private void OnSavePatched(object sender, RoutedEventArgs e)
@@ -241,18 +263,23 @@ public partial class MainWindow : Window
         await StartAnalysis(image);
     }
 
-    private async Task StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0)
+    private async Task StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0, bool fresh = true)
     {
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
 
         _image = image;
-        _result = null;
-        _nav.Reset();
-        ClearLists();
-        Title = $"DisasmStudio — {Path.GetFileName(image.FilePath)}";
-        FileInfo.Text = $"{Path.GetFileName(image.FilePath)}  ·  {image.FormatName}  ·  {image.ArchName}  ·  base {image.ImageBase:X}";
+        if (fresh)
+        {
+            // A new file: wipe the old session. A re-analyse after a patch/undo keeps the current
+            // lists and navigation visible until the new results replace them (no empty flash).
+            _result = null;
+            _nav.Reset();
+            ClearLists();
+            Title = $"DisasmStudio — {Path.GetFileName(image.FilePath)}";
+            FileInfo.Text = $"{Path.GetFileName(image.FilePath)}  ·  {image.FormatName}  ·  {image.ArchName}  ·  base {image.ImageBase:X}";
+        }
 
         Progress.Visibility = Visibility.Visible;
         Progress.IsIndeterminate = true;
@@ -269,6 +296,7 @@ public partial class MainWindow : Window
             Linear.SetResult(result);
             Hex.SetImage(image);
             SavePatchedBtn.IsEnabled = image.IsDirty;
+            UndoBtn.IsEnabled = image.CanUndo;
             _funcStarts = result.Functions.Select(f => f.Va).ToArray();
 
             ulong target = initialVa ?? (image.EntryVa != 0 ? image.EntryVa

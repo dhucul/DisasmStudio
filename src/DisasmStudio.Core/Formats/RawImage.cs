@@ -57,6 +57,8 @@ public sealed class RawImage : IBinaryImage
     public bool IsPatchedAt(int offset) => _f.IsPatched(offset);
     public bool IsDirty => _f.IsDirty;
     public int PatchCount => _f.PatchCount;
+    public bool Undo() => _f.Undo();
+    public bool CanUndo => _f.CanUndo;
     public void SavePatchedAs(string path) => _f.SaveAs(path);
 
     public Section? SectionAt(ulong va) => _section.ContainsVa(va) ? _section : null;

@@ -18,6 +18,7 @@ public sealed class MappedFile
     private readonly MemoryMappedFile _mmf;
     private readonly MemoryMappedViewAccessor _view;
     private readonly Dictionary<int, byte> _patches = [];   // in-memory edits, overlaid on every read
+    private readonly List<Dictionary<int, (bool Had, byte Val)>> _undo = [];   // per-Patch pre-edit state, for undo
 
     public int Length { get; }
     public string Path { get; }
@@ -82,11 +83,32 @@ public sealed class MappedFile
     public int PatchCount => _patches.Count;
     public bool IsPatched(int offset) => _patches.ContainsKey(offset);
 
-    /// <summary>Overlay <paramref name="bytes"/> at <paramref name="offset"/> (in-memory; persisted by <see cref="SaveAs"/>).</summary>
+    /// <summary>Overlay <paramref name="bytes"/> at <paramref name="offset"/> (in-memory; persisted by <see cref="SaveAs"/>).
+    /// Recorded as one undo step.</summary>
     public void Patch(int offset, ReadOnlySpan<byte> bytes)
     {
+        var group = new Dictionary<int, (bool, byte)>(bytes.Length);
         for (int i = 0; i < bytes.Length; i++)
-            if ((uint)(offset + i) < (uint)Length) _patches[offset + i] = bytes[i];
+        {
+            int o = offset + i;
+            if ((uint)o >= (uint)Length) continue;
+            group[o] = _patches.TryGetValue(o, out var prev) ? (true, prev) : (false, (byte)0);
+            _patches[o] = bytes[i];
+        }
+        if (group.Count > 0) _undo.Add(group);
+    }
+
+    public bool CanUndo => _undo.Count > 0;
+
+    /// <summary>Undo the most recent <see cref="Patch"/>, restoring the bytes it changed.</summary>
+    public bool Undo()
+    {
+        if (_undo.Count == 0) return false;
+        var group = _undo[^1];
+        _undo.RemoveAt(_undo.Count - 1);
+        foreach (var kv in group)
+            if (kv.Value.Had) _patches[kv.Key] = kv.Value.Val; else _patches.Remove(kv.Key);
+        return true;
     }
 
     /// <summary>Drop edits in [offset, offset+count), restoring the original bytes.</summary>

@@ -180,6 +180,37 @@ public sealed class HexView : Grid
         _surface.InvalidateVisual();
     }
 
+    /// <summary>Move the edit caret by <paramref name="delta"/> bytes, scrolling it into view.</summary>
+    private void MoveCaret(long delta, bool extend = false)
+    {
+        if (_image is null) return;
+        if (!_hasSelection) { _selAnchor = _selCaret = _topAddress; _hasSelection = true; }
+        long n = Math.Clamp((long)_selCaret + delta, (long)_image.MinVa, (long)_image.MaxVa - 1);
+        _selCaret = (ulong)n;
+        if (!extend) _selAnchor = _selCaret;
+        _editNibble = 0;
+        EnsureCaretVisible();
+        _surface.InvalidateVisual();
+    }
+
+    private void EnsureCaretVisible()
+    {
+        if (_image is null) return;
+        if (_selCaret < _topAddress)
+            _topAddress = _selCaret - _selCaret % BytesPerRow;
+        else
+        {
+            ulong lastVisible = _topAddress + (ulong)(VisibleRows * BytesPerRow) - 1;
+            if (_selCaret > lastVisible)
+            {
+                ulong caretRow = _selCaret - _selCaret % BytesPerRow;
+                ulong span = (ulong)((VisibleRows - 1) * BytesPerRow);
+                _topAddress = caretRow > _image.MinVa + span ? caretRow - span : _image.MinVa;
+            }
+        }
+        SyncScrollValue();
+    }
+
     /// <summary>Overwrite the high or low nibble of the caret byte and advance after a full byte.</summary>
     private void TypeHex(int nibble)
     {
@@ -381,11 +412,24 @@ public sealed class HexView : Grid
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
-            if (e.Key == Key.C && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+            bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+            bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+            if (e.Key == Key.C && ctrl) { _owner.CopySelection(asText: false); e.Handled = true; return; }
+
+            int rows = Math.Max(1, (int)(ActualHeight / _owner._rowHeight) - 1);
+            switch (e.Key)
             {
-                _owner.CopySelection(asText: false);
-                e.Handled = true;
+                case Key.Left: _owner.MoveCaret(-1, shift); break;
+                case Key.Right: _owner.MoveCaret(1, shift); break;
+                case Key.Up: _owner.MoveCaret(-BytesPerRow, shift); break;
+                case Key.Down: _owner.MoveCaret(BytesPerRow, shift); break;
+                case Key.Home: _owner.MoveCaret(-(long)(_owner._selCaret % BytesPerRow), shift); break;
+                case Key.End: _owner.MoveCaret(BytesPerRow - 1 - (long)(_owner._selCaret % BytesPerRow), shift); break;
+                case Key.PageUp: _owner.MoveCaret(-(long)rows * BytesPerRow, shift); break;
+                case Key.PageDown: _owner.MoveCaret((long)rows * BytesPerRow, shift); break;
+                default: return;
             }
+            e.Handled = true;
         }
 
         // Typing a hex digit over the caret byte edits it (nibble at a time).
