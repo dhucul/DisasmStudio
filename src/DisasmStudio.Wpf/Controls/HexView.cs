@@ -38,6 +38,10 @@ public sealed class HexView : Grid
     /// <summary>Raised (with the edited VA) after a byte is changed, so the host can track the edit.</summary>
     public event Action<ulong>? Edited;
 
+    /// <summary>When set (debugging), byte edits are written by VA through this hook (e.g. to process
+    /// memory) instead of the file-offset patch path — which can't address a live 64-bit process.</summary>
+    public Func<ulong, byte, bool>? WriteByteAt { get; set; }
+
     private static readonly Brush BgBrush = Frozen(0x10, 0x14, 0x1B);
     private static readonly Brush AddrBrush = Frozen(0x6B, 0x8F, 0xD6);
     private static readonly Brush HexBrush = Frozen(0xE6, 0xEA, 0xF0);
@@ -216,12 +220,11 @@ public sealed class HexView : Grid
     {
         if (_image is null || !_hasSelection) return;
         ulong editVa = _selCaret;
-        int off = _image.VaToOffset(editVa);
-        if (off < 0) return;
         var cur = _image.ReadBytesAtVa(editVa, 1);
         byte b = cur.Length == 1 ? cur[0] : (byte)0;
         byte nb = _editNibble == 0 ? (byte)((nibble << 4) | (b & 0x0F)) : (byte)((b & 0xF0) | nibble);
-        _image.Patch(off, [nb]);
+        if (WriteByteAt is not null) { if (!WriteByteAt(editVa, nb)) return; }      // live: write by VA
+        else { int off = _image.VaToOffset(editVa); if (off < 0) return; _image.Patch(off, [nb]); }
         if (_editNibble == 0) _editNibble = 1;
         else
         {

@@ -22,9 +22,11 @@ public sealed class DebugPanel : Grid
     private ulong _dumpAddr;
 
     private readonly DataGrid _regs;
-    private readonly ListBox _stack, _calls, _bps, _threads, _modules;
-    private readonly TextBox _dump, _dumpAddrBox;
-    private readonly List<ulong> _stackVas = [];
+    private readonly DataGrid _stack;
+    private readonly ListBox _calls, _bps, _threads, _modules;
+    private readonly HexView _dump;
+    private readonly TextBox _dumpAddrBox;
+    private bool _dumpInit;
     private readonly List<ulong> _callVas = [];
     private readonly List<ulong> _bpVas = [];
     private readonly List<ulong> _moduleVas = [];
@@ -32,6 +34,11 @@ public sealed class DebugPanel : Grid
     public event Action<ulong>? NavigateRequested;
 
     private sealed class RegRow { public string Name { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; }
+    private sealed class StackRow { public string Addr { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; public ulong Slot; public ulong ValueRaw; }
+
+    // EFLAGS bits shown as individual, editable (0/1) rows after the registers.
+    private static readonly (string Name, int Bit)[] Flags =
+        [("CF", 0), ("PF", 2), ("AF", 4), ("ZF", 6), ("SF", 7), ("TF", 8), ("IF", 9), ("DF", 10), ("OF", 11)];
 
     public DebugPanel()
     {
@@ -46,6 +53,7 @@ public sealed class DebugPanel : Grid
         {
             AutoGenerateColumns = false, CanUserAddRows = false, CanUserReorderColumns = false,
             HeadersVisibility = DataGridHeadersVisibility.Column, FontFamily = Mono, FontSize = 12,
+            IsReadOnly = false,   // the global DataGrid style is read-only; registers/flags are editable
         };
         _regs.Columns.Add(new DataGridTextColumn { Header = "Reg", Binding = new System.Windows.Data.Binding("Name"), IsReadOnly = true, Width = 56 });
         _regs.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new System.Windows.Data.Binding("Value"), Width = 130 });
@@ -53,7 +61,16 @@ public sealed class DebugPanel : Grid
         _regs.CellEditEnding += OnRegEdit;
         Add(0, "Registers", _regs);
 
-        _stack = MonoList(); _stack.MouseDoubleClick += (_, _) => NavTo(_stackVas, _stack.SelectedIndex);
+        _stack = new DataGrid
+        {
+            AutoGenerateColumns = false, CanUserAddRows = false, CanUserReorderColumns = false,
+            HeadersVisibility = DataGridHeadersVisibility.Column, FontFamily = Mono, FontSize = 12, IsReadOnly = false,
+        };
+        _stack.Columns.Add(new DataGridTextColumn { Header = "Addr", Binding = new System.Windows.Data.Binding("Addr"), IsReadOnly = true, Width = 116 });
+        _stack.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new System.Windows.Data.Binding("Value"), Width = 130 });
+        _stack.Columns.Add(new DataGridTextColumn { Header = "→", Binding = new System.Windows.Data.Binding("Deref"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        _stack.CellEditEnding += OnStackEdit;
+        _stack.MouseDoubleClick += OnStackActivate;
         Add(2, "Stack", _stack);
 
         var tabs = new TabControl { Background = (Brush)Application.Current.Resources["Surface"] };
@@ -63,10 +80,10 @@ public sealed class DebugPanel : Grid
         _modules = MonoList(); _modules.MouseDoubleClick += (_, _) => NavTo(_moduleVas, _modules.SelectedIndex);
 
         var memPanel = new DockPanel();
-        _dumpAddrBox = new TextBox { FontFamily = Mono, Margin = new Thickness(4), ToolTip = "Address or register to follow (Enter)" };
-        _dumpAddrBox.KeyDown += (_, e) => { if (e.Key == Key.Enter) { _dumpAddr = ParseAddr(_dumpAddrBox.Text); RefreshDump(); } };
+        _dump = new HexView();   // editable hex view over the whole live address space
+        _dumpAddrBox = new TextBox { FontFamily = Mono, Margin = new Thickness(4), ToolTip = "Address or register to follow (Enter); type hex over a byte to edit memory" };
+        _dumpAddrBox.KeyDown += (_, e) => { if (e.Key == Key.Enter) { _dumpAddr = ParseAddr(_dumpAddrBox.Text); _dump.GoTo(_dumpAddr); } };
         DockPanel.SetDock(_dumpAddrBox, Dock.Top);
-        _dump = new TextBox { FontFamily = Mono, FontSize = 12, IsReadOnly = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, BorderThickness = new Thickness(0) };
         memPanel.Children.Add(_dumpAddrBox);
         memPanel.Children.Add(_dump);
 
@@ -97,12 +114,14 @@ public sealed class DebugPanel : Grid
 
     private static ListBox MonoList() => new() { FontFamily = Mono, FontSize = 12, Background = (Brush)Application.Current.Resources["Surface"] };
 
-    public void SetSession(DebugSession? session) { _session = session; _viewTid = 0; _dumpAddr = 0; }
+    public void SetSession(DebugSession? session) { _session = session; _viewTid = 0; _dumpAddr = 0; _dumpInit = false; _dump.SetImage(null); }
 
     public void Refresh()
     {
         if (_session is null || !_session.IsStopped) return;
-        var regs = _viewTid != 0 ? _session.Engine.GetRegisters(_viewTid) : _session.Registers;
+        // Read fresh (the debuggee is frozen) so register/flag edits are reflected, not the last-stop snapshot.
+        var regs = _session.Engine.GetRegisters(_viewTid);
+        if (regs is null && _viewTid != 0) { _viewTid = 0; regs = _session.Engine.GetRegisters(0); }  // viewed thread gone
         if (regs is null) return;
         var deref = _session.Deref;
 
@@ -110,20 +129,23 @@ public sealed class DebugPanel : Grid
         var rows = new List<RegRow>();
         foreach (var (name, value) in regs.Items)
             rows.Add(new RegRow { Name = name, Value = value.ToString("X" + (name is "cs" or "ds" or "es" or "fs" or "gs" or "ss" ? "4" : w.ToString())), Deref = deref?.Describe(value) ?? "" });
+        // individual CPU flags (decoded from rflags/eflags), each editable as 0/1
+        ulong fl = regs[regs.Is32 ? "eflags" : "rflags"];
+        foreach (var (fname, bit) in Flags)
+            rows.Add(new RegRow { Name = fname, Value = ((fl >> bit) & 1).ToString(), Deref = (((fl >> bit) & 1) != 0) ? "set" : "" });
         _regs.ItemsSource = rows;
 
-        // stack
-        _stack.Items.Clear(); _stackVas.Clear();
+        // stack (editable: Value commits write to process memory)
         int ptr = regs.Is32 ? 4 : 8;
         var sb = _session.Engine.ReadMemory(regs.Sp, ptr * 24);
+        var stackRows = new List<StackRow>();
         for (int i = 0; i + ptr <= sb.Length; i += ptr)
         {
             ulong slot = regs.Sp + (ulong)i;
             ulong val = ptr == 8 ? BitConverter.ToUInt64(sb, i) : BitConverter.ToUInt32(sb, i);
-            string d = deref?.Describe(val) ?? "";
-            _stackVas.Add(val);
-            _stack.Items.Add($"{slot:X}  {val.ToString("X" + w)}  {d}");
+            stackRows.Add(new StackRow { Addr = slot.ToString("X" + w), Value = val.ToString("X" + w), Deref = deref?.Describe(val) ?? "", Slot = slot, ValueRaw = val });
         }
+        _stack.ItemsSource = stackRows;
 
         // call stack
         _calls.Items.Clear(); _callVas.Clear();
@@ -154,34 +176,56 @@ public sealed class DebugPanel : Grid
             _modules.Items.Add($"{m.Base.ToString("X" + w)}  {m.Name}");
         }
 
-        if (_dumpAddr == 0) _dumpAddr = regs.Sp;
-        RefreshDump();
-    }
-
-    private void RefreshDump()
-    {
-        if (_session is null || !_session.IsStopped) return;
-        var bytes = _session.Engine.ReadMemory(_dumpAddr, 16 * 16);
-        var sb = new System.Text.StringBuilder();
-        for (int row = 0; row * 16 < bytes.Length; row++)
+        // memory dump: an editable HexView over the whole live address space
+        if (!_dumpInit)
         {
-            int n = Math.Min(16, bytes.Length - row * 16);
-            sb.Append((_dumpAddr + (ulong)(row * 16)).ToString("X16")).Append("  ");
-            for (int i = 0; i < 16; i++) sb.Append(i < n ? bytes[row * 16 + i].ToString("X2") + " " : "   ");
-            sb.Append(' ');
-            for (int i = 0; i < n; i++) { byte b = bytes[row * 16 + i]; sb.Append(b is >= 0x20 and < 0x7F ? (char)b : '.'); }
-            sb.Append('\n');
+            _dump.SetImage(new FullMemoryImage(_session.Engine));
+            _dump.WriteByteAt = (va, b) => _session?.Engine.WriteMemory(va, [b]) ?? false;
+            _dumpInit = true;
+            if (_dumpAddr == 0) _dumpAddr = regs.Sp;
+            _dump.GoTo(_dumpAddr);
         }
-        _dump.Text = sb.ToString();
+        else _dump.InvalidateView();   // re-read after stepping
     }
 
     private void OnRegEdit(object? sender, DataGridCellEditEndingEventArgs e)
     {
         if (_session is null || e.EditAction != DataGridEditAction.Commit || e.Column.DisplayIndex != 1) return;
         if (e.Row.Item is not RegRow row || e.EditingElement is not TextBox tb) return;
-        if (ulong.TryParse(tb.Text.Replace("0x", "").Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var val))
+        var regs = _session.Engine.GetRegisters(_viewTid);
+
+        int idx = Array.FindIndex(Flags, f => f.Name.Equals(row.Name, StringComparison.OrdinalIgnoreCase));
+        if (idx >= 0 && regs is not null)
+        {
+            // editing a flag: set/clear that bit in rflags/eflags
+            string fn = regs.Is32 ? "eflags" : "rflags";
+            ulong fl = regs[fn];
+            bool on = tb.Text.Trim() is not ("0" or "" or "false" or "False");
+            int bit = Flags[idx].Bit;
+            _session.Engine.SetRegister(fn, on ? fl | (1UL << bit) : fl & ~(1UL << bit), _viewTid);
+        }
+        else if (ulong.TryParse(tb.Text.Replace("0x", "").Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var val))
             _session.Engine.SetRegister(row.Name, val, _viewTid);
+
         Dispatcher.BeginInvoke(Refresh);
+    }
+
+    private void OnStackEdit(object? sender, DataGridCellEditEndingEventArgs e)
+    {
+        if (_session is null || e.EditAction != DataGridEditAction.Commit || e.Column.DisplayIndex != 1) return;
+        if (e.Row.Item is not StackRow row || e.EditingElement is not TextBox tb) return;
+        if (ulong.TryParse(tb.Text.Replace("0x", "").Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var val))
+        {
+            var bytes = _session.Engine.Is32 ? BitConverter.GetBytes((uint)val) : BitConverter.GetBytes(val);
+            _session.Engine.WriteMemory(row.Slot, bytes);
+        }
+        Dispatcher.BeginInvoke(Refresh);
+    }
+
+    private void OnStackActivate(object? sender, MouseButtonEventArgs e)
+    {
+        if (_stack.CurrentColumn?.DisplayIndex == 1) return;   // double-clicking the Value column edits, not navigates
+        if (_stack.SelectedItem is StackRow row && row.ValueRaw != 0) NavigateRequested?.Invoke(row.ValueRaw);
     }
 
     private void OnThreadActivate(object? sender, MouseButtonEventArgs e)
@@ -196,7 +240,7 @@ public sealed class DebugPanel : Grid
     private ulong ParseAddr(string s)
     {
         s = s.Trim();
-        if (_session?.Registers is { } r) foreach (var (name, value) in r.Items) if (string.Equals(name, s, StringComparison.OrdinalIgnoreCase)) return value;
+        if (_session?.Engine.GetRegisters(_viewTid) is { } r) foreach (var (name, value) in r.Items) if (string.Equals(name, s, StringComparison.OrdinalIgnoreCase)) return value;
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
         return ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var v) ? v : _dumpAddr;
     }

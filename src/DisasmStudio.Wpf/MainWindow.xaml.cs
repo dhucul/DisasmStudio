@@ -145,6 +145,7 @@ public partial class MainWindow : Window
             PopulateLists(_result);
             Linear.SetResult(_result, _dbg.LiveDecoder);
             Hex.SetImage(_result.Image);
+            Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
         }
         Linear.SetCurrentIp(_dbg.CurrentIp);
         Linear.Refresh();
@@ -158,6 +159,7 @@ public partial class MainWindow : Window
     {
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;
+        Hex.WriteByteAt = null;
         _dbg = null; _dbgViewLive = false;
         Graph.Clear(); _graphFn = null;
         Debug.SetSession(null);
