@@ -337,11 +337,18 @@ public partial class MainWindow : Window
     private async void OnSaveC(object sender, RoutedEventArgs e)
     {
         if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        var dlg = new SaveFileDialog { Title = "Save Pseudo-C", Filter = "C source|*.c|Text|*.txt|All files|*.*",
-            FileName = Path.GetFileNameWithoutExtension(_image.FilePath) + ".c" };
+        var dlg = new SaveFileDialog
+        {
+            Title = "Save C",
+            Filter = "Pseudo-C, readable|*.c|Compilable C|*.c|Text|*.txt|All files|*.*",
+            FileName = Path.GetFileNameWithoutExtension(_image.FilePath) + ".c",
+        };
         if (dlg.ShowDialog(this) != true) return;
         var r = _result;
-        await RunExport(dlg.FileName, "Pseudo-C", (w, p, ct) => SourceExporter.WriteC(w, r, p, ct));
+        bool comp = dlg.FilterIndex == 2;
+        await RunExport(dlg.FileName, comp ? "compilable C" : "Pseudo-C",
+            comp ? (w, p, ct) => SourceExporter.WriteCompilableC(w, r, p, ct)
+                 : (w, p, ct) => SourceExporter.WriteC(w, r, p, ct));
     }
 
     /// <summary>Run a whole-program export on a background thread, streaming to disk with progress.</summary>
@@ -389,13 +396,18 @@ public partial class MainWindow : Window
     {
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
-        var dlg = new SaveFileDialog { Title = "Save function Pseudo-C", Filter = "C source|*.c|Text|*.txt|All files|*.*",
-            FileName = SafeFileName(fn.Name) + ".c" };
+        var dlg = new SaveFileDialog
+        {
+            Title = "Save function C",
+            Filter = "Pseudo-C, readable|*.c|Compilable C|*.c|Text|*.txt|All files|*.*",
+            FileName = SafeFileName(fn.Name) + ".c",
+        };
         if (dlg.ShowDialog(this) != true) return;
         try
         {
             using var sw = new StreamWriter(dlg.FileName);
-            SourceExporter.WriteCFunction(sw, _result, fn);
+            if (dlg.FilterIndex == 2) SourceExporter.WriteCompilableCFunction(sw, _result, fn);
+            else SourceExporter.WriteCFunction(sw, _result, fn);
             StatusText.Text = $"Saved {fn.Name} to {dlg.FileName}";
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error); }

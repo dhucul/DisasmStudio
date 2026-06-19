@@ -132,7 +132,11 @@ public static class MediumLifter
         var key = (bas, disp);
         if (slots.TryGetValue(key, out var v)) { if (v.Size == 0 && width > 0) v.Size = width; return v; }
         bool arg = bas == Register.RBP && disp > 0;
-        string name = arg ? $"arg_{disp:X}" : $"var_{Math.Abs(disp):X}";
+        string baseName = arg ? $"arg_{disp:X}" : $"var_{Math.Abs(disp):X}";
+        // Distinct slots can map to the same base name (e.g. [rbp-0x20] and [rsp+0x20]); keep them unique
+        // so declarations don't collide.
+        string name = baseName;
+        for (int suffix = 2; slots.Values.Any(e => e.Name == name); suffix++) name = $"{baseName}_{suffix}";
         v = new Variable { Name = name, Size = width, Class = arg ? VarClass.Arg : VarClass.Local };
         slots[key] = v;
         return v;

@@ -68,9 +68,13 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   state) via *Save Project…* and reopen it with *Open Project…* — it re-analyses on open (fast, always
   consistent with the engine). The format is versioned to carry future user edits (renames, comments).
 - **Export:** *Save ASM…* / *Save C…* on the toolbar write the whole-program disassembly listing
-  (`.asm`) or the decompiled Pseudo-C of every function (`.c`); both stream to disk on a background
-  thread with a progress bar. Right-click a function in the linear view (*Save function as ASM…*) or
-  the decompiler (*Save function as C…*) to export just that one.
+  (`.asm`) or the decompiled C of every function (`.c`); both stream to disk on a background thread
+  with a progress bar. Right-click a function in the linear view (*Save function as ASM…*) or the
+  decompiler (*Save function as C…*) to export just that one. The C save offers two flavours via the
+  dialog's file-type box: **readable** Pseudo-C, or **compilable** C — a self-contained translation
+  unit (generated preamble declaring the registers as integer globals, typed pointer casts, an
+  indirect-call helper, forward prototypes) that compiles under MSVC (`cl /c`). It's an approximation
+  for inspection/tweaking, not a faithful rebuild.
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
 - **High-DPI:** per-monitor-v2 aware; DPI-correct text and pixel-snapped lines that re-render sharply

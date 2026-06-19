@@ -44,10 +44,36 @@ public static class Decompiler
 
     private static DecompiledFunction Note(ulong va, string msg)
     {
+        var lines = NoteLines(va, msg);
+        return new DecompiledFunction { Va = va, LowIl = lines, MediumIl = lines, HighIl = lines, PseudoC = lines };
+    }
+
+    private static IReadOnlyList<DecompLine> NoteLines(ulong va, string msg)
+    {
         var w = new IlWriter();
         w.T(msg, AsmTokenKind.Comment);
         w.Flush(va, 0);
-        var lines = w.Lines;
-        return new DecompiledFunction { Va = va, LowIl = lines, MediumIl = lines, HighIl = lines, PseudoC = lines };
+        return w.Lines;
+    }
+
+    /// <summary>Decompile a function to <em>compilable</em> C lines (typed pointer casts, indirect-call
+    /// helper, numeric data addresses, sanitized names). Used by the compilable export; not cached.</summary>
+    public static IReadOnlyList<DecompLine> DecompileToCompilableC(Function fn, AnalysisResult result)
+    {
+        try
+        {
+            CfgBuilder.Build(result.Image, fn, result.JumpTables);
+            if (fn.Blocks.Count == 0) return NoteLines(fn.Va, "/* no code recovered */");
+            if (fn.Blocks.Count > MaxBlocks) return NoteLines(fn.Va, $"/* function too large to decompile ({fn.Blocks.Count} blocks) */");
+
+            var low = new Lifter(result.Image, result.Names, result.JumpTables).Lift(fn);
+            var mid = MediumLifter.Transform(low, result.Image);
+            var (root, labels) = Structurer.Structure(mid);
+            return StructEmitter.Emit(mid, root, labels, pseudoC: true, result.Comments, compilable: true);
+        }
+        catch (Exception ex)
+        {
+            return NoteLines(fn.Va, "/* decompilation error: " + ex.Message.Replace("*/", "* /") + " */");
+        }
     }
 }
