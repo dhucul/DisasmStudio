@@ -112,53 +112,64 @@ public static class CodeMap
     {
         var dis = new Disassembler(image);
         var seeds = new List<ulong>();
+        var one = new ulong[1];
         foreach (var sec in image.Sections.Where(s => s.IsExecutable && s.FileSize > 0).OrderBy(s => s.StartVa))
         {
             ulong end = sec.StartVa + (sec.VirtualSize > 0 ? Math.Min(sec.VirtualSize, (ulong)sec.FileSize) : (ulong)sec.FileSize);
-            ulong va = code.IsCode(sec.StartVa) ? code.NextGap(sec.StartVa, end) : sec.StartVa;
+            ulong va = sec.StartVa;
             while (va < end)
             {
                 if (token.IsCancellationRequested) break;
-                ulong gapEnd = code.NextCode(va, end);   // gap runs until the next already-known code
-                while (va < gapEnd)
-                {
-                    if (ByteAt(image, va) is 0xCC or 0x00 or 0x90) { va++; continue; }  // padding
+                if (code.IsCode(va)) { va = code.NextGap(va, end); continue; }       // skip known code (word-scan)
 
-                    // A non-padding run between padding: a missed function/block or a data table.
-                    ulong runStart = va;
-                    while (va < gapEnd && ByteAt(image, va) is not (0xCC or 0x00 or 0x90)) va++;
-                    if (!IsPointerData(image, runStart) &&
-                        (IsPrologue(image, runStart) || LooksLikeCode(image, dis, runStart, va)))
-                        seeds.Add(runStart);
+                byte b = ByteAt(image, va);
+                if (b is 0xCC or 0x00 or 0x90) { va++; continue; }                   // 1-byte padding / nop
+
+                // Multi-byte NOP alignment — mark it so it renders as `nop`, not a db row.
+                if (dis.TryDecodeAt(va, out var nop) && nop.Mnemonic == Mnemonic.Nop) { code.Mark(va, nop.Length); va += (ulong)nop.Length; continue; }
+
+                // Aligned pointer into mapped memory — a table entry; leave as data.
+                int ps = PointerSize(image, va);
+                if (ps > 0) { va += (ulong)ps; continue; }
+
+                // A function / block. Descend immediately so consecutive blocks in the same run (no
+                // padding between them) are each found; NextGap then jumps past the marked code.
+                if (IsPrologue(image, va) || LooksLikeCode(image, dis, va, end))
+                {
+                    one[0] = va;
+                    Descend(image, code, one, jumpTables, token);
+                    seeds.Add(va);
+                    va = code.NextGap(va, end);
+                    continue;
                 }
-                va = code.NextGap(gapEnd, end);          // skip the known-code block to the next gap
+                va++;   // unknown byte — keep scanning
             }
         }
-        if (seeds.Count > 0) Descend(image, code, seeds, jumpTables, token);
         return seeds;
     }
 
-    /// <summary>A run that decodes into valid instructions reaching a terminator (ret/jmp) is code —
-    /// catches leaf functions, thunks, and cold blocks that have no recognisable prologue.</summary>
-    private static bool LooksLikeCode(IBinaryImage image, Disassembler dis, ulong va, ulong runEnd)
+    /// <summary>A position that decodes into valid instructions reaching a call/branch/return within a
+    /// short window is code — catches leaf functions, thunks, and cold blocks (incl. ja-over-int3,
+    /// which decode straight through the int3).</summary>
+    private static bool LooksLikeCode(IBinaryImage image, Disassembler dis, ulong va, ulong end)
     {
         ulong cur = va;
-        for (int i = 0; i < 4000 && cur < runEnd; i++)
+        for (int i = 0; i < 64 && cur < end; i++)
         {
             if (!dis.TryDecodeAt(cur, out var ins) || ins.Length == 0) return false;
-            cur += (ulong)ins.Length;
-            if (ins.FlowControl is FlowControl.Return or FlowControl.UnconditionalBranch or FlowControl.IndirectBranch)
-                return true;
+            if (ins.FlowControl is FlowControl.Return or FlowControl.UnconditionalBranch
+                or FlowControl.IndirectBranch or FlowControl.Call) return true;
+            cur += (ulong)ins.Length;   // step over Next / ConditionalBranch / Interrupt (int3, int 0x29)
         }
-        return false;   // no terminator — likely a string or non-code run
+        return false;
     }
 
-    /// <summary>True if <paramref name="va"/> begins an aligned pointer into mapped memory (a table entry, not code).</summary>
-    private static bool IsPointerData(IBinaryImage image, ulong va)
+    /// <summary>Aligned pointer-into-mapped-memory size at <paramref name="va"/> (8/4), or 0 if not a pointer.</summary>
+    private static int PointerSize(IBinaryImage image, ulong va)
     {
-        if (va % 8 == 0) { var b = image.ReadBytesAtVa(va, 8); if (b.Length == 8 && image.IsMappedVa(BitConverter.ToUInt64(b, 0))) return true; }
-        if (va % 4 == 0) { var b = image.ReadBytesAtVa(va, 4); if (b.Length == 4 && image.IsMappedVa(BitConverter.ToUInt32(b, 0))) return true; }
-        return false;
+        if (va % 8 == 0) { var b = image.ReadBytesAtVa(va, 8); if (b.Length == 8 && image.IsMappedVa(BitConverter.ToUInt64(b, 0))) return 8; }
+        if (va % 4 == 0) { var b = image.ReadBytesAtVa(va, 4); if (b.Length == 4 && image.IsMappedVa(BitConverter.ToUInt32(b, 0))) return 4; }
+        return 0;
     }
 
     private static void Descend(IBinaryImage image, CodeBitmap code, IEnumerable<ulong> seeds,
