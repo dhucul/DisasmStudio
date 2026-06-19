@@ -56,9 +56,12 @@ public partial class MainWindow : Window
         Linear.SelectionChanged += OnAddressFocused;
         Linear.ShowXrefsRequested += va => { SideTabs.SelectedIndex = 0; ShowXrefs(va); };
         Linear.OpenInGraphRequested += va => { OpenGraph(va); CenterTabs.SelectedIndex = 1; };
+        Linear.OpenInDecompilerRequested += va => { OpenDecompiler(va); CenterTabs.SelectedIndex = 3; };
         Linear.PatchRequested += OnPatchInstruction;
         Hex.Edited += OnHexEdited;
         Graph.BlockSelected += va => _nav.Navigate(va);
+        Decompiler.NavigateRequested += va => _nav.Navigate(va);
+        Decompiler.SelectionChanged += OnAddressFocused;
         PreviewKeyDown += OnWindowPreviewKeyDown;
     }
 
@@ -379,7 +382,7 @@ public partial class MainWindow : Window
 
             ulong target = initialVa ?? (image.EntryVa != 0 ? image.EntryVa
                 : result.Functions.Count > 0 ? result.Functions[0].Va : image.MinVa);
-            if (initialTab is >= 0 and <= 2) CenterTabs.SelectedIndex = initialTab;
+            if (initialTab is >= 0 and <= 3) CenterTabs.SelectedIndex = initialTab;
             _nav.Navigate(target);
         }
         catch (OperationCanceledException) { }
@@ -430,6 +433,7 @@ public partial class MainWindow : Window
         SectionList.ItemsSource = null;
         XrefList.ItemsSource = null;
         Graph.Clear();
+        Decompiler.Clear();
     }
 
     // ---- navigation ----
@@ -443,6 +447,7 @@ public partial class MainWindow : Window
         Linear.GoToVa(va);          // raises SelectionChanged → xrefs/status update
         Hex.GoTo(va);
         if (CenterTabs.SelectedIndex == 1) OpenGraph(va);
+        if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
 
         // Data targets read better in the hex view.
         if (!_image.IsExecutableVa(va) && CenterTabs.SelectedIndex == 0)
@@ -470,6 +475,20 @@ public partial class MainWindow : Window
     {
         var fn = FindFunction(va);
         if (fn is not null && _result is not null) Graph.SetFunction(_result, fn);
+    }
+
+    private void OpenDecompiler(ulong va)
+    {
+        var fn = FindFunction(va);
+        if (fn is not null && _result is not null) Decompiler.SetFunction(_result, fn);
+    }
+
+    // Populate the graph / decompiler when the user switches to that tab (they build lazily).
+    private void OnCenterTabChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.Source is not TabControl || _result is null || _nav.Current is not ulong va) return;
+        if (CenterTabs.SelectedIndex == 1) OpenGraph(va);
+        else if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
     }
 
     private Function? FindFunction(ulong va)

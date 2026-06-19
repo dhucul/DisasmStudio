@@ -72,8 +72,9 @@
 
             <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" />
 
-            <!-- Center: linear / graph / hex -->
-            <TabControl Grid.Column="2" x:Name="CenterTabs" Background="{StaticResource Background}">
+            <!-- Center: linear / graph / hex / decompiler -->
+            <TabControl Grid.Column="2" x:Name="CenterTabs" Background="{StaticResource Background}"
+                        SelectionChanged="OnCenterTabChanged">
                 <TabItem Header="Linear">
                     <ctl:LinearDisassemblyView x:Name="Linear" />
                 </TabItem>
@@ -82,6 +83,9 @@
                 </TabItem>
                 <TabItem Header="Hex">
                     <ctl:HexView x:Name="Hex" />
+                </TabItem>
+                <TabItem Header="Decompiler">
+                    <ctl:DecompilerView x:Name="Decompiler" />
                 </TabItem>
             </TabControl>
 

@@ -22,6 +22,20 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
 - **Graph view:** per-function control-flow graph — basic-block cards of coloured instructions with
   colour-coded edges (taken / fall-through / jump / switch-case). Pan (drag), zoom (Ctrl+wheel),
   fit-to-view, click-to-sync with the linear view.
+- **Decompiler (multi-level IL + Pseudo-C):** a per-function decompiler in the Binary Ninja mold,
+  shown in a *Decompiler* tab with a Low IL / Medium IL / High IL / Pseudo-C selector. **Low IL**
+  lifts each instruction to register/memory/flag semantics (flags handled as deferred conditions so a
+  `cmp`/`jcc` pair becomes `a < b`); **Medium IL** promotes constant stack slots to named locals/args,
+  elides prologue/epilogue and stack-pointer bookkeeping, forward-substitutes and constant-folds
+  expressions, drops dead stores (CFG liveness), and recovers call arguments (x64 register convention,
+  reusing the API annotations); **High IL** recovers structured control flow — `if`/`else`,
+  `while`, `switch`, `break`/`continue` — using dominators for loops and post-dominators for
+  conditional merges, falling back to `goto`/labels on irreducible code so it is never wrong; and
+  **Pseudo-C** renders that as C with a best-effort signature, local declarations and call sites.
+  Built lazily on a background thread and cached per function; instructions outside the lifted x86/x64
+  subset degrade to a faithful `__asm(...)` line. Click any line to sync the other panes; double-click
+  a call to follow the callee. Best-effort by design — the IL tiers are the most reliable, structured
+  C the most ambitious.
 - **Jump-table (switch) recovery:** indirect `jmp`s that dispatch through a jump table are resolved
   statically — recovering the table base (`lea`/displacement), the case count (`cmp` bound), and the
   entries from the binary's data. Handles absolute-pointer tables (`jmp [base+idx*8]`, x64/x86) and
@@ -83,6 +97,7 @@ Requires the .NET 10 SDK (Windows). x64.
 
 ## Scope
 
-v1 targets x86/x64 static analysis. Out of scope (for now): decompilation, signatures/FLIRT,
-debugging, scripting/plugins, other architectures, patching/assembling, and PDB symbol servers — the
-`IBinaryImage` / token-formatter / Iced-bitness seams are left in place to add these later.
+v1 targets x86/x64 static analysis, now including a best-effort decompiler (multi-level IL +
+Pseudo-C). Out of scope (for now): signatures/FLIRT, debugging, scripting/plugins, other
+architectures, and PDB symbol servers — the `IBinaryImage` / token-formatter / Iced-bitness seams are
+left in place to add these later.

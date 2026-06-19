@@ -2,8 +2,9 @@ using Iced.Intel;
 
 namespace DisasmStudio.Core.Disasm;
 
-/// <summary>A coarse token class the UI maps to a soft colour.</summary>
-public enum AsmTokenKind { Text, Mnemonic, Register, Number, Punctuation, Keyword, Prefix, Symbol }
+/// <summary>A coarse token class the UI maps to a soft colour. The trailing kinds are used by the
+/// decompiler's IL / Pseudo-C output (a C type, a recovered variable, an inline comment).</summary>
+public enum AsmTokenKind { Text, Mnemonic, Register, Number, Punctuation, Keyword, Prefix, Symbol, Type, Variable, Comment }
 
 /// <summary>One coloured run of formatted assembly text.</summary>
 public readonly record struct AsmToken(string Text, AsmTokenKind Kind);

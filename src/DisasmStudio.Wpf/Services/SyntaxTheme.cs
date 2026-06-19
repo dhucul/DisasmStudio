@@ -39,6 +39,8 @@ public static class SyntaxTheme
     public static readonly Brush Punctuation = B(0x79, 0x82, 0x8F); // muted grey
     public static readonly Brush Text = B(0xE6, 0xEA, 0xF0);      // primary text
     public static readonly Brush Comment = B(0x5E, 0x6B, 0x7A);   // dim grey-blue
+    public static readonly Brush TypeName = B(0x6F, 0xB3, 0xA8);  // soft cyan-green (C types)
+    public static readonly Brush Variable = B(0xC9, 0xD2, 0xDE);  // light slate (recovered vars)
 
     // Edge colours for the graph view (muted)
     public static readonly Brush EdgeTaken = B(0x7F, 0xA8, 0x7B);    // soft green (branch taken)
@@ -58,6 +60,9 @@ public static class SyntaxTheme
         AsmTokenKind.Keyword => Keyword,
         AsmTokenKind.Prefix => Prefix,
         AsmTokenKind.Punctuation => Punctuation,
+        AsmTokenKind.Type => TypeName,
+        AsmTokenKind.Variable => Variable,
+        AsmTokenKind.Comment => Comment,
         _ => Text,
     };
 }
