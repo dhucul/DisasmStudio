@@ -673,8 +673,11 @@ public partial class MainWindow : Window
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
         // Rebuild only when the function changes (object identity differs across the static↔live swap too).
-        if (!ReferenceEquals(fn, _graphFn)) { Graph.SetFunction(_result, fn, _dbg?.LiveDecoder); _graphFn = fn; }
-        if (_dbg is not null) Graph.SetCurrentIp(_dbg.CurrentIp);
+        bool changed = !ReferenceEquals(fn, _graphFn);
+        // Disassembler mode fits the whole function; debugger mode keeps a readable zoom on the current
+        // instruction (resetting the zoom only when we move to a different function, not on every step).
+        if (changed) { Graph.SetFunction(_result, fn, _dbg?.LiveDecoder, autoFit: _dbg is null); _graphFn = fn; }
+        if (_dbg is not null) Graph.SetCurrentIp(_dbg.CurrentIp, resetZoom: changed);
     }
 
     private void OpenDecompiler(ulong va)

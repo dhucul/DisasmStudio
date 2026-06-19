@@ -29,6 +29,14 @@ public sealed class GraphView : FrameworkElement
     private IInstructionDecoder? _decoder;   // live decoder while debugging
     private ulong _ipVa;                      // debuggee's current instruction
 
+    // A view change (fit-to-graph in disassembler mode, or focus-on-current-block in debugger mode) is
+    // applied once the graph has a real size — the tab may not be laid out when it's requested.
+    private enum Pend { None, Fit, Focus }
+    private Pend _pend;
+    private ulong _pendVa;
+    private bool _pendResetZoom;
+    private const double DebugZoom = 1.0;    // readable zoom for debugger follow (don't shrink to fit)
+
     private readonly Typeface _typeface =
         new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 12.5;
@@ -48,7 +56,7 @@ public sealed class GraphView : FrameworkElement
         MeasureFont();
     }
 
-    public void SetFunction(AnalysisResult result, Function function, IInstructionDecoder? decoder = null)
+    public void SetFunction(AnalysisResult result, Function function, IInstructionDecoder? decoder = null, bool autoFit = true)
     {
         _result = result;
         _function = function;
@@ -63,8 +71,37 @@ public sealed class GraphView : FrameworkElement
 
         BuildLines(result);
         Layout();
-        FitToView();
+        // Disassembler mode fits the whole function; debugger mode leaves the view to the follow logic
+        // (SetCurrentIp), which keeps a readable zoom on the current block instead of shrinking to fit.
+        _pend = autoFit ? Pend.Fit : Pend.None;
+        ApplyPending();
         InvalidateVisual();
+    }
+
+    private void ApplyPending()
+    {
+        if (_pend == Pend.None || ActualWidth <= 0 || ActualHeight <= 0) return;   // defer until sized
+        if (_pend == Pend.Fit) FitToView();
+        else
+        {
+            if (_pendResetZoom) _scale = DebugZoom;
+            // centre on the IP's block; if the IP isn't in this function (browsing another), centre its entry
+            var b = _blocks.FirstOrDefault(x => _pendVa >= x.Start && _pendVa < x.End) ?? _blocks.FirstOrDefault();
+            if (b is not null) CenterOn(b);
+        }
+        _pend = Pend.None;
+    }
+
+    private void CenterOn(BasicBlock b)
+    {
+        double cx = b.X + b.Width / 2, cy = b.Y + b.Height / 2;
+        _offset = new Vector(ActualWidth / 2 - cx * _scale, ActualHeight / 2 - cy * _scale);
+    }
+
+    protected override void OnRenderSizeChanged(SizeChangedInfo info)
+    {
+        base.OnRenderSizeChanged(info);
+        if (_pend != Pend.None) { ApplyPending(); InvalidateVisual(); }   // apply the pending view once a real size exists
     }
 
     public void Clear()
@@ -72,22 +109,21 @@ public sealed class GraphView : FrameworkElement
         _function = null;
         _decoder = null;
         _ipVa = 0;
+        _pend = Pend.None;   // drop any deferred fit/focus so it can't fire against empty blocks
         _blocks.Clear();
         _byStart.Clear();
         _lines.Clear();
         InvalidateVisual();
     }
 
-    /// <summary>Highlight and centre on the block/instruction at the debuggee's current IP (0 clears).</summary>
-    public void SetCurrentIp(ulong va)
+    /// <summary>Follow the debuggee's current instruction: highlight and centre its block.
+    /// <paramref name="resetZoom"/> (set when moving to a different function) restores a readable zoom;
+    /// while stepping inside a function it stays false so the user's manual zoom is preserved.</summary>
+    public void SetCurrentIp(ulong va, bool resetZoom = false)
     {
         _ipVa = va;
-        var b = _blocks.FirstOrDefault(x => va >= x.Start && va < x.End);
-        if (b is not null && ActualWidth > 0)
-        {
-            double cx = b.X + b.Width / 2, cy = b.Y + b.Height / 2;
-            _offset = new Vector(ActualWidth / 2 - cx * _scale, ActualHeight / 2 - cy * _scale);
-        }
+        _pend = Pend.Focus; _pendVa = va; _pendResetZoom = resetZoom;
+        ApplyPending();
         InvalidateVisual();
     }
 
