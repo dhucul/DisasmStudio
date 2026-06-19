@@ -199,6 +199,9 @@ public sealed class LinearDisassemblyView : Grid
 
     private bool NearDivider(double x) => Math.Abs(x - DisasmX) <= 5;
 
+    /// <summary>How many opcode bytes fit in the bytes column at the current divider width.</summary>
+    private int BytesColMax() => Math.Max(1, (int)((DisasmX - BytesX - _charWidth) / (3 * _charWidth)));
+
     private void SetDisasmGap(double mouseX)
     {
         _disasmGapChars = Math.Clamp((mouseX - BytesX) / _charWidth, 26, 160);
@@ -295,13 +298,15 @@ public sealed class LinearDisassemblyView : Grid
             long rawLen = line + 1 < _result.Linear.Count ? (long)(_result.Linear.VaAt(line + 1) - va) : 1;
             var bytes = _result.Image.ReadBytesAtVa(va, (int)Math.Clamp(rawLen, 1, 256));
             var (d, v, _) = ClassifyData(va, bytes);
-            return $"{addr}  {d}{v}";
+            return $"{addr}  {Hex(bytes)}  {d}{v}";
         }
         if (!_dis!.TryDecodeAt(va, out var instr)) return $"{addr}  ??";
         string text = _fmt!.FormatText(instr);
         if (_result.Comments.TryGetValue(va, out var c)) text += "   ; " + c;
-        return $"{addr}  {text}";
+        return $"{addr}  {Hex(_result.Image.ReadBytesAtVa(va, instr.Length))}  {text}";
     }
+
+    private static string Hex(byte[] b) => string.Join(" ", b.Select(x => x.ToString("x2")));
 
     // ---- rendering ----
     private void Render(DrawingContext dc, double width, double height)
@@ -364,11 +369,12 @@ public sealed class LinearDisassemblyView : Grid
             return;
         }
 
-        // Bytes (up to 8 shown).
-        var bytes = _result!.Image.ReadBytesAtVa(va, Math.Min(instr.Length, 8));
+        // Bytes — as many as fit in the (draggable) bytes column; '+' if more remain.
+        int maxBytes = BytesColMax();
+        var bytes = _result!.Image.ReadBytesAtVa(va, Math.Min(instr.Length, maxBytes));
         var hex = new System.Text.StringBuilder();
         foreach (var b in bytes) hex.Append(b.ToString("x2")).Append(' ');
-        if (instr.Length > 8) hex.Append('+');
+        if (instr.Length > maxBytes) hex.Append('+');
         Draw(dc, hex.ToString(), BytesX, y, SyntaxTheme.Bytes, dpi);
 
         // Disassembly tokens.
@@ -392,9 +398,10 @@ public sealed class LinearDisassemblyView : Grid
         var bytes = _result.Image.ReadBytesAtVa(va, len);
         if (bytes.Length == 0) { Draw(dc, "??", DisasmX, y, SyntaxTheme.Comment, dpi); return; }
 
+        int maxBytes = BytesColMax();
         var hexCol = new System.Text.StringBuilder();
-        for (int i = 0; i < bytes.Length && i < 8; i++) hexCol.Append(bytes[i].ToString("x2")).Append(' ');
-        if (bytes.Length > 8) hexCol.Append('+');
+        for (int i = 0; i < bytes.Length && i < maxBytes; i++) hexCol.Append(bytes[i].ToString("x2")).Append(' ');
+        if (bytes.Length > maxBytes) hexCol.Append('+');
         Draw(dc, hexCol.ToString(), BytesX, y, SyntaxTheme.Bytes, dpi);
 
         var (directive, value, valueBrush) = ClassifyData(va, bytes);
