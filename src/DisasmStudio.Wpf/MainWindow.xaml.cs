@@ -26,8 +26,10 @@ public partial class MainWindow : Window
 
     private ObservableCollection<FunctionItem> _functions = [];
     private ObservableCollection<StringItem> _strings = [];
+    private ObservableCollection<ExportItem> _exports = [];
     private ICollectionView? _functionsView;
     private ICollectionView? _stringsView;
+    private ICollectionView? _exportsView;
 
     public MainWindow()
     {
@@ -212,6 +214,14 @@ public partial class MainWindow : Window
         _stringsView.Filter = StringFilterPredicate;
         StringList.ItemsSource = _stringsView;
 
+        _exports = new ObservableCollection<ExportItem>(result.Image.Symbols
+            .Where(s => s.Kind == NamedSymbolKind.Export)
+            .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(s => new ExportItem(s)));
+        _exportsView = CollectionViewSource.GetDefaultView(_exports);
+        _exportsView.Filter = ExportFilterPredicate;
+        ExportList.ItemsSource = _exportsView;
+
         ImportList.ItemsSource = result.Image.Imports.Select(i => new ImportItem(i)).ToList();
         SectionList.ItemsSource = result.Image.Sections.Select(s => new SectionItem(s)).ToList();
     }
@@ -220,6 +230,7 @@ public partial class MainWindow : Window
     {
         FuncList.ItemsSource = null;
         StringList.ItemsSource = null;
+        ExportList.ItemsSource = null;
         ImportList.ItemsSource = null;
         SectionList.ItemsSource = null;
         XrefList.ItemsSource = null;
@@ -380,6 +391,19 @@ public partial class MainWindow : Window
     private void OnSectionActivate(object sender, MouseButtonEventArgs e)
     {
         if (SectionList.SelectedItem is SectionItem se) _nav.Navigate(se.Va);
+    }
+
+    private void OnExportActivate(object sender, MouseButtonEventArgs e)
+    {
+        if (ExportList.SelectedItem is ExportItem ex) _nav.Navigate(ex.Va);
+    }
+    private void OnExportFilter(object sender, TextChangedEventArgs e) => _exportsView?.Refresh();
+    private bool ExportFilterPredicate(object o)
+    {
+        string f = ExportFilter.Text.Trim();
+        if (f.Length == 0 || o is not ExportItem ex) return true;
+        return ex.Name.Contains(f, StringComparison.OrdinalIgnoreCase)
+            || ex.Address.Contains(f, StringComparison.OrdinalIgnoreCase);
     }
     private void OnXrefActivate(object sender, MouseButtonEventArgs e)
     {

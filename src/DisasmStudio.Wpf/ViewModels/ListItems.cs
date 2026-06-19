@@ -33,6 +33,14 @@ public sealed class ImportItem(ImportEntry imp)
     public string Name => imp.Name;
 }
 
+/// <summary>Row in the Exports list.</summary>
+public sealed class ExportItem(NamedSymbol s)
+{
+    public ulong Va => s.Va;
+    public string Address => s.Va.ToString("X");
+    public string Name => s.Name;
+}
+
 /// <summary>Row in the Xrefs list.</summary>
 public sealed class XrefItem(Xref x)
 {
