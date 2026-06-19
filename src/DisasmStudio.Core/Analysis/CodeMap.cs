@@ -139,7 +139,7 @@ public static class CodeMap
                     one[0] = va;
                     Descend(image, code, one, jumpTables, token);
                     seeds.Add(va);
-                    va = code.NextGap(va, end);
+                    va = Math.Max(code.NextGap(va, end), va + 1);   // always make progress
                     continue;
                 }
                 va++;   // unknown byte — keep scanning
