@@ -48,6 +48,7 @@ public sealed class DecompilerView : Grid
 
     public event Action<ulong>? NavigateRequested;
     public event Action<ulong>? SelectionChanged;
+    public event Action<ulong>? SaveCRequested;
 
     private static readonly (ILLevel Level, string Label)[] Levels =
     [
@@ -94,6 +95,12 @@ public sealed class DecompilerView : Grid
         host.Children.Add(_scroll);
         SetRow(host, 1);
         Children.Add(host);
+
+        var menu = new ContextMenu();
+        var saveC = new MenuItem { Header = "Save function as C…" };
+        saveC.Click += (_, _) => { if (_shownFn != 0) SaveCRequested?.Invoke(_shownFn); };
+        menu.Items.Add(saveC);
+        _surface.ContextMenu = menu;
 
         MeasureFont();
         UpdateLevelButtons();

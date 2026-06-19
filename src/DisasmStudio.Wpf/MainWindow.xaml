@@ -15,6 +15,9 @@
                 <Button x:Name="UndoBtn" Content="↶ Undo" Click="OnUndoPatch" Margin="6,0,0,0" IsEnabled="False" ToolTip="Undo last edit (Ctrl+Z)" />
                 <Button x:Name="SavePatchedBtn" Content="Save Patched As…" Click="OnSavePatched" Margin="6,0,0,0" IsEnabled="False" />
                 <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
+                <Button Content="Save ASM…" Click="OnSaveAsm" ToolTip="Export the full disassembly listing to a .asm file" />
+                <Button Content="Save C…" Click="OnSaveC" Margin="6,0,0,0" ToolTip="Export the decompiled Pseudo-C of all functions to a .c file" />
+                <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
                 <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" />
                 <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,0,0,0" />
                 <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />

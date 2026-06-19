@@ -8,6 +8,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
+using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
 using Iced.Intel;
 using DisasmStudio.Wpf.Services;
@@ -62,6 +63,8 @@ public partial class MainWindow : Window
         Graph.BlockSelected += va => _nav.Navigate(va);
         Decompiler.NavigateRequested += va => _nav.Navigate(va);
         Decompiler.SelectionChanged += OnAddressFocused;
+        Linear.SaveAsmRequested += SaveFunctionAsm;
+        Decompiler.SaveCRequested += SaveFunctionC;
         PreviewKeyDown += OnWindowPreviewKeyDown;
     }
 
@@ -318,6 +321,90 @@ public partial class MainWindow : Window
         _projectPath = path;
         Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(_image.FilePath)})";
         StatusText.Text = $"Saved project to {path}";
+    }
+
+    // ---- export to .asm / .c ----
+    private async void OnSaveAsm(object sender, RoutedEventArgs e)
+    {
+        if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Save ASM", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        var dlg = new SaveFileDialog { Title = "Save disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
+            FileName = Path.GetFileNameWithoutExtension(_image.FilePath) + ".asm" };
+        if (dlg.ShowDialog(this) != true) return;
+        var r = _result;
+        await RunExport(dlg.FileName, "disassembly", (w, p, ct) => SourceExporter.WriteAsm(w, r, p, ct));
+    }
+
+    private async void OnSaveC(object sender, RoutedEventArgs e)
+    {
+        if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        var dlg = new SaveFileDialog { Title = "Save Pseudo-C", Filter = "C source|*.c|Text|*.txt|All files|*.*",
+            FileName = Path.GetFileNameWithoutExtension(_image.FilePath) + ".c" };
+        if (dlg.ShowDialog(this) != true) return;
+        var r = _result;
+        await RunExport(dlg.FileName, "Pseudo-C", (w, p, ct) => SourceExporter.WriteC(w, r, p, ct));
+    }
+
+    /// <summary>Run a whole-program export on a background thread, streaming to disk with progress.</summary>
+    private async Task RunExport(string path, string what, Action<TextWriter, IProgress<int>, CancellationToken> body)
+    {
+        Progress.Visibility = Visibility.Visible;
+        Progress.IsIndeterminate = false;
+        Progress.Value = 0;
+        StatusText.Text = $"Exporting {what}…";
+        var prog = new Progress<int>(v => Progress.Value = v);
+        try
+        {
+            await Task.Run(() =>
+            {
+                using var sw = new StreamWriter(path);
+                body(sw, prog, CancellationToken.None);
+            });
+            StatusText.Text = $"Saved {what} to {path}";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            StatusText.Text = "Export failed.";
+        }
+        finally { Progress.Visibility = Visibility.Collapsed; Progress.Value = 0; }
+    }
+
+    private void SaveFunctionAsm(ulong va)
+    {
+        var fn = FindFunction(va);
+        if (fn is null || _result is null) return;
+        var dlg = new SaveFileDialog { Title = "Save function disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
+            FileName = SafeFileName(fn.Name) + ".asm" };
+        if (dlg.ShowDialog(this) != true) return;
+        try
+        {
+            using var sw = new StreamWriter(dlg.FileName);
+            SourceExporter.WriteAsmFunction(sw, _result, fn);
+            StatusText.Text = $"Saved {fn.Name} to {dlg.FileName}";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    private void SaveFunctionC(ulong va)
+    {
+        var fn = FindFunction(va);
+        if (fn is null || _result is null) return;
+        var dlg = new SaveFileDialog { Title = "Save function Pseudo-C", Filter = "C source|*.c|Text|*.txt|All files|*.*",
+            FileName = SafeFileName(fn.Name) + ".c" };
+        if (dlg.ShowDialog(this) != true) return;
+        try
+        {
+            using var sw = new StreamWriter(dlg.FileName);
+            SourceExporter.WriteCFunction(sw, _result, fn);
+            StatusText.Text = $"Saved {fn.Name} to {dlg.FileName}";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    private static string SafeFileName(string s)
+    {
+        foreach (var c in Path.GetInvalidFileNameChars()) s = s.Replace(c, '_');
+        return s.Length > 80 ? s[..80] : s;
     }
 
     private async Task LoadFile(string path)
