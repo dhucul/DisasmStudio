@@ -196,7 +196,7 @@ public static class AnalysisEngine
         HashSet<ulong> callTargets, HashSet<ulong> branchTargets)
     {
         var names = new Dictionary<ulong, string>();
-        foreach (var sym in image.Symbols) names[sym.Va] = sym.Name;      // imports, exports, ELF funcs
+        foreach (var sym in image.Symbols) names[sym.Va] = Demangler.Demangle(sym.Name);   // imports, exports, ELF funcs (C++ demangled)
         if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) names.TryAdd(image.EntryVa, "start");
         foreach (var f in image.FunctionStarts) names.TryAdd(f, $"sub_{f:X}");   // .pdata functions
         foreach (var t in callTargets) names.TryAdd(t, $"sub_{t:X}");

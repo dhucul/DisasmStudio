@@ -39,7 +39,10 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   `RegOpenKeyExW(hKey, lpSubKey=L"Software\\…", samDesired=KEY_READ)`,
   `VirtualAlloc(…, flAllocationType=MEM_COMMIT, flProtect=PAGE_EXECUTE_READWRITE)`. Shown inline in
   both linear and graph views.
-- **Side panels:** Functions, Strings, Imports, Sections, and live Cross-references.
+- **Side panels:** Functions, Strings, Imports, Exports, Sections, and live Cross-references.
+- **C++ demangling:** mangled symbol names are demangled to readable signatures throughout (Functions
+  list, Exports/Imports, labels) — MSVC names (`?…`) via the OS `UnDecorateSymbolName`, and Itanium
+  names (`_Z…`, GCC/Clang/MinGW/ELF) via a built-in demangler. Anything unrecognised is left as-is.
 - **Projects:** save the session as a `.dsproj` (binary reference, load options, and current view
   state) via *Save Project…* and reopen it with *Open Project…* — it re-analyses on open (fast, always
   consistent with the engine). The format is versioned to carry future user edits (renames, comments).

@@ -30,7 +30,7 @@ public sealed class ImportItem(ImportEntry imp)
     public ulong Va => imp.IatVa;
     public string Address => imp.IatVa.ToString("X");
     public string Module => imp.Module;
-    public string Name => imp.Name;
+    public string Name => Demangler.Demangle(imp.Name);
 }
 
 /// <summary>Row in the Exports list.</summary>
@@ -38,7 +38,7 @@ public sealed class ExportItem(NamedSymbol s)
 {
     public ulong Va => s.Va;
     public string Address => s.Va.ToString("X");
-    public string Name => s.Name;
+    public string Name => Demangler.Demangle(s.Name);
 }
 
 /// <summary>Row in the Xrefs list.</summary>
