@@ -7,8 +7,9 @@ public sealed class AnalysisResult
 {
     public required IBinaryImage Image { get; init; }
 
-    /// <summary>Every instruction's VA in image order — the spine of the linear view.</summary>
-    public required LinearIndex Linear { get; init; }
+    /// <summary>Every instruction's VA in image order — the spine of the linear view.
+    /// Settable so a local patch repair can splice in a re-decoded region without a full re-analysis.</summary>
+    public required LinearIndex Linear { get; set; }
 
     /// <summary>Discovered functions (entry, exports, call targets), CFG built lazily per function.</summary>
     public required IReadOnlyList<Function> Functions { get; init; }

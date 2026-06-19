@@ -33,8 +33,9 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
 - **Patching (x86/x64):** right-click an instruction → *Patch…* to assemble a replacement (`nop`,
   `jmp 0x…`, `mov eax, 1`, branches, simple ALU/mov ops — via Iced's encoder) or NOP it out; raw hex
   bytes are also accepted. Patches cover whole instructions and NOP-pad the remainder to stay aligned.
-  Edits are an in-memory overlay seen by the disassembler and re-analysis; *Save Patched As…* writes a
-  new binary.
+  Edits are an in-memory overlay seen everywhere; a patch re-decodes only the changed region and
+  splices it into the linear index (no full re-sweep — milliseconds, not seconds), with Ctrl+Z undo.
+  *Save Patched As…* writes a new binary.
 - **Windows API awareness (IDA/BN-style):** a bundled database of ~100 common Win32 prototypes
   annotates each API call site with the function's parameters and, where it can prove them, the
   argument *values* — recovered by a short backward scan of the registers (x64 rcx/rdx/r8/r9, plus

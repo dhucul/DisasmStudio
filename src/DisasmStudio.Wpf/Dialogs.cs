@@ -35,12 +35,13 @@ internal static class Dialogs
 
     /// <summary>Ask how to patch the instruction at <paramref name="va"/>. Returns the assembly text
     /// (or hex bytes) to encode, and whether to just NOP it out; null if cancelled.</summary>
-    public static (string Asm, bool Nop)? AskPatch(Window owner, ulong va, string currentText, string currentBytes)
+    public static (string Asm, bool Nop)? AskPatch(Window owner, ulong va, string currentText, string currentBytes, string prefill = "")
     {
         var mono = new FontFamily("Cascadia Mono, Consolas");
         var info = new TextBlock { Text = $"{va:X}   {currentText}", Foreground = Fg, FontFamily = mono, Margin = new Thickness(0, 0, 0, 2) };
         var bytes = new TextBlock { Text = currentBytes, Foreground = new SolidColorBrush(Color.FromRgb(0x79, 0x82, 0x8F)), FontFamily = mono, Margin = new Thickness(0, 0, 0, 10) };
-        var box = new TextBox { Text = "", FontFamily = mono, AcceptsReturn = true, MinLines = 2, MaxLines = 8 };
+        var box = new TextBox { Text = prefill, FontFamily = mono, AcceptsReturn = true, MinLines = 2, MaxLines = 8 };
+        box.SelectAll();
         var nop = new CheckBox { Content = "Replace with NOPs", Foreground = Fg, Margin = new Thickness(0, 10, 0, 0) };
 
         var panel = new StackPanel { Margin = new Thickness(16) };

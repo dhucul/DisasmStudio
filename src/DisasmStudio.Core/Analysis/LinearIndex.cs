@@ -38,6 +38,20 @@ public sealed class LinearIndex
     /// <summary>True if line <paramref name="line"/> is a data run (rendered as db/dd/dq/string) rather than an instruction.</summary>
     public bool IsDataAt(long line) => line >= 0 && line < Count && (RawAt(line) & DataFlag) != 0;
 
+    /// <summary>A copy with all entries in [<paramref name="start"/>, <paramref name="end"/>) replaced by
+    /// <paramref name="codeStarts"/> (instruction starts of the re-decoded region). Used for local patch
+    /// repair — no re-sweep of the whole image, just a copy of the (cheap) index.</summary>
+    public LinearIndex CloneWithRegion(ulong start, ulong end, IReadOnlyList<ulong> codeStarts)
+    {
+        var ni = new LinearIndex();
+        long i = 0;
+        for (; i < Count && VaAt(i) < start; i++) ni.Add(VaAt(i), IsDataAt(i));
+        foreach (var s in codeStarts) ni.Add(s);          // re-decoded region is code
+        while (i < Count && VaAt(i) < end) i++;            // drop the old region's entries
+        for (; i < Count; i++) ni.Add(VaAt(i), IsDataAt(i));
+        return ni;
+    }
+
     /// <summary>Line index of <paramref name="va"/>, or the line of the nearest entry at/below it.</summary>
     public long IndexOf(ulong va)
     {

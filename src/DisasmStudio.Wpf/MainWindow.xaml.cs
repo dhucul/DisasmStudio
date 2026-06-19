@@ -9,6 +9,7 @@ using System.Windows.Input;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Formats;
+using Iced.Intel;
 using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
 using Microsoft.Win32;
@@ -25,6 +26,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _cts;
     private ulong[] _funcStarts = [];
     private string? _projectPath;
+    private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
 
     private ObservableCollection<FunctionItem> _functions = [];
     private ObservableCollection<StringItem> _strings = [];
@@ -55,7 +57,7 @@ public partial class MainWindow : Window
         Linear.ShowXrefsRequested += va => { SideTabs.SelectedIndex = 0; ShowXrefs(va); };
         Linear.OpenInGraphRequested += va => { OpenGraph(va); CenterTabs.SelectedIndex = 1; };
         Linear.PatchRequested += OnPatchInstruction;
-        Hex.Edited += OnImageEdited;
+        Hex.Edited += OnHexEdited;
         Graph.BlockSelected += va => _nav.Navigate(va);
         PreviewKeyDown += OnWindowPreviewKeyDown;
     }
@@ -79,7 +81,11 @@ public partial class MainWindow : Window
 
         var orig = _image.ReadBytesAtVa(va, ins.Length);
         string curHex = string.Join(" ", orig.Select(b => b.ToString("x2")));
-        var req = Dialogs.AskPatch(this, va, ins.ToString(), curHex);
+        // Pre-fill a direct branch/call as assemblable text so flipping jmp→jz is a one-word edit.
+        string prefill = ins.Op0Kind is OpKind.NearBranch16 or OpKind.NearBranch32 or OpKind.NearBranch64
+            ? $"{ins.Mnemonic.ToString().ToLowerInvariant()} 0x{ins.NearBranchTarget:X}"
+            : "";
+        var req = Dialogs.AskPatch(this, va, ins.ToString(), curHex, prefill);
         if (req is null) return;
 
         byte[] patch;
@@ -105,15 +111,55 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "That address is not file-backed.", "Patch", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        OnImageEdited();
-        _ = StartAnalysis(_image, va, CenterTabs.SelectedIndex, fresh: false);   // re-analyze with the patch; keep the lists
+        ulong end = va + (ulong)cover;
+        _changeStack.Push((va, end, true));
+        RepairIndex(va, end);          // local re-decode of just this region — no full re-sweep
+        UpdatePatchButtons();
     }
 
-    private void OnImageEdited()
+    private void OnHexEdited(ulong va)
+    {
+        // Hex byte edits stay view-local (no linear re-index — typing must stay snappy on huge files);
+        // tracked so undo stays in lock-step with the image's undo stack.
+        _changeStack.Push((va, va + 1, false));
+        UpdatePatchButtons();
+    }
+
+    /// <summary>Re-decode just the changed region and splice it into the linear index — the rest of the
+    /// index (built once by the full analysis) is reused as-is, so a patch costs a region decode, not a sweep.</summary>
+    private void RepairIndex(ulong changeStart, ulong changeEnd)
+    {
+        if (_result is null || _image is null) return;
+        var idx = _result.Linear;
+        long line = idx.IndexOf(changeStart);
+        if (idx.VaAt(line) > changeStart && line > 0) line--;
+        if (idx.IsDataAt(line)) { Linear.Refresh(); Hex.InvalidateView(); return; }   // data byte: no boundary change
+
+        ulong from = idx.VaAt(line);
+        var d = new Disassembler(_image);
+        var starts = new List<ulong>();
+        ulong cur = from;
+        for (int guard = 0; guard < 200_000 && cur < _image.MaxVa; guard++)
+        {
+            if (cur >= changeEnd)                              // resynced with an existing code boundary?
+            {
+                long l2 = idx.IndexOf(cur);
+                if (idx.VaAt(l2) == cur && !idx.IsDataAt(l2)) break;
+            }
+            if (!d.TryDecodeAt(cur, out var ins) || ins.Length == 0) break;
+            starts.Add(cur);
+            cur += (ulong)ins.Length;
+        }
+        _result.Linear = idx.CloneWithRegion(from, cur, starts);
+        Linear.RefreshAfterPatch();
+        Linear.GoToVa(changeStart);
+        Hex.InvalidateView();
+    }
+
+    private void UpdatePatchButtons()
     {
         SavePatchedBtn.IsEnabled = _image?.IsDirty == true;
         UndoBtn.IsEnabled = _image?.CanUndo == true;
-        Hex.InvalidateView();
     }
 
     private void OnUndoPatch(object sender, RoutedEventArgs e) => UndoLastPatch();
@@ -122,9 +168,12 @@ public partial class MainWindow : Window
     {
         if (_image is null || !_image.CanUndo) return;
         _image.Undo();
-        OnImageEdited();
-        ulong va = _nav.Current ?? _image.EntryVa;
-        _ = StartAnalysis(_image, va, CenterTabs.SelectedIndex, fresh: false);   // re-analyze in place; keep the lists
+        if (_changeStack.Count > 0)
+        {
+            var (start, end, isPatch) = _changeStack.Pop();
+            if (isPatch) RepairIndex(start, end); else Hex.InvalidateView();
+        }
+        UpdatePatchButtons();
     }
 
     private void OnSavePatched(object sender, RoutedEventArgs e)
@@ -276,6 +325,7 @@ public partial class MainWindow : Window
             // lists and navigation visible until the new results replace them (no empty flash).
             _result = null;
             _nav.Reset();
+            _changeStack.Clear();
             ClearLists();
             Title = $"DisasmStudio — {Path.GetFileName(image.FilePath)}";
             FileInfo.Text = $"{Path.GetFileName(image.FilePath)}  ·  {image.FormatName}  ·  {image.ArchName}  ·  base {image.ImageBase:X}";

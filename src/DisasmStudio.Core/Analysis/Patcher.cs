@@ -209,9 +209,13 @@ public static class Patcher
         s = s.Trim();
         bool neg = s.StartsWith('-');
         if (neg) s = s[1..].Trim();
-        bool ok = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-            ? long.TryParse(s.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v)
-            : long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v);
+        bool ok;
+        if (s.EndsWith("h", StringComparison.OrdinalIgnoreCase))             // MASM hex suffix: 1Fh
+            ok = long.TryParse(s.AsSpan(0, s.Length - 1), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v);
+        else if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            ok = long.TryParse(s.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v);
+        else
+            ok = long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v);
         if (neg) v = -v;
         return ok;
     }
@@ -219,9 +223,9 @@ public static class Patcher
     private static bool TryAddr(string s, out ulong v)
     {
         s = s.Trim();
-        return s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-            ? ulong.TryParse(s.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v)
-            : ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v);
+        if (s.EndsWith("h", StringComparison.OrdinalIgnoreCase)) s = s[..^1];   // MASM hex suffix: 140001000h
+        else if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
+        return ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v);
     }
 
     private static bool TryReg64(string s, out AssemblerRegister64 r) => R64.TryGetValue(s.Trim().ToLowerInvariant(), out r);

@@ -35,8 +35,8 @@ public sealed class HexView : Grid
     private int _editNibble;   // 0 = next keystroke sets the high nibble, 1 = low nibble
     private const long MaxCopyBytes = 1 << 20;
 
-    /// <summary>Raised after a byte is edited, so the host can mark the image dirty / enable Save.</summary>
-    public event Action? Edited;
+    /// <summary>Raised (with the edited VA) after a byte is changed, so the host can track the edit.</summary>
+    public event Action<ulong>? Edited;
 
     private static readonly Brush BgBrush = Frozen(0x10, 0x14, 0x1B);
     private static readonly Brush AddrBrush = Frozen(0x6B, 0x8F, 0xD6);
@@ -215,9 +215,10 @@ public sealed class HexView : Grid
     private void TypeHex(int nibble)
     {
         if (_image is null || !_hasSelection) return;
-        int off = _image.VaToOffset(_selCaret);
+        ulong editVa = _selCaret;
+        int off = _image.VaToOffset(editVa);
         if (off < 0) return;
-        var cur = _image.ReadBytesAtVa(_selCaret, 1);
+        var cur = _image.ReadBytesAtVa(editVa, 1);
         byte b = cur.Length == 1 ? cur[0] : (byte)0;
         byte nb = _editNibble == 0 ? (byte)((nibble << 4) | (b & 0x0F)) : (byte)((b & 0xF0) | nibble);
         _image.Patch(off, [nb]);
@@ -225,10 +226,10 @@ public sealed class HexView : Grid
         else
         {
             _editNibble = 0;
-            ulong next = _selCaret + 1;
+            ulong next = editVa + 1;
             if (next < _image.MaxVa) { _selAnchor = _selCaret = next; }
         }
-        Edited?.Invoke();
+        Edited?.Invoke(editVa);
         _surface.InvalidateVisual();
     }
 

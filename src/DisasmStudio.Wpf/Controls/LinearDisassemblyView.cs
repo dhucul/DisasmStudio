@@ -70,6 +70,19 @@ public sealed class LinearDisassemblyView : Grid
         MeasureFont();
     }
 
+    /// <summary>Repaint (e.g. a data byte changed underneath, no index change).</summary>
+    public void Refresh() => _surface.InvalidateVisual();
+
+    /// <summary>Rebuild labels and repaint after the result's index was spliced (local patch repair),
+    /// keeping the current scroll/caret rather than resetting like <see cref="SetResult"/>.</summary>
+    public void RefreshAfterPatch()
+    {
+        if (_result is null) return;
+        BuildLabelLines(_result);
+        ConfigureScroll();
+        _surface.InvalidateVisual();
+    }
+
     public void SetResult(AnalysisResult? result)
     {
         _result = result;
