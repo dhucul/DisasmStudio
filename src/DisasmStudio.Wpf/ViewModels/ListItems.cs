@@ -3,13 +3,17 @@ using DisasmStudio.Core.Formats;
 
 namespace DisasmStudio.Wpf.ViewModels;
 
-/// <summary>Row in the Functions list.</summary>
-public sealed class FunctionItem(Function fn)
+/// <summary>Row in the Functions list — a discovered function, or an imported function (at its IAT slot).</summary>
+public sealed class FunctionItem
 {
-    public Function Function { get; } = fn;
-    public ulong Va => Function.Va;
-    public string Address => Function.Va.ToString("X");
-    public string Name => Function.Name;
+    public Function? Function { get; }
+    public ulong Va { get; }
+    public string Name { get; }
+    public string Section { get; }
+    public string Address => Va.ToString("X");
+
+    public FunctionItem(Function fn, string section) { Function = fn; Va = fn.Va; Name = fn.Name; Section = section; }
+    public FunctionItem(ulong va, string name, string section) { Va = va; Name = name; Section = section; }
 }
 
 /// <summary>Row in the Strings list.</summary>

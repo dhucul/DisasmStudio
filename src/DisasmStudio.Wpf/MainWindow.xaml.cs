@@ -204,7 +204,10 @@ public partial class MainWindow : Window
 
     private void PopulateLists(AnalysisResult result)
     {
-        _functions = new ObservableCollection<FunctionItem>(result.Functions.Select(f => new FunctionItem(f)));
+        var funcRows = result.Functions.Select(f => new FunctionItem(f, result.Image.SectionAt(f.Va)?.Name ?? ""));
+        var importRows = result.Image.Imports.Select(i =>
+            new FunctionItem(i.IatVa, Demangler.Demangle(i.Name), result.Image.SectionAt(i.IatVa)?.Name ?? ""));
+        _functions = new ObservableCollection<FunctionItem>(funcRows.Concat(importRows).OrderBy(x => x.Va));
         _functionsView = CollectionViewSource.GetDefaultView(_functions);
         _functionsView.Filter = FuncFilterPredicate;
         FuncList.ItemsSource = _functionsView;
@@ -315,7 +318,10 @@ public partial class MainWindow : Window
     }
     private void OnFuncActivate(object sender, MouseButtonEventArgs e)
     {
-        if (FuncList.SelectedItem is FunctionItem fi) { OpenGraph(fi.Va); CenterTabs.SelectedIndex = 1; }
+        if (FuncList.SelectedItem is not FunctionItem fi) return;
+        if (fi.Function is null) { _nav.Navigate(fi.Va); return; }   // import row — no CFG, just go to it
+        OpenGraph(fi.Va);
+        CenterTabs.SelectedIndex = 1;
     }
     private void OnFuncFilter(object sender, TextChangedEventArgs e) => _functionsView?.Refresh();
 
@@ -324,7 +330,8 @@ public partial class MainWindow : Window
         string f = FuncFilter.Text.Trim();
         if (f.Length == 0 || o is not FunctionItem fi) return true;
         return fi.Name.Contains(f, StringComparison.OrdinalIgnoreCase)
-            || fi.Address.Contains(f, StringComparison.OrdinalIgnoreCase);
+            || fi.Address.Contains(f, StringComparison.OrdinalIgnoreCase)
+            || fi.Section.Contains(f, StringComparison.OrdinalIgnoreCase);
     }
 
     private void OnStringFilter(object sender, TextChangedEventArgs e) => _stringsView?.Refresh();

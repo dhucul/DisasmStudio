@@ -59,9 +59,10 @@
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="92" />
-                                    <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}"
+                                    <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}" Width="200"
                                                TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{Binding Address, StringFormat='0x{0}'}" Foreground="{StaticResource Accent}" Width="104" />
+                                    <TextBlock Text="{Binding Section}" Foreground="{StaticResource TextMuted}" />
                                 </StackPanel>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
