@@ -109,6 +109,8 @@ public sealed class DebuggerEngine
 
             if (stop)
             {
+                // Re-arm a breakpoint we stepped off (for step over/out/run-to) regardless of why we stopped.
+                if (_reArmOnNextStop != 0) { ArmAddr(_reArmOnNextStop); _reArmOnNextStop = 0; }
                 IsStopped = true;
                 var (mode, target) = _resume.Take();
                 IsStopped = false;
@@ -141,6 +143,7 @@ public sealed class DebuggerEngine
                 }
                 ThreadsChanged?.Invoke(); ModulesChanged?.Invoke();
                 if (!_attached) AddTempBp(EntryPoint);   // launched: break at the entry point
+                if (info.hFile != IntPtr.Zero) Native.CloseHandle(info.hFile);   // the debugger owns the image file handle
                 return false;
             }
             case Native.CREATE_THREAD_DEBUG_EVENT:
@@ -149,13 +152,14 @@ public sealed class DebuggerEngine
                 ThreadsChanged?.Invoke();
                 return false;
             case Native.EXIT_THREAD_DEBUG_EVENT:
-                lock (_lock) _threads.Remove(ev.dwThreadId);
+                lock (_lock) { if (_threads.Remove(ev.dwThreadId, out var h)) Native.CloseHandle(h); }
                 ThreadsChanged?.Invoke();
                 return false;
             case Native.LOAD_DLL_DEBUG_EVENT:
             {
                 ulong b = ev.LoadDll.lpBaseOfDll;
                 lock (_lock) _modules[b] = new ModuleInfo(b, ModulePath(b) ?? $"module_{b:X}");
+                if (ev.LoadDll.hFile != IntPtr.Zero) Native.CloseHandle(ev.LoadDll.hFile);   // close the DLL file handle
                 ModulesChanged?.Invoke();
                 return false;
             }
@@ -188,8 +192,7 @@ public sealed class DebuggerEngine
             // temp / one-shot breakpoint
             if (RemoveTempBpIfPresent(addr))
             {
-                SetIp(hThread, addr);
-                if (_reArmOnNextStop != 0) { ArmAddr(_reArmOnNextStop); _reArmOnNextStop = 0; }
+                SetIp(hThread, addr);   // _reArmOnNextStop is handled centrally in the loop's stop branch
                 bool entry = !_attached && addr == EntryPoint && !_seenEntry;
                 _seenEntry = true;
                 Stopped?.Invoke(new StopInfo(entry ? StopReason.EntryPoint : StopReason.Breakpoint, ev.dwThreadId, addr, code));
@@ -425,7 +428,23 @@ public sealed class DebuggerEngine
         var buf = new byte[count];
         Native.ReadProcessMemory(_proc, addr, buf, (nuint)count, out var read);
         if ((int)read != count) Array.Resize(ref buf, (int)read);
+        MaskBreakpoints(addr, buf);
         return buf;
+    }
+
+    /// <summary>Replace our injected 0xCC breakpoint bytes with the originals so callers (disassembly,
+    /// dump, call-stack, step-over) see the program's real bytes rather than the instrumentation.</summary>
+    private void MaskBreakpoints(ulong addr, byte[] buf)
+    {
+        if (buf.Length == 0) return;
+        ulong end = addr + (ulong)buf.Length;
+        lock (_lock)
+        {
+            foreach (var bp in _swBps.Values)
+                if (bp.Armed && bp.Address >= addr && bp.Address < end) buf[bp.Address - addr] = bp.Original;
+            foreach (var kv in _tempBps)
+                if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value;
+        }
     }
 
     public bool WriteMemory(ulong addr, byte[] bytes) => WriteCode(addr, bytes);
