@@ -39,6 +39,8 @@ public sealed class FunctionCapture
     private StreamWriter? _log;
 
     public bool Active { get; private set; }
+    public bool Draining { get; private set; }      // stop requested; waiting for a frozen stop to remove bps
+    public bool ResumeAfter { get; private set; }   // resume the debuggee after the teardown
 
     /// <summary>Raised (engine thread) after each captured record so the UI can refresh on its own cadence.</summary>
     public event Action? Captured;
@@ -89,11 +91,19 @@ public sealed class FunctionCapture
         }
     }
 
+    /// <summary>Mark capture for teardown on the upcoming Pause stop, when the debuggee is frozen and
+    /// removing the breakpoints is safe (writing breakpoint bytes into a running process is what
+    /// corrupts/crashes it). Capture stays active through the brief drain window so its own breakpoints are
+    /// still consumed (and don't surface as stray stops) until the Pause arrives.</summary>
+    public void BeginDraining(bool resumeAfter) { lock (_lock) { Draining = true; ResumeAfter = resumeAfter; } }
+
+    /// <summary>Remove all capture breakpoints and close the log. Must be called while the debuggee is
+    /// frozen (or already exited) — never while it is running.</summary>
     public void StopCapture()
     {
         lock (_lock)
         {
-            Active = false;
+            Active = false; Draining = false;
             foreach (var va in _entries) { try { _eng.RemoveBreakpoint(va); } catch { } }
             foreach (var va in _retBps) { try { _eng.RemoveBreakpoint(va); } catch { } }
             _entries.Clear(); _retBps.Clear(); _pending.Clear();

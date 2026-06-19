@@ -145,16 +145,19 @@ public partial class MainWindow : Window
     private void OnCaptureAll(object sender, RoutedEventArgs e)
     {
         if (_dbg is null) return;
-        if (_dbg.Capture is { Active: true }) { StopCapture(); return; }
+        // A capture is in progress: stop it (toggle). If it is already draining, ignore the extra click so we
+        // don't issue a second Pause or start a new capture over the one being torn down.
+        if (_dbg.Capture is { } c) { if (!c.Draining) StopCapture(); return; }
         StartCapture(0);
     }
 
     private void OnCaptureFunc(object sender, RoutedEventArgs e)
     {
         if (_dbg is null || _nav.Current is not ulong va) return;
+        // Stopping a capture is asynchronous (it drains while frozen), so don't start a second one over it.
+        if (_dbg.Capture is not null) { StatusText.Text = "Stop the current capture first."; return; }
         var fn = FindFunction(va);
         if (fn is null) { StatusText.Text = "No function at the current address to capture."; return; }
-        if (_dbg.Capture is { Active: true }) StopCapture();
         StartCapture(fn.Va);
     }
 
@@ -233,7 +236,7 @@ public partial class MainWindow : Window
     {
         _captureTimer?.Stop();
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
-        _dbg?.StopCapture();   // remove capture breakpoints (harmless on a dead process) and close the log file
+        _dbg?.AbortCapture();   // process is gone: drop capture state and close the log (no live removal needed)
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false;
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;

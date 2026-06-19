@@ -46,9 +46,20 @@ public sealed class DebugSession
 
     private void OnStopped(StopInfo s)
     {
-        // Capture runs on the engine thread: if this is one of its breakpoints it records + auto-resumes,
-        // and we skip the interactive UI stop entirely (the program keeps running).
-        if (Capture is { Active: true } cap && cap.Handle(s)) return;
+        // Capture runs on the engine thread: one of its breakpoints records + auto-resumes (no UI stop).
+        var cap = Capture;
+        if (cap is { Active: true } && cap.Handle(s)) return;
+
+        // Stopping a capture: now that the debuggee is frozen it is safe to remove the capture breakpoints.
+        // If our own Pause caused this stop, resume so the program keeps running with capture off; otherwise
+        // (a user breakpoint / exception happened first) let that stop surface normally.
+        if (cap is { Draining: true })
+        {
+            cap.StopCapture();
+            Capture = null;
+            if (cap.ResumeAfter && s.Reason == StopReason.Paused) { Engine.Go(); return; }
+        }
+
         _ui.BeginInvoke(() => OnStoppedUi(s));
     }
 
@@ -90,5 +101,17 @@ public sealed class DebugSession
         return cap;
     }
 
-    public void StopCapture() { Capture?.StopCapture(); Capture = null; }
+    /// <summary>Stop capture safely. If the debuggee is frozen, remove the breakpoints now; if it is
+    /// running, pause it first and tear down on the resulting stop (removing breakpoints from a running
+    /// process corrupts it), then resume so the program keeps running with capture off.</summary>
+    public void StopCapture()
+    {
+        var cap = Capture;
+        if (cap is null) return;
+        if (IsStopped) { cap.StopCapture(); Capture = null; }
+        else { cap.BeginDraining(resumeAfter: true); Engine.Pause(); }
+    }
+
+    /// <summary>Immediate teardown for session end (the process is gone; breakpoint removal is a no-op).</summary>
+    public void AbortCapture() { Capture?.StopCapture(); Capture = null; }
 }
