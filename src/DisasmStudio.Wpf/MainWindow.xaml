@@ -18,6 +18,14 @@
                 <Button Content="Save ASM…" Click="OnSaveAsm" ToolTip="Export the full disassembly listing to a .asm file" />
                 <Button Content="Save C…" Click="OnSaveC" Margin="6,0,0,0" ToolTip="Export the decompiled Pseudo-C of all functions to a .c file" />
                 <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
+                <Button x:Name="DbgRunBtn" Content="▶ Run" Click="OnDebugRun" ToolTip="Run / continue (F5)" />
+                <Button Content="⤓ Into" Click="OnStepInto" Margin="6,0,0,0" ToolTip="Step into (F7)" />
+                <Button Content="⤵ Over" Click="OnStepOver" Margin="6,0,0,0" ToolTip="Step over (F8)" />
+                <Button Content="⤴ Out" Click="OnStepOut" Margin="6,0,0,0" ToolTip="Step out (Shift+F11)" />
+                <Button Content="⏸ Pause" Click="OnDebugPause" Margin="6,0,0,0" />
+                <Button Content="⏹ Stop" Click="OnDebugStop" Margin="6,0,0,0" />
+                <Button Content="Attach…" Click="OnAttach" Margin="6,0,0,0" ToolTip="Attach the debugger to a running process" />
+                <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
                 <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" />
                 <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,0,0,0" />
                 <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
@@ -39,6 +47,12 @@
                              IsIndeterminate="False" Visibility="Collapsed"
                              Background="{StaticResource Surface2}" Foreground="{StaticResource Accent}" BorderThickness="0" />
             </Grid>
+        </Border>
+
+        <!-- Debugger panel (bottom, shown only during a session) -->
+        <Border x:Name="DebugDock" DockPanel.Dock="Bottom" Height="240" Visibility="Collapsed"
+                Background="{StaticResource Surface}" BorderBrush="{StaticResource Outline}" BorderThickness="0,1,0,0">
+            <ctl:DebugPanel x:Name="Debug" />
         </Border>
 
         <!-- Main 3-pane layout -->

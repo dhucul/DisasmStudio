@@ -56,6 +56,17 @@ internal static class Dialogs
         return ok ? (box.Text, nop.IsChecked == true) : null;
     }
 
+    /// <summary>Ask for a process id (decimal) to attach the debugger to.</summary>
+    public static uint? AskPid(Window owner)
+    {
+        var box = new TextBox();
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label("Attach to process id (decimal)"));
+        panel.Children.Add(box);
+        bool ok = ShowModal(owner, "Attach to process", panel, box);
+        return ok && uint.TryParse(box.Text.Trim(), out var pid) ? pid : null;
+    }
+
     /// <summary>Ask for an address (hex) to navigate to.</summary>
     public static ulong? AskAddress(Window owner)
     {

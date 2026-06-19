@@ -3,6 +3,13 @@ using Iced.Intel;
 
 namespace DisasmStudio.Core.Disasm;
 
+/// <summary>Decodes one instruction at a VA — implemented by the static (file-backed) disassembler and
+/// by the debugger's live (process-memory) disassembler, so the linear view can use either.</summary>
+public interface IInstructionDecoder
+{
+    bool TryDecodeAt(ulong va, out Instruction instr);
+}
+
 /// <summary>
 /// A reusable Iced <see cref="CodeReader"/> over an image, repositioned per instruction via
 /// <see cref="SetWindow"/>. Each window is capped at the longest possible x86/x64 instruction
@@ -30,7 +37,7 @@ internal sealed class ImageWindowReader(IBinaryImage image) : CodeReader
 /// (no per-instruction allocation). This is what lets the linear view decode only the rows on
 /// screen over an arbitrarily large image. Not thread-safe.
 /// </summary>
-public sealed class Disassembler
+public sealed class Disassembler : IInstructionDecoder
 {
     private readonly IBinaryImage _image;
     private readonly ImageWindowReader _reader;

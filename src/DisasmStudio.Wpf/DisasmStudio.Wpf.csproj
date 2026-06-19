@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DisasmStudio.Core\DisasmStudio.Core.csproj" />
+    <ProjectReference Include="..\DisasmStudio.Debug\DisasmStudio.Debug.csproj" />
   </ItemGroup>
 
 </Project>

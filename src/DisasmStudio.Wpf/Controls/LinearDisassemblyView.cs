@@ -24,8 +24,9 @@ public sealed class LinearDisassemblyView : Grid
     private readonly ScrollBar _scroll;
 
     private AnalysisResult? _result;
-    private Disassembler? _dis;
+    private IInstructionDecoder? _dis;
     private AsmFormatter? _fmt;
+    private ulong _ipVa;   // debuggee's current instruction (0 = not debugging)
 
     // Label lines (function starts + named locs), as parallel sorted arrays.
     private long[] _labelInstrLines = [];
@@ -53,6 +54,13 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? OpenInDecompilerRequested;
     public event Action<ulong>? SaveAsmRequested;
     public event Action<ulong>? PatchRequested;
+    public event Action<ulong>? BreakpointToggleRequested;
+    public event Action<ulong>? RunToCursorRequested;
+
+    /// <summary>Set the debuggee's current instruction (highlighted + centred); 0 clears it.</summary>
+    public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va); else _surface.InvalidateVisual(); }
+    /// <summary>Predicate the gutter uses to mark addresses that have a breakpoint.</summary>
+    public Func<ulong, bool>? IsBreakpointAt { get; set; }
 
     public LinearDisassemblyView()
     {
@@ -85,7 +93,11 @@ public sealed class LinearDisassemblyView : Grid
         _surface.InvalidateVisual();
     }
 
-    public void SetResult(AnalysisResult? result)
+    public void SetResult(AnalysisResult? result) => SetResult(result, null);
+
+    /// <summary>Show <paramref name="result"/>, decoding through <paramref name="decoder"/> (the live
+    /// process-memory decoder while debugging) or the static file decoder when null.</summary>
+    public void SetResult(AnalysisResult? result, IInstructionDecoder? decoder)
     {
         _result = result;
         _caretInstr = -1;
@@ -94,7 +106,7 @@ public sealed class LinearDisassemblyView : Grid
         if (result is null) { _dis = null; _fmt = null; _labelInstrLines = []; _labelVa = []; }
         else
         {
-            _dis = new Disassembler(result.Image);
+            _dis = decoder ?? new Disassembler(result.Image);
             _fmt = new AsmFormatter(result.Names);
             _addrDigits = Math.Max(8, result.Image.MaxVa.ToString("X").Length);
             BuildLabelLines(result);
@@ -349,6 +361,11 @@ public sealed class LinearDisassemblyView : Grid
                 continue;
             }
 
+            if (_ipVa != 0 && va == _ipVa)
+                dc.DrawRectangle(SyntaxTheme.CurrentIp, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
+            if (IsBreakpointAt?.Invoke(va) == true)
+                dc.DrawEllipse(SyntaxTheme.BreakpointDot, null, new Point(GutterW - _charWidth, y + _rowHeight / 2), 4, 4);
+
             if (selLo >= 0 && instrLine >= selLo && instrLine <= selHi)
                 dc.DrawRectangle(SyntaxTheme.Selection, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
 
@@ -536,6 +553,10 @@ public sealed class LinearDisassemblyView : Grid
         follow.Click += (_, _) => FollowCaret();
         var patch = new MenuItem { Header = "Patch instruction…" };
         patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
+        var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2" };
+        toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
+        var runTo = new MenuItem { Header = "Run to cursor" };
+        runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
         menu.Items.Add(copy);
         menu.Items.Add(selectAll);
         menu.Items.Add(new Separator());
@@ -545,6 +566,8 @@ public sealed class LinearDisassemblyView : Grid
         menu.Items.Add(decompile);
         menu.Items.Add(saveAsm);
         menu.Items.Add(new Separator());
+        menu.Items.Add(toggleBp);
+        menu.Items.Add(runTo);
         menu.Items.Add(patch);
         _surface.ContextMenu = menu;
     }
@@ -617,6 +640,7 @@ public sealed class LinearDisassemblyView : Grid
                 case Key.C when ctrl: _owner.CopySelection(); break;
                 case Key.A when ctrl: _owner.SelectAll(); break;
                 case Key.G when ctrl: _owner.GoToRequested?.Invoke(); break;
+                case Key.F2: if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
                 default: return;
             }
             e.Handled = true;

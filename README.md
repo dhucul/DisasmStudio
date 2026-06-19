@@ -75,6 +75,14 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   unit (generated preamble declaring the registers as integer globals, typed pointer casts, an
   indirect-call helper, forward prototypes) that compiles under MSVC (`cl /c`). It's an approximation
   for inspection/tweaking, not a faithful rebuild.
+- **Debugger (x86/x64, live):** launch the loaded PE under the debugger or *Attach…* to a running
+  process by PID. The disassembly switches to **live process memory** (so packed/self-modifying code is
+  shown as it executes), with the current instruction highlighted and followed. Run/Continue (F5),
+  Step Into (F7), Step Over (F8), Step Out (Shift+F11), Pause, Stop, and Run-to-cursor; software
+  breakpoints (F2 / gutter) and hardware breakpoints + watchpoints (Dr0–3). A bottom panel shows
+  **registers** (editable, with x64dbg-style **dereferencing** — `r9 → start`, `rcx → "C:\\…"`),
+  the **stack** and a **memory dump** (both dereferenced), the **call stack**, and breakpoints,
+  threads and modules. 32-bit targets are debugged from the 64-bit host via WOW64.
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
 - **High-DPI:** per-monitor-v2 aware; DPI-correct text and pixel-snapped lines that re-render sharply
@@ -84,7 +92,8 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
 
 ```
 src/
-  DisasmStudio.Core/     engine (no WPF): Formats/, Disasm/, Analysis/
+  DisasmStudio.Core/     engine (no WPF): Formats/, Disasm/, Analysis/, IL/, Export/
+  DisasmStudio.Debug/    live debugger: Win32 debug-loop interop, breakpoints, live image/disasm, dereference
   DisasmStudio.Wpf/      UI: custom controls, soft slate theme, view-models
 ```
 
@@ -105,7 +114,8 @@ Requires the .NET 10 SDK (Windows). x64.
 
 ## Scope
 
-v1 targets x86/x64 static analysis, now including a best-effort decompiler (multi-level IL +
-Pseudo-C). Out of scope (for now): signatures/FLIRT, debugging, scripting/plugins, other
-architectures, and PDB symbol servers — the `IBinaryImage` / token-formatter / Iced-bitness seams are
-left in place to add these later.
+v1 targets x86/x64 static analysis, a best-effort decompiler (multi-level IL + Pseudo-C), and a live
+user-mode debugger (Windows PE; x86/x64). Out of scope (for now): signatures/FLIRT, kernel/remote
+debugging, time-travel, scripting/plugins, other architectures, .NET managed debugging, and PDB symbol
+servers — the call stack uses a best-effort frame/return-address heuristic (no full `.pdata` unwind
+yet), and symbols come from the app's own analysis + demangler rather than a symbol server.

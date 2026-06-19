@@ -29,6 +29,10 @@ public partial class MainWindow : Window
     private string? _projectPath;
     private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
 
+    private DebugSession? _dbg;
+    private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
+    private bool _dbgViewLive;
+
     private ObservableCollection<FunctionItem> _functions = [];
     private ObservableCollection<StringItem> _strings = [];
     private ObservableCollection<ExportItem> _exports = [];
@@ -65,6 +69,9 @@ public partial class MainWindow : Window
         Decompiler.SelectionChanged += OnAddressFocused;
         Linear.SaveAsmRequested += SaveFunctionAsm;
         Decompiler.SaveCRequested += SaveFunctionC;
+        Linear.BreakpointToggleRequested += va => { _dbg?.ToggleBreakpoint(va); Linear.Refresh(); Debug.Refresh(); };
+        Linear.RunToCursorRequested += va => _dbg?.RunToCursor(va);
+        Debug.NavigateRequested += va => _nav.Navigate(va);
         PreviewKeyDown += OnWindowPreviewKeyDown;
     }
 
@@ -75,7 +82,92 @@ public partial class MainWindow : Window
         {
             UndoLastPatch();
             e.Handled = true;
+            return;
         }
+        bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+        switch (e.Key)
+        {
+            case Key.F5: OnDebugRun(sender, e); e.Handled = true; break;
+            case Key.F7: _dbg?.StepInto(); e.Handled = true; break;
+            case Key.F8: _dbg?.StepOver(); e.Handled = true; break;
+            case Key.F11 when shift: _dbg?.StepOut(); e.Handled = true; break;
+        }
+    }
+
+    // ---- debugger ----
+    private void OnDebugRun(object sender, RoutedEventArgs e)
+    {
+        if (_dbg is not null) { _dbg.Go(); return; }
+        if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        BeginDebug(d => d.Launch(_image.FilePath));
+    }
+
+    private void OnAttach(object sender, RoutedEventArgs e)
+    {
+        if (_dbg is not null) { MessageBox.Show(this, "A debug session is already active.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_result is null) { MessageBox.Show(this, "Open the target's binary first so the disassembly matches.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (Dialogs.AskPid(this) is uint pid) BeginDebug(d => d.Attach(pid));
+    }
+
+    private void BeginDebug(Action<DebugSession> start)
+    {
+        _savedResult = _result;
+        _dbgViewLive = false;
+        _dbg = new DebugSession(Dispatcher, _result!);
+        _dbg.Stopped += OnDbgStopped;
+        _dbg.Running += () => StatusText.Text = "Running…";
+        _dbg.Exited += OnDbgExited;
+        _dbg.Output += m => StatusText.Text = m;
+        Debug.SetSession(_dbg);
+        DebugDock.Visibility = Visibility.Visible;
+        Linear.IsBreakpointAt = va => _dbg?.HasBreakpoint(va) ?? false;
+        StatusText.Text = "Starting debugger…";
+        start(_dbg);
+    }
+
+    private void OnStepInto(object sender, RoutedEventArgs e) => _dbg?.StepInto();
+    private void OnStepOver(object sender, RoutedEventArgs e) => _dbg?.StepOver();
+    private void OnStepOut(object sender, RoutedEventArgs e) => _dbg?.StepOut();
+    private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
+    private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
+
+    private void OnDbgStopped()
+    {
+        if (_dbg is null) return;
+        if (!_dbgViewLive && _dbg.LiveResult is not null)
+        {
+            // switch the whole UI to the live (rebased) analysis + live decoder on the first stop
+            _dbgViewLive = true;
+            _result = _dbg.LiveResult;
+            _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
+            PopulateLists(_result);
+            Linear.SetResult(_result, _dbg.LiveDecoder);
+            Hex.SetImage(_result.Image);
+        }
+        Linear.SetCurrentIp(_dbg.CurrentIp);
+        Linear.Refresh();
+        Debug.Refresh();
+        string? name = _result?.NameFor(_dbg.CurrentIp);
+        StatusText.Text = $"{_dbg.LastReason} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
+    }
+
+    private void OnDbgExited(int code)
+    {
+        Linear.SetCurrentIp(0);
+        Linear.IsBreakpointAt = null;
+        _dbg = null; _dbgViewLive = false;
+        Debug.SetSession(null);
+        DebugDock.Visibility = Visibility.Collapsed;
+        if (_savedResult is not null && _image is not null)
+        {
+            _result = _savedResult; _savedResult = null;
+            _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
+            PopulateLists(_result);
+            Linear.SetResult(_result);
+            Hex.SetImage(_image);
+        }
+        StatusText.Text = $"Debuggee exited (code {code}).";
     }
 
     // ---- patching ----
@@ -548,8 +640,8 @@ public partial class MainWindow : Window
         if (CenterTabs.SelectedIndex == 1) OpenGraph(va);
         if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
 
-        // Data targets read better in the hex view.
-        if (!_image.IsExecutableVa(va) && CenterTabs.SelectedIndex == 0)
+        // Data targets read better in the hex view (skip while debugging — keep focus on the live code).
+        if (_dbg is null && !_result.Image.IsExecutableVa(va) && CenterTabs.SelectedIndex == 0)
             CenterTabs.SelectedIndex = 2;
     }
 

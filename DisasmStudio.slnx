@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/DisasmStudio.Core/DisasmStudio.Core.csproj" />
+    <Project Path="src/DisasmStudio.Debug/DisasmStudio.Debug.csproj" />
     <Project Path="src/DisasmStudio.Wpf/DisasmStudio.Wpf.csproj" />
   </Folder>
 </Solution>
