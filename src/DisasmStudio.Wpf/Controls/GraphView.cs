@@ -26,6 +26,8 @@ public sealed class GraphView : FrameworkElement
     private Vector _offset;
     private Point _lastDrag;
     private bool _dragging;
+    private IInstructionDecoder? _decoder;   // live decoder while debugging
+    private ulong _ipVa;                      // debuggee's current instruction
 
     private readonly Typeface _typeface =
         new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
@@ -37,7 +39,7 @@ public sealed class GraphView : FrameworkElement
 
     public event Action<ulong>? BlockSelected;
 
-    private sealed record Line(string Text, AsmToken[] Tokens, double Width, string? Comment);
+    private sealed record Line(ulong Va, string Text, AsmToken[] Tokens, double Width, string? Comment);
 
     public GraphView()
     {
@@ -46,11 +48,12 @@ public sealed class GraphView : FrameworkElement
         MeasureFont();
     }
 
-    public void SetFunction(AnalysisResult result, Function function)
+    public void SetFunction(AnalysisResult result, Function function, IInstructionDecoder? decoder = null)
     {
         _result = result;
         _function = function;
-        if (!function.BlocksBuilt) CfgBuilder.Build(result.Image, function, result.JumpTables);
+        _decoder = decoder;
+        if (!function.BlocksBuilt) CfgBuilder.Build(result.Image, function, result.JumpTables, decoder);
 
         _blocks.Clear();
         _byStart.Clear();
@@ -67,9 +70,24 @@ public sealed class GraphView : FrameworkElement
     public void Clear()
     {
         _function = null;
+        _decoder = null;
+        _ipVa = 0;
         _blocks.Clear();
         _byStart.Clear();
         _lines.Clear();
+        InvalidateVisual();
+    }
+
+    /// <summary>Highlight and centre on the block/instruction at the debuggee's current IP (0 clears).</summary>
+    public void SetCurrentIp(ulong va)
+    {
+        _ipVa = va;
+        var b = _blocks.FirstOrDefault(x => va >= x.Start && va < x.End);
+        if (b is not null && ActualWidth > 0)
+        {
+            double cx = b.X + b.Width / 2, cy = b.Y + b.Height / 2;
+            _offset = new Vector(ActualWidth / 2 - cx * _scale, ActualHeight / 2 - cy * _scale);
+        }
         InvalidateVisual();
     }
 
@@ -85,7 +103,7 @@ public sealed class GraphView : FrameworkElement
     private void BuildLines(AnalysisResult result)
     {
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        var dis = new Disassembler(result.Image);
+        IInstructionDecoder dis = _decoder ?? new Disassembler(result.Image);
         var fmt = new AsmFormatter(result.Names);
 
         foreach (var block in _blocks)
@@ -100,7 +118,7 @@ public sealed class GraphView : FrameworkElement
                 string measured = comment is null ? text : text + "   ; " + comment;
                 var ft = new FormattedText(measured, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
                     _typeface, FontSize, Brushes.White, dpi);
-                list.Add(new Line(text, tokens, ft.WidthIncludingTrailingWhitespace, comment));
+                list.Add(new Line(va, text, tokens, ft.WidthIncludingTrailingWhitespace, comment));
             }
             _lines[block.Start] = list;
         }
@@ -220,7 +238,9 @@ public sealed class GraphView : FrameworkElement
     private void DrawBlock(DrawingContext dc, BasicBlock b, double dpi)
     {
         var rect = new Rect(b.X, b.Y, b.Width, b.Height);
-        dc.DrawRoundedRectangle(SyntaxTheme.BlockBg, new Pen(SyntaxTheme.BlockBorder, 1), rect, 5, 5);
+        bool isIpBlock = _ipVa != 0 && b.Start <= _ipVa && _ipVa < b.End;
+        var border = isIpBlock ? new Pen(SyntaxTheme.FuncName, 2) : new Pen(SyntaxTheme.BlockBorder, 1);
+        dc.DrawRoundedRectangle(SyntaxTheme.BlockBg, border, rect, 5, 5);
         dc.DrawRoundedRectangle(SyntaxTheme.BlockHeader, null, new Rect(b.X, b.Y, b.Width, HeaderH), 5, 5);
 
         string header = _result?.NameFor(b.Start) ?? $"loc_{b.Start:X}";
@@ -229,6 +249,8 @@ public sealed class GraphView : FrameworkElement
         double y = b.Y + HeaderH + 1;
         foreach (var line in _lines[b.Start])
         {
+            if (_ipVa != 0 && line.Va == _ipVa)
+                dc.DrawRectangle(SyntaxTheme.CurrentIp, null, new Rect(b.X + 1, y, b.Width - 2, _rowHeight));
             double x = b.X + Pad;
             // Address prefix.
             int split = line.Text.IndexOf("  ", StringComparison.Ordinal);

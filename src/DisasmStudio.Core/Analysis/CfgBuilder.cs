@@ -14,11 +14,12 @@ public static class CfgBuilder
 {
     private const int MaxInstructions = 200_000;
 
-    public static void Build(IBinaryImage image, Function fn, IReadOnlyDictionary<ulong, ulong[]>? jumpTables = null)
+    public static void Build(IBinaryImage image, Function fn, IReadOnlyDictionary<ulong, ulong[]>? jumpTables = null,
+        IInstructionDecoder? decoder = null)
     {
         if (fn.BlocksBuilt) return;
 
-        var dis = new Disassembler(image);
+        IInstructionDecoder dis = decoder ?? new Disassembler(image);
         var insns = new SortedDictionary<ulong, Instruction>();
         var leaders = new HashSet<ulong> { fn.Va };
         var visited = new HashSet<ulong>();

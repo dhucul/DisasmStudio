@@ -39,6 +39,25 @@
         <Setter Property="Foreground" Value="{StaticResource TextSecondary}" />
     </Style>
 
+    <!-- ToolTip (default is a light system popup; the inherited light text was unreadable) -->
+    <Style TargetType="ToolTip">
+        <Setter Property="Background" Value="{StaticResource Surface2}" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+        <Setter Property="BorderBrush" Value="{StaticResource OutlineStrong}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToolTip">
+                    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="3" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- Button -->
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource Surface2}" />

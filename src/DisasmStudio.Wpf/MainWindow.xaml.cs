@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private DebugSession? _dbg;
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
+    private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
 
     private ObservableCollection<FunctionItem> _functions = [];
     private ObservableCollection<StringItem> _strings = [];
@@ -148,6 +149,7 @@ public partial class MainWindow : Window
         Linear.SetCurrentIp(_dbg.CurrentIp);
         Linear.Refresh();
         Debug.Refresh();
+        if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp);   // graph follows RIP too
         string? name = _result?.NameFor(_dbg.CurrentIp);
         StatusText.Text = $"{_dbg.LastReason} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
     }
@@ -157,6 +159,7 @@ public partial class MainWindow : Window
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;
         _dbg = null; _dbgViewLive = false;
+        Graph.Clear(); _graphFn = null;
         Debug.SetSession(null);
         DebugDock.Visibility = Visibility.Collapsed;
         if (_savedResult is not null && _image is not null)
@@ -624,6 +627,7 @@ public partial class MainWindow : Window
         SectionList.ItemsSource = null;
         XrefList.ItemsSource = null;
         Graph.Clear();
+        _graphFn = null;
         Decompiler.Clear();
     }
 
@@ -665,7 +669,10 @@ public partial class MainWindow : Window
     private void OpenGraph(ulong va)
     {
         var fn = FindFunction(va);
-        if (fn is not null && _result is not null) Graph.SetFunction(_result, fn);
+        if (fn is null || _result is null) return;
+        // Rebuild only when the function changes (object identity differs across the static↔live swap too).
+        if (!ReferenceEquals(fn, _graphFn)) { Graph.SetFunction(_result, fn, _dbg?.LiveDecoder); _graphFn = fn; }
+        if (_dbg is not null) Graph.SetCurrentIp(_dbg.CurrentIp);
     }
 
     private void OpenDecompiler(ulong va)
