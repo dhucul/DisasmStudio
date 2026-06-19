@@ -106,12 +106,13 @@ public partial class MainWindow : Window
         int cover = 0;
         ulong p = va;
         while (cover < patch.Length && dis.TryDecodeAt(p, out var n) && n.Length > 0) { cover += n.Length; p += (ulong)n.Length; }
-        if (!_image.PatchVa(va, Patcher.PadNop(patch, cover)))
+        var final = Patcher.PadNop(patch, cover);
+        if (!_image.PatchVa(va, final))
         {
             MessageBox.Show(this, "That address is not file-backed.", "Patch", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        ulong end = va + (ulong)cover;
+        ulong end = va + (ulong)final.Length;
         _changeStack.Push((va, end, true));
         RepairIndex(va, end);          // local re-decode of just this region — no full re-sweep
         UpdatePatchButtons();
@@ -183,6 +184,14 @@ public partial class MainWindow : Window
         string ext = Path.GetExtension(_image.FilePath);
         var dlg = new SaveFileDialog { FileName = $"{baseName}.patched{ext}", Filter = "All files|*.*" };
         if (dlg.ShowDialog(this) != true) return;
+
+        // Offer to keep a pristine copy of the original before writing the patched file.
+        var ask = MessageBox.Show(this,
+            $"Back up the original file first?\n\n{_image.FilePath}",
+            "Save patched binary", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (ask == MessageBoxResult.Cancel) return;
+        if (ask == MessageBoxResult.Yes && !MakeBackup()) return;
+
         try
         {
             _image.SavePatchedAs(dlg.FileName);
@@ -191,6 +200,25 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>Copy the original (unpatched) file to a .bak; returns false if it failed and the user
+    /// chose not to continue.</summary>
+    private bool MakeBackup()
+    {
+        try
+        {
+            string bak = _image!.FilePath + ".bak";
+            if (File.Exists(bak)) bak = $"{_image.FilePath}.{DateTime.Now:yyyyMMdd-HHmmss}.bak";
+            File.Copy(_image.FilePath, bak);
+            StatusText.Text = $"Backed up original to {bak}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            return MessageBox.Show(this, $"Backup failed:\n{ex.Message}\n\nSave the patched file anyway?",
+                "Backup failed", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
         }
     }
 

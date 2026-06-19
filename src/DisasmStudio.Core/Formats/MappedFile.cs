@@ -120,6 +120,8 @@ public sealed class MappedFile
     /// <summary>Write the original file plus all edits to <paramref name="dest"/> (must differ from the open file).</summary>
     public void SaveAs(string dest)
     {
+        if (string.Equals(System.IO.Path.GetFullPath(dest), System.IO.Path.GetFullPath(Path), StringComparison.OrdinalIgnoreCase))
+            throw new IOException("The original file is open and can't be overwritten in place — save the patched copy under a different name.");
         File.Copy(Path, dest, overwrite: true);
         if (_patches.Count == 0) return;
         using var fs = new FileStream(dest, FileMode.Open, FileAccess.Write);
