@@ -35,6 +35,8 @@ public sealed class LinearDisassemblyView : Grid
     private long _caretInstr = -1;  // caret instruction index, or -1
     private long _selAnchor = -1;   // selection anchor; range = [min,max] of anchor & caret
     private bool _dragging;
+    private bool _draggingDivider;
+    private double _disasmGapChars = 28;   // bytes→disasm gap in chars; draggable via the column divider
 
     private readonly Typeface _typeface =
         new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
@@ -193,7 +195,15 @@ public sealed class LinearDisassemblyView : Grid
     private double GutterW => 3.5 * _charWidth;
     private double AddrX => GutterW + 4;
     private double BytesX => AddrX + (_addrDigits + 2) * _charWidth;
-    private double DisasmX => BytesX + 25 * _charWidth;
+    private double DisasmX => BytesX + _disasmGapChars * _charWidth;
+
+    private bool NearDivider(double x) => Math.Abs(x - DisasmX) <= 5;
+
+    private void SetDisasmGap(double mouseX)
+    {
+        _disasmGapChars = Math.Clamp((mouseX - BytesX) / _charWidth, 26, 160);
+        _surface.InvalidateVisual();
+    }
 
     private void MoveCaret(long newInstr, bool extend = false)
     {
@@ -326,6 +336,10 @@ public sealed class LinearDisassemblyView : Grid
         }
 
         DrawBranchArrows(dc, rows);
+
+        // Draggable column divider between the bytes and disassembly columns.
+        double dx = Math.Round(DisasmX) - 2.5;
+        dc.DrawLine(new Pen(SyntaxTheme.Separator, 1), new Point(dx, 0), new Point(dx, height));
     }
 
     private void DrawLabel(DrawingContext dc, ulong va, double y, double width, double dpi)
@@ -515,7 +529,15 @@ public sealed class LinearDisassemblyView : Grid
         protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
         {
             Focus();
-            _owner.OnClick(e.GetPosition(this), extend: (Keyboard.Modifiers & ModifierKeys.Shift) != 0);
+            var p = e.GetPosition(this);
+            if (_owner.NearDivider(p.X))   // grab the column divider instead of selecting
+            {
+                _owner._draggingDivider = true;
+                CaptureMouse();
+                e.Handled = true;
+                return;
+            }
+            _owner.OnClick(p, extend: (Keyboard.Modifiers & ModifierKeys.Shift) != 0);
             if (e.ClickCount == 2) _owner.FollowCaret();
             else { _owner._dragging = true; CaptureMouse(); }
             e.Handled = true;
@@ -523,12 +545,15 @@ public sealed class LinearDisassemblyView : Grid
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (_owner._dragging && e.LeftButton == MouseButtonState.Pressed)
-                _owner.DragTo(e.GetPosition(this));
+            var p = e.GetPosition(this);
+            if (_owner._draggingDivider && e.LeftButton == MouseButtonState.Pressed) { _owner.SetDisasmGap(p.X); return; }
+            if (_owner._dragging && e.LeftButton == MouseButtonState.Pressed) { _owner.DragTo(p); return; }
+            Cursor = _owner.NearDivider(p.X) ? Cursors.SizeWE : Cursors.Arrow;
         }
 
         protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
         {
+            if (_owner._draggingDivider) { _owner._draggingDivider = false; ReleaseMouseCapture(); }
             if (_owner._dragging) { _owner._dragging = false; ReleaseMouseCapture(); }
         }
 
