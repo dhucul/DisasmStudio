@@ -54,19 +54,17 @@
                                Foreground="{StaticResource TextMuted}" FontWeight="SemiBold" FontSize="11" />
                     <TextBox x:Name="FuncFilter" DockPanel.Dock="Top" Margin="8,0,8,6"
                              TextChanged="OnFuncFilter" />
-                    <ListBox x:Name="FuncList" SelectionChanged="OnFuncSelected"
-                             MouseDoubleClick="OnFuncActivate" FontFamily="Cascadia Mono, Consolas" FontSize="12">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}" Width="200"
-                                               TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Text="{Binding Address, StringFormat='0x{0}'}" Foreground="{StaticResource Accent}" Width="104" />
-                                    <TextBlock Text="{Binding Section}" Foreground="{StaticResource TextMuted}" />
-                                </StackPanel>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
+                    <DataGrid x:Name="FuncList" SelectionChanged="OnFuncSelected" MouseDoubleClick="OnFuncActivate"
+                              CanUserAddRows="False" CanUserReorderColumns="False" CanUserResizeRows="False">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="200"
+                                                ElementStyle="{StaticResource GridCellText}" />
+                            <DataGridTextColumn Header="Address" Binding="{Binding Address, StringFormat='0x{0}'}" Width="104"
+                                                ElementStyle="{StaticResource GridCellAccent}" />
+                            <DataGridTextColumn Header="Section" Binding="{Binding Section}" Width="*"
+                                                ElementStyle="{StaticResource GridCellMuted}" />
+                        </DataGrid.Columns>
+                    </DataGrid>
                 </DockPanel>
             </Border>
 

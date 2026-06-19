@@ -230,6 +230,12 @@
         <Setter Property="Margin" Value="8,0,12,0" />
         <Setter Property="TextTrimming" Value="CharacterEllipsis" />
     </Style>
+    <Style x:Key="GridCellAccent" TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
+        <Setter Property="Foreground" Value="{StaticResource Accent}" />
+    </Style>
+    <Style x:Key="GridCellMuted" TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
+        <Setter Property="Foreground" Value="{StaticResource TextMuted}" />
+    </Style>
 
     <!-- GridSplitter -->
     <Style TargetType="GridSplitter">

@@ -314,12 +314,14 @@ public partial class MainWindow : Window
     // ---- list interactions ----
     private void OnFuncSelected(object sender, SelectionChangedEventArgs e)
     {
-        if (FuncList.SelectedItem is FunctionItem fi) _nav.Navigate(fi.Va);
+        if (FuncList.SelectedItem is not FunctionItem fi) return;
+        if (fi.Function is null) NavigateToImport(fi.Va, fi.Name);    // import row — go to its callers, not the IAT
+        else _nav.Navigate(fi.Va);
     }
     private void OnFuncActivate(object sender, MouseButtonEventArgs e)
     {
         if (FuncList.SelectedItem is not FunctionItem fi) return;
-        if (fi.Function is null) { _nav.Navigate(fi.Va); return; }   // import row — no CFG, just go to it
+        if (fi.Function is null) { NavigateToImport(fi.Va, fi.Name); return; }   // import row — no CFG
         OpenGraph(fi.Va);
         CenterTabs.SelectedIndex = 1;
     }
@@ -376,23 +378,27 @@ public partial class MainWindow : Window
 
     private void OnImportActivate(object sender, MouseButtonEventArgs e)
     {
-        if (ImportList.SelectedItem is not ImportItem im || _result is null) return;
+        if (ImportList.SelectedItem is ImportItem im) NavigateToImport(im.Va, im.Name);
+    }
 
-        // Jump to the code that calls this import, not the (useless) IAT slot in hex. List every
-        // caller in the Xrefs panel. Fall back to hex only if nothing references it.
-        var refs = _result.Xrefs.To(im.Va);
+    /// <summary>Jump to the code that calls an import, not the (useless) IAT slot in hex. List every
+    /// caller in the Xrefs panel; fall back to hex only if nothing references it.</summary>
+    private void NavigateToImport(ulong iatVa, string name)
+    {
+        if (_result is null) return;
+        var refs = _result.Xrefs.To(iatVa);
         if (refs.Count > 0)
         {
             CenterTabs.SelectedIndex = 0;          // Linear
             _nav.Navigate(refs[0].From);
             SideTabs.SelectedIndex = 0;            // Xrefs — set after navigating so it isn't overwritten
             XrefList.ItemsSource = refs.Select(x => new XrefItem(x)).ToList();
-            XrefHeader.Text = $"{im.Va:X}  {im.Name} — {refs.Count} caller(s)";
+            XrefHeader.Text = $"{iatVa:X}  {name} — {refs.Count} caller(s)";
         }
         else
         {
             CenterTabs.SelectedIndex = 2;
-            _nav.Navigate(im.Va);
+            _nav.Navigate(iatVa);
         }
     }
     private void OnSectionActivate(object sender, MouseButtonEventArgs e)
