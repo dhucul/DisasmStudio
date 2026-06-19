@@ -26,6 +26,9 @@
                 <Button Content="⏹ Stop" Click="OnDebugStop" Margin="6,0,0,0" />
                 <Button Content="Attach…" Click="OnAttach" Margin="6,0,0,0" ToolTip="Attach the debugger to a running process" />
                 <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
+                <Button x:Name="CaptureBtn" Content="⦿ Capture" Click="OnCaptureAll" IsEnabled="False" ToolTip="FunCap: breakpoint every function and log its arguments + return value as the program runs" />
+                <Button x:Name="CaptureFnBtn" Content="Capture Fn" Click="OnCaptureFunc" Margin="6,0,0,0" IsEnabled="False" ToolTip="Capture only the function at the current address" />
+                <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />
                 <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" />
                 <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,0,0,0" />
                 <Border Width="1" Background="{StaticResource Outline}" Margin="8,2" />

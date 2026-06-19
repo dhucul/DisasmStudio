@@ -6,10 +6,12 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Threading;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Debug;
 using Iced.Intel;
 using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
@@ -33,6 +35,11 @@ public partial class MainWindow : Window
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
     private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
+
+    private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
+    private int _captureShown;               // records already pushed to the panel
+    private int _captureEdges = -1;          // last call-graph edge total (rebuild only on change)
+    private readonly HashSet<ulong> _captureCommented = [];   // entries already annotated inline
 
     private ObservableCollection<FunctionItem> _functions = [];
     private ObservableCollection<StringItem> _strings = [];
@@ -133,6 +140,72 @@ public partial class MainWindow : Window
     private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
     private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
 
+    // ---- FunCap-style function capture ----
+
+    private void OnCaptureAll(object sender, RoutedEventArgs e)
+    {
+        if (_dbg is null) return;
+        if (_dbg.Capture is { Active: true }) { StopCapture(); return; }
+        StartCapture(0);
+    }
+
+    private void OnCaptureFunc(object sender, RoutedEventArgs e)
+    {
+        if (_dbg is null || _nav.Current is not ulong va) return;
+        var fn = FindFunction(va);
+        if (fn is null) { StatusText.Text = "No function at the current address to capture."; return; }
+        if (_dbg.Capture is { Active: true }) StopCapture();
+        StartCapture(fn.Va);
+    }
+
+    private void StartCapture(ulong funcVa)
+    {
+        string log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "funcap.txt");
+        var cap = _dbg!.StartCapture(funcVa, log);
+        if (cap is null) { StatusText.Text = "Capture needs the program stopped at least once first."; return; }
+
+        _captureShown = 0; _captureEdges = -1; _captureCommented.Clear();
+        Debug.ClearCapture(); Debug.SelectCaptureTab();
+        CaptureBtn.Content = "⦿ Capturing…";
+        _captureTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _captureTimer.Tick -= OnCaptureTick; _captureTimer.Tick += OnCaptureTick;
+        _captureTimer.Start();
+        StatusText.Text = funcVa == 0 ? $"Capturing all functions → {log}" : $"Capturing {cap.NameOf(funcVa)} → {log}";
+        _dbg.Go();   // run so captures start flowing
+    }
+
+    private void StopCapture()
+    {
+        _captureTimer?.Stop();
+        OnCaptureTick(null, EventArgs.Empty);   // final flush of any pending records
+        _dbg?.StopCapture();
+        CaptureBtn.Content = "⦿ Capture";
+        StatusText.Text = "Capture stopped.";
+    }
+
+    private void OnCaptureTick(object? sender, EventArgs e)
+    {
+        var cap = _dbg?.Capture;
+        if (cap is null) return;
+        bool is32 = _dbg!.Engine.Is32;
+
+        var recs = cap.Snapshot();
+        if (recs.Count > _captureShown)
+        {
+            Debug.AppendCapture(recs, _captureShown, is32);
+            if (_result?.Comments is IDictionary<ulong, string> comments)
+                for (int i = _captureShown; i < recs.Count; i++)
+                    if (!recs[i].IsReturn && _captureCommented.Add(recs[i].CalleeVa))
+                        comments[recs[i].CalleeVa] = FunctionCapture.ArgComment(recs[i], is32);
+            _captureShown = recs.Count;
+            Linear.Refresh();   // surface the new inline comments
+        }
+
+        var edges = cap.EdgesSnapshot();
+        int total = edges.Values.Sum(s => s.Count);
+        if (total != _captureEdges) { _captureEdges = total; Debug.RebuildCallGraph(edges, cap.NameOf); }
+    }
+
     private void OnDbgStopped()
     {
         if (_dbg is null) return;
@@ -146,6 +219,7 @@ public partial class MainWindow : Window
             Linear.SetResult(_result, _dbg.LiveDecoder);
             Hex.SetImage(_result.Image);
             Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
+            CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true;
         }
         Linear.SetCurrentIp(_dbg.CurrentIp);
         Linear.Refresh();
@@ -157,6 +231,10 @@ public partial class MainWindow : Window
 
     private void OnDbgExited(int code)
     {
+        _captureTimer?.Stop();
+        OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
+        _dbg?.StopCapture();   // remove capture breakpoints (harmless on a dead process) and close the log file
+        CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false;
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;
         Hex.WriteByteAt = null;

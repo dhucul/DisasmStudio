@@ -24,6 +24,9 @@ public sealed class DebugSession
     public StopReason LastReason { get; private set; }
     public bool IsStopped { get; private set; }
 
+    /// <summary>Active FunCap-style function-capture session, or null.</summary>
+    public FunctionCapture? Capture { get; private set; }
+
     public event Action? Stopped;
     public event Action? Running;
     public event Action<int>? Exited;
@@ -41,7 +44,15 @@ public sealed class DebugSession
     public void Launch(string path) => Engine.Launch(path);
     public void Attach(uint pid) => Engine.Attach(pid);
 
-    private void OnStopped(StopInfo s) => _ui.BeginInvoke(() =>
+    private void OnStopped(StopInfo s)
+    {
+        // Capture runs on the engine thread: if this is one of its breakpoints it records + auto-resumes,
+        // and we skip the interactive UI stop entirely (the program keeps running).
+        if (Capture is { Active: true } cap && cap.Handle(s)) return;
+        _ui.BeginInvoke(() => OnStoppedUi(s));
+    }
+
+    private void OnStoppedUi(StopInfo s)
     {
         LiveResult ??= LiveAnalysis.Build(Engine, _static).Result;
         LiveDecoder ??= new LiveDisassembler(Engine);
@@ -51,7 +62,7 @@ public sealed class DebugSession
         IsStopped = true;
         Deref = new DereferenceResolver(Engine, LiveResult!.Names, Engine.Modules);
         Stopped?.Invoke();
-    });
+    }
 
     // commands
     public void Go() => Engine.Go();
@@ -64,4 +75,20 @@ public sealed class DebugSession
 
     public bool HasBreakpoint(ulong va) => Engine.HasBreakpoint(va);
     public void ToggleBreakpoint(ulong va) { if (Engine.HasBreakpoint(va)) Engine.RemoveBreakpoint(va); else Engine.SetBreakpoint(va); }
+
+    // ---- FunCap-style function capture ----
+
+    /// <summary>Start capturing function I/O. <paramref name="funcVa"/> is 0 for "all functions", else a single one.</summary>
+    public FunctionCapture? StartCapture(ulong funcVa, string? logPath)
+    {
+        if (LiveResult is null) return null;
+        var deref = new DereferenceResolver(Engine, LiveResult.Names, Engine.Modules);
+        var cap = new FunctionCapture(Engine, deref, LiveResult.Functions.Select(f => (f.Va, f.Name)));
+        if (logPath is not null) cap.SetLogFile(logPath);
+        Capture = cap;
+        if (funcVa == 0) cap.StartAll(); else cap.StartFunction(funcVa);
+        return cap;
+    }
+
+    public void StopCapture() { Capture?.StopCapture(); Capture = null; }
 }

@@ -23,7 +23,9 @@ public sealed class DebugPanel : Grid
 
     private readonly DataGrid _regs;
     private readonly DataGrid _stack;
-    private readonly ListBox _calls, _bps, _threads, _modules;
+    private readonly ListBox _calls, _bps, _threads, _modules, _capture;
+    private readonly TreeView _callGraph;
+    private readonly TabControl _tabs;
     private readonly HexView _dump;
     private readonly TextBox _dumpAddrBox;
     private bool _dumpInit;
@@ -35,6 +37,7 @@ public sealed class DebugPanel : Grid
 
     private sealed class RegRow { public string Name { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; }
     private sealed class StackRow { public string Addr { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; public ulong Slot; public ulong ValueRaw; }
+    private sealed class CaptureItem { public ulong Va; public string Text = ""; public override string ToString() => Text; }
 
     // EFLAGS bits shown as individual, editable (0/1) rows after the registers.
     private static readonly (string Name, int Bit)[] Flags =
@@ -74,10 +77,14 @@ public sealed class DebugPanel : Grid
         Add(2, "Stack", _stack);
 
         var tabs = new TabControl { Background = (Brush)Application.Current.Resources["Surface"] };
+        _tabs = tabs;
         _calls = MonoList(); _calls.MouseDoubleClick += (_, _) => NavTo(_callVas, _calls.SelectedIndex);
         _bps = MonoList(); _bps.MouseDoubleClick += (_, _) => NavTo(_bpVas, _bps.SelectedIndex);
         _threads = MonoList(); _threads.MouseDoubleClick += OnThreadActivate;
         _modules = MonoList(); _modules.MouseDoubleClick += (_, _) => NavTo(_moduleVas, _modules.SelectedIndex);
+        _capture = MonoList(); _capture.MouseDoubleClick += (_, _) => { if (_capture.SelectedItem is CaptureItem ci && ci.Va != 0) NavigateRequested?.Invoke(ci.Va); };
+        _callGraph = new TreeView { FontFamily = Mono, FontSize = 12, Background = (Brush)Application.Current.Resources["Surface"], BorderThickness = new Thickness(0) };
+        _callGraph.MouseDoubleClick += (_, _) => { if (_callGraph.SelectedItem is TreeViewItem ti && ti.Tag is ulong va && va != 0) NavigateRequested?.Invoke(va); };
 
         var memPanel = new DockPanel();
         _dump = new HexView();   // editable hex view over the whole live address space
@@ -92,6 +99,8 @@ public sealed class DebugPanel : Grid
         tabs.Items.Add(new TabItem { Header = "Breakpoints", Content = _bps });
         tabs.Items.Add(new TabItem { Header = "Threads", Content = _threads });
         tabs.Items.Add(new TabItem { Header = "Modules", Content = _modules });
+        tabs.Items.Add(new TabItem { Header = "Capture", Content = _capture });
+        tabs.Items.Add(new TabItem { Header = "Call Graph", Content = _callGraph });
         SetColumn(tabs, 4);
         Children.Add(tabs);
 
@@ -114,7 +123,43 @@ public sealed class DebugPanel : Grid
 
     private static ListBox MonoList() => new() { FontFamily = Mono, FontSize = 12, Background = (Brush)Application.Current.Resources["Surface"] };
 
-    public void SetSession(DebugSession? session) { _session = session; _viewTid = 0; _dumpAddr = 0; _dumpInit = false; _dump.SetImage(null); }
+    public void SetSession(DebugSession? session) { _session = session; _viewTid = 0; _dumpAddr = 0; _dumpInit = false; _dump.SetImage(null); ClearCapture(); }
+
+    // ---- FunCap-style capture display ----
+
+    public void ClearCapture() { _capture.Items.Clear(); _callGraph.Items.Clear(); }
+
+    public void SelectCaptureTab() { foreach (TabItem t in _tabs.Items) if ((string)t.Header == "Capture") { _tabs.SelectedItem = t; break; } }
+
+    /// <summary>Append capture records [<paramref name="from"/>..] as log lines; returns the new total shown.</summary>
+    public void AppendCapture(IReadOnlyList<CaptureRecord> recs, int from, bool is32)
+    {
+        bool atEnd = _capture.Items.Count == 0 || _capture.SelectedIndex < 0;
+        for (int i = from; i < recs.Count; i++)
+            _capture.Items.Add(new CaptureItem { Va = recs[i].CalleeVa, Text = FunctionCapture.Format(recs[i], is32) });
+        if (atEnd && _capture.Items.Count > 0) _capture.ScrollIntoView(_capture.Items[^1]);
+    }
+
+    public void RebuildCallGraph(Dictionary<ulong, HashSet<ulong>> edges, Func<ulong, string> nameOf)
+    {
+        _callGraph.Items.Clear();
+        if (edges.Count == 0) return;
+        var callees = new HashSet<ulong>(edges.Values.SelectMany(s => s));
+        var roots = edges.Keys.Where(k => !callees.Contains(k)).ToList();
+        if (roots.Count == 0) roots = edges.Keys.ToList();
+        foreach (var r in roots.OrderBy(x => x)) _callGraph.Items.Add(BuildNode(r, edges, nameOf, [], 0));
+    }
+
+    private static TreeViewItem BuildNode(ulong va, Dictionary<ulong, HashSet<ulong>> edges, Func<ulong, string> nameOf, HashSet<ulong> path, int depth)
+    {
+        var item = new TreeViewItem { Header = nameOf(va), Tag = va };
+        if (depth < 12 && path.Add(va) && edges.TryGetValue(va, out var callees))
+        {
+            foreach (var c in callees.OrderBy(x => x)) item.Items.Add(BuildNode(c, edges, nameOf, path, depth + 1));
+            path.Remove(va);
+        }
+        return item;
+    }
 
     public void Refresh()
     {
