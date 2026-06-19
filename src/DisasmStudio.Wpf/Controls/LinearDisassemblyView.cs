@@ -391,6 +391,9 @@ public sealed class LinearDisassemblyView : Grid
     /// <summary>Decide how a data run renders: db "string" / dd|dq pointer (named if known) / db byte row.</summary>
     private (string Directive, string Value, Brush Brush) ClassifyData(ulong va, byte[] bytes)
     {
+        if (Array.TrueForAll(bytes, b => b == 0xCC))   // int3 alignment padding
+            return ("int3", bytes.Length > 1 ? $"  × {bytes.Length}" : "", SyntaxTheme.Comment);
+
         if ((bytes.Length == 4 || bytes.Length == 8) &&
             _result!.Image.IsMappedVa(bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0)))
         {
