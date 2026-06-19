@@ -53,4 +53,16 @@ public interface IBinaryImage
 
     /// <summary>Fill <paramref name="dest"/> from <paramref name="va"/>; unmapped bytes are left 0. Returns the contiguous mapped count.</summary>
     int ReadVa(ulong va, Span<byte> dest);
+
+    // ---- patching: in-memory byte edits overlaid on every read, persisted via SavePatchedAs ----
+    /// <summary>Overlay <paramref name="bytes"/> at file <paramref name="offset"/>.</summary>
+    void Patch(int offset, ReadOnlySpan<byte> bytes);
+    /// <summary>Patch starting at a VA; returns false if the VA isn't file-backed.</summary>
+    bool PatchVa(ulong va, ReadOnlySpan<byte> bytes);
+    void RevertPatch(int offset, int count);
+    bool IsPatchedAt(int offset);
+    bool IsDirty { get; }
+    int PatchCount { get; }
+    /// <summary>Write the original bytes plus all edits to a new file.</summary>
+    void SavePatchedAs(string path);
 }

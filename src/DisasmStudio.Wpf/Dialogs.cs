@@ -33,6 +33,28 @@ internal static class Dialogs
         return (baseVa, bitness);
     }
 
+    /// <summary>Ask how to patch the instruction at <paramref name="va"/>. Returns the assembly text
+    /// (or hex bytes) to encode, and whether to just NOP it out; null if cancelled.</summary>
+    public static (string Asm, bool Nop)? AskPatch(Window owner, ulong va, string currentText, string currentBytes)
+    {
+        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var info = new TextBlock { Text = $"{va:X}   {currentText}", Foreground = Fg, FontFamily = mono, Margin = new Thickness(0, 0, 0, 2) };
+        var bytes = new TextBlock { Text = currentBytes, Foreground = new SolidColorBrush(Color.FromRgb(0x79, 0x82, 0x8F)), FontFamily = mono, Margin = new Thickness(0, 0, 0, 10) };
+        var box = new TextBox { Text = "", FontFamily = mono, AcceptsReturn = true, MinLines = 2, MaxLines = 8 };
+        var nop = new CheckBox { Content = "Replace with NOPs", Foreground = Fg, Margin = new Thickness(0, 10, 0, 0) };
+
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label("Instruction"));
+        panel.Children.Add(info);
+        panel.Children.Add(bytes);
+        panel.Children.Add(Label("Assembly (e.g. \"nop\", \"jmp 0x401000\", \"mov eax, 1\") or raw hex bytes; ';' separates"));
+        panel.Children.Add(box);
+        panel.Children.Add(nop);
+
+        bool ok = ShowModal(owner, "Patch instruction", panel, box, 480);
+        return ok ? (box.Text, nop.IsChecked == true) : null;
+    }
+
     /// <summary>Ask for an address (hex) to navigate to.</summary>
     public static ulong? AskAddress(Window owner)
     {
@@ -51,13 +73,13 @@ internal static class Dialogs
         Margin = new Thickness(0, 0, 0, 4),
     };
 
-    private static bool ShowModal(Window owner, string title, Panel content, Control focus)
+    private static bool ShowModal(Window owner, string title, Panel content, Control focus, int width = 320)
     {
         var win = new Window
         {
             Title = title,
             Owner = owner,
-            Width = 320,
+            Width = width,
             SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize,

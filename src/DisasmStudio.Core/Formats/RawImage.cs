@@ -50,6 +50,15 @@ public sealed class RawImage : IBinaryImage
     public ulong MaxVa => ImageBase + (ulong)_f.Length;
 
     public byte ReadByteAtOffset(int offset) => _f.ReadByte(offset);
+
+    public void Patch(int offset, ReadOnlySpan<byte> bytes) => _f.Patch(offset, bytes);
+    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes) { int o = VaToOffset(va); if (o < 0) return false; _f.Patch(o, bytes); return true; }
+    public void RevertPatch(int offset, int count) => _f.RevertPatch(offset, count);
+    public bool IsPatchedAt(int offset) => _f.IsPatched(offset);
+    public bool IsDirty => _f.IsDirty;
+    public int PatchCount => _f.PatchCount;
+    public void SavePatchedAs(string path) => _f.SaveAs(path);
+
     public Section? SectionAt(ulong va) => _section.ContainsVa(va) ? _section : null;
 
     public int VaToOffset(ulong va) =>

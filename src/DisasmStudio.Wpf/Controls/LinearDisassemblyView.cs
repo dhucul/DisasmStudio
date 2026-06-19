@@ -50,6 +50,7 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? SelectionChanged;
     public event Action<ulong>? ShowXrefsRequested;
     public event Action<ulong>? OpenInGraphRequested;
+    public event Action<ulong>? PatchRequested;
 
     public LinearDisassemblyView()
     {
@@ -514,12 +515,16 @@ public sealed class LinearDisassemblyView : Grid
         graph.Click += (_, _) => { if (CaretVa != 0) OpenInGraphRequested?.Invoke(CaretVa); };
         var follow = new MenuItem { Header = "Follow target", InputGestureText = "Enter" };
         follow.Click += (_, _) => FollowCaret();
+        var patch = new MenuItem { Header = "Patch instruction…" };
+        patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
         menu.Items.Add(copy);
         menu.Items.Add(selectAll);
         menu.Items.Add(new Separator());
         menu.Items.Add(follow);
         menu.Items.Add(xref);
         menu.Items.Add(graph);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(patch);
         _surface.ContextMenu = menu;
     }
 

@@ -32,7 +32,11 @@ public sealed class HexView : Grid
 
     private ulong _selAnchor, _selCaret;
     private bool _hasSelection;
+    private int _editNibble;   // 0 = next keystroke sets the high nibble, 1 = low nibble
     private const long MaxCopyBytes = 1 << 20;
+
+    /// <summary>Raised after a byte is edited, so the host can mark the image dirty / enable Save.</summary>
+    public event Action? Edited;
 
     private static readonly Brush BgBrush = Frozen(0x10, 0x14, 0x1B);
     private static readonly Brush AddrBrush = Frozen(0x6B, 0x8F, 0xD6);
@@ -40,6 +44,7 @@ public sealed class HexView : Grid
     private static readonly Brush AsciiBrush = Frozen(0x8F, 0xC1, 0x8A);
     private static readonly Brush DimBrush = Frozen(0x4A, 0x54, 0x62);
     private static readonly Brush SelBrush = FrozenA(0x66, 0x4D, 0x8D, 0xF7);
+    private static readonly Brush PatchBrush = Frozen(0xF2, 0xB0, 0x6A);   // warm = edited byte
 
     public HexView()
     {
@@ -74,6 +79,8 @@ public sealed class HexView : Grid
         ConfigureScroll();
         _surface.InvalidateVisual();
     }
+
+    public void InvalidateView() => _surface.InvalidateVisual();
 
     public void GoTo(ulong address)
     {
@@ -169,6 +176,28 @@ public sealed class HexView : Grid
     {
         if (extend && _hasSelection) _selCaret = addr;
         else { _selAnchor = addr; _selCaret = addr; _hasSelection = true; }
+        _editNibble = 0;
+        _surface.InvalidateVisual();
+    }
+
+    /// <summary>Overwrite the high or low nibble of the caret byte and advance after a full byte.</summary>
+    private void TypeHex(int nibble)
+    {
+        if (_image is null || !_hasSelection) return;
+        int off = _image.VaToOffset(_selCaret);
+        if (off < 0) return;
+        var cur = _image.ReadBytesAtVa(_selCaret, 1);
+        byte b = cur.Length == 1 ? cur[0] : (byte)0;
+        byte nb = _editNibble == 0 ? (byte)((nibble << 4) | (b & 0x0F)) : (byte)((b & 0xF0) | nibble);
+        _image.Patch(off, [nb]);
+        if (_editNibble == 0) _editNibble = 1;
+        else
+        {
+            _editNibble = 0;
+            ulong next = _selCaret + 1;
+            if (next < _image.MaxVa) { _selAnchor = _selCaret = next; }
+        }
+        Edited?.Invoke();
         _surface.InvalidateVisual();
     }
 
@@ -257,6 +286,15 @@ public sealed class HexView : Grid
 
             Draw(dc, hex.ToString(), hexX, y, read > 0 ? HexBrush : DimBrush, dpi);
             Draw(dc, ascii.ToString(), asciiX, y, AsciiBrush, dpi);
+
+            // Re-draw edited bytes in the patch colour so changes stand out.
+            if (_image.IsDirty)
+                for (int c = 0; c < read; c++)
+                {
+                    int off = _image.VaToOffset(addr + (ulong)c);
+                    if (off >= 0 && _image.IsPatchedAt(off))
+                        Draw(dc, row[c].ToString("X2"), hexX + HexCharOffset(c) * _charWidth, y, PatchBrush, dpi);
+                }
         }
     }
 
@@ -346,6 +384,21 @@ public sealed class HexView : Grid
             if (e.Key == Key.C && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
             {
                 _owner.CopySelection(asText: false);
+                e.Handled = true;
+            }
+        }
+
+        // Typing a hex digit over the caret byte edits it (nibble at a time).
+        protected override void OnTextInput(TextCompositionEventArgs e)
+        {
+            if ((Keyboard.Modifiers & ModifierKeys.Control) != 0) return;
+            foreach (char ch in e.Text)
+            {
+                int v = ch is >= '0' and <= '9' ? ch - '0'
+                    : ch is >= 'a' and <= 'f' ? ch - 'a' + 10
+                    : ch is >= 'A' and <= 'F' ? ch - 'A' + 10 : -1;
+                if (v < 0) continue;
+                _owner.TypeHex(v);
                 e.Handled = true;
             }
         }

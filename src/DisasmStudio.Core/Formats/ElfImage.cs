@@ -64,6 +64,14 @@ public sealed class ElfImage : IBinaryImage
 
     public byte ReadByteAtOffset(int offset) => _f.ReadByte(offset);
 
+    public void Patch(int offset, ReadOnlySpan<byte> bytes) => _f.Patch(offset, bytes);
+    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes) { int o = VaToOffset(va); if (o < 0) return false; _f.Patch(o, bytes); return true; }
+    public void RevertPatch(int offset, int count) => _f.RevertPatch(offset, count);
+    public bool IsPatchedAt(int offset) => _f.IsPatched(offset);
+    public bool IsDirty => _f.IsDirty;
+    public int PatchCount => _f.PatchCount;
+    public void SavePatchedAs(string path) => _f.SaveAs(path);
+
     public Section? SectionAt(ulong va)
     {
         foreach (var s in _sections) if (s.IsReadable && s.FileSize > 0 && s.ContainsVa(va)) return s;

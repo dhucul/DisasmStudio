@@ -17,14 +17,17 @@ public sealed class MappedFile
 {
     private readonly MemoryMappedFile _mmf;
     private readonly MemoryMappedViewAccessor _view;
+    private readonly Dictionary<int, byte> _patches = [];   // in-memory edits, overlaid on every read
 
     public int Length { get; }
+    public string Path { get; }
 
-    private MappedFile(MemoryMappedFile mmf, MemoryMappedViewAccessor view, int length)
+    private MappedFile(MemoryMappedFile mmf, MemoryMappedViewAccessor view, int length, string path)
     {
         _mmf = mmf;
         _view = view;
         Length = length;
+        Path = path;
     }
 
     public static MappedFile Open(string path)
@@ -38,16 +41,21 @@ public sealed class MappedFile
         var mmf = MemoryMappedFile.CreateFromFile(stream, mapName: null, capacity: 0,
             MemoryMappedFileAccess.Read, HandleInheritability.None, leaveOpen: false);
         var view = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
-        return new MappedFile(mmf, view, (int)Math.Min(length, int.MaxValue));
+        return new MappedFile(mmf, view, (int)Math.Min(length, int.MaxValue), path);
     }
 
     public bool InBounds(int offset, int count) => offset >= 0 && count >= 0 && offset + count <= Length;
 
-    public byte ReadByte(int o) => (uint)o < (uint)Length ? _view.ReadByte(o) : (byte)0;
-    public ushort ReadU16(int o) => InBounds(o, 2) ? _view.ReadUInt16(o) : (ushort)0;
-    public uint ReadU32(int o) => InBounds(o, 4) ? _view.ReadUInt32(o) : 0u;
-    public int ReadI32(int o) => InBounds(o, 4) ? _view.ReadInt32(o) : 0;
-    public ulong ReadU64(int o) => InBounds(o, 8) ? _view.ReadUInt64(o) : 0ul;
+    public byte ReadByte(int o)
+    {
+        if (_patches.Count > 0 && _patches.TryGetValue(o, out var p)) return p;
+        return (uint)o < (uint)Length ? _view.ReadByte(o) : (byte)0;
+    }
+    public ushort ReadU16(int o) => _patches.Count == 0 && InBounds(o, 2) ? _view.ReadUInt16(o) : (ushort)(ReadByte(o) | ReadByte(o + 1) << 8);
+    public uint ReadU32(int o) => _patches.Count == 0 && InBounds(o, 4) ? _view.ReadUInt32(o)
+        : (uint)(ReadByte(o) | ReadByte(o + 1) << 8 | ReadByte(o + 2) << 16 | ReadByte(o + 3) << 24);
+    public int ReadI32(int o) => (int)ReadU32(o);
+    public ulong ReadU64(int o) => _patches.Count == 0 && InBounds(o, 8) ? _view.ReadUInt64(o) : ReadU32(o) | (ulong)ReadU32(o + 4) << 32;
 
     public byte[] ReadBytes(int offset, int count)
     {
@@ -55,6 +63,8 @@ public sealed class MappedFile
         count = Math.Min(count, Length - offset);
         var b = new byte[count];
         _view.ReadArray(offset, b, 0, count);
+        if (_patches.Count > 0)
+            for (int i = 0; i < count; i++) if (_patches.TryGetValue(offset + i, out var p)) b[i] = p;
         return b;
     }
 
@@ -63,8 +73,35 @@ public sealed class MappedFile
     {
         if (offset < 0 || offset >= Length) return 0;
         int count = Math.Min(dest.Length, Length - offset);
-        for (int i = 0; i < count; i++) dest[i] = _view.ReadByte(offset + i);
+        for (int i = 0; i < count; i++) dest[i] = ReadByte(offset + i);
         return count;
+    }
+
+    // ---- patching ----
+    public bool IsDirty => _patches.Count > 0;
+    public int PatchCount => _patches.Count;
+    public bool IsPatched(int offset) => _patches.ContainsKey(offset);
+
+    /// <summary>Overlay <paramref name="bytes"/> at <paramref name="offset"/> (in-memory; persisted by <see cref="SaveAs"/>).</summary>
+    public void Patch(int offset, ReadOnlySpan<byte> bytes)
+    {
+        for (int i = 0; i < bytes.Length; i++)
+            if ((uint)(offset + i) < (uint)Length) _patches[offset + i] = bytes[i];
+    }
+
+    /// <summary>Drop edits in [offset, offset+count), restoring the original bytes.</summary>
+    public void RevertPatch(int offset, int count)
+    {
+        for (int i = 0; i < count; i++) _patches.Remove(offset + i);
+    }
+
+    /// <summary>Write the original file plus all edits to <paramref name="dest"/> (must differ from the open file).</summary>
+    public void SaveAs(string dest)
+    {
+        File.Copy(Path, dest, overwrite: true);
+        if (_patches.Count == 0) return;
+        using var fs = new FileStream(dest, FileMode.Open, FileAccess.Write);
+        foreach (var (off, b) in _patches) { fs.Seek(off, SeekOrigin.Begin); fs.WriteByte(b); }
     }
 
     /// <summary>Read a NUL-terminated ASCII string at a file offset.</summary>

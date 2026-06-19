@@ -28,7 +28,13 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   MSVC/GCC RVA-offset tables (`mov [tab+idx*4]; add; jmp reg`). Case targets become real CFG edges +
   `loc_` labels, and the `jmp` is annotated `; switch (N cases)`. True dynamic dispatch (vtables,
   function pointers) is left indirect, as it should be.
-- **Hex view:** on-demand, virtualized over the whole address space.
+- **Hex view:** on-demand, virtualized over the whole address space; **editable** — type hex over the
+  caret byte (edited bytes highlighted).
+- **Patching (x86/x64):** right-click an instruction → *Patch…* to assemble a replacement (`nop`,
+  `jmp 0x…`, `mov eax, 1`, branches, simple ALU/mov ops — via Iced's encoder) or NOP it out; raw hex
+  bytes are also accepted. Patches cover whole instructions and NOP-pad the remainder to stay aligned.
+  Edits are an in-memory overlay seen by the disassembler and re-analysis; *Save Patched As…* writes a
+  new binary.
 - **Windows API awareness (IDA/BN-style):** a bundled database of ~100 common Win32 prototypes
   annotates each API call site with the function's parameters and, where it can prove them, the
   argument *values* — recovered by a short backward scan of the registers (x64 rcx/rdx/r8/r9, plus

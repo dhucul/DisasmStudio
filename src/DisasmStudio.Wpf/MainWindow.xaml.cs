@@ -1,11 +1,13 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
@@ -52,7 +54,90 @@ public partial class MainWindow : Window
         Linear.SelectionChanged += OnAddressFocused;
         Linear.ShowXrefsRequested += va => { SideTabs.SelectedIndex = 0; ShowXrefs(va); };
         Linear.OpenInGraphRequested += va => { OpenGraph(va); CenterTabs.SelectedIndex = 1; };
+        Linear.PatchRequested += OnPatchInstruction;
+        Hex.Edited += OnImageEdited;
         Graph.BlockSelected += va => _nav.Navigate(va);
+    }
+
+    // ---- patching ----
+    private void OnPatchInstruction(ulong va)
+    {
+        if (_image is null) return;
+        var dis = new Disassembler(_image);
+        if (!dis.TryDecodeAt(va, out var ins) || ins.Length == 0) return;
+
+        var orig = _image.ReadBytesAtVa(va, ins.Length);
+        string curHex = string.Join(" ", orig.Select(b => b.ToString("x2")));
+        var req = Dialogs.AskPatch(this, va, ins.ToString(), curHex);
+        if (req is null) return;
+
+        byte[] patch;
+        if (req.Value.Nop) patch = Patcher.Nop(ins.Length);
+        else
+        {
+            var asm = Patcher.Assemble(_image.Bitness, va, req.Value.Asm);
+            patch = asm.Bytes ?? TryParseHexBytes(req.Value.Asm)!;
+            if (patch is null)
+            {
+                MessageBox.Show(this, asm.Error, "Assemble failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+        }
+
+        // Cover enough whole instructions to hold the new bytes; pad the remainder with NOPs so the
+        // following instruction stays aligned.
+        int cover = 0;
+        ulong p = va;
+        while (cover < patch.Length && dis.TryDecodeAt(p, out var n) && n.Length > 0) { cover += n.Length; p += (ulong)n.Length; }
+        if (!_image.PatchVa(va, Patcher.PadNop(patch, cover)))
+        {
+            MessageBox.Show(this, "That address is not file-backed.", "Patch", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        OnImageEdited();
+        _ = StartAnalysis(_image, va, 0);   // re-analyze with the patch applied; stay on this address
+    }
+
+    private void OnImageEdited()
+    {
+        bool dirty = _image?.IsDirty == true;
+        SavePatchedBtn.IsEnabled = dirty;
+        if (dirty) Hex.InvalidateView();
+    }
+
+    private void OnSavePatched(object sender, RoutedEventArgs e)
+    {
+        if (_image is null || !_image.IsDirty) return;
+        string baseName = Path.GetFileNameWithoutExtension(_image.FilePath);
+        string ext = Path.GetExtension(_image.FilePath);
+        var dlg = new SaveFileDialog { FileName = $"{baseName}.patched{ext}", Filter = "All files|*.*" };
+        if (dlg.ShowDialog(this) != true) return;
+        try
+        {
+            _image.SavePatchedAs(dlg.FileName);
+            StatusText.Text = $"Saved patched binary ({_image.PatchCount} byte(s)) to {dlg.FileName}";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>Parse free-form hex bytes ("90 90", "9090", "0x90,0x90"); null if not all hex.</summary>
+    private static byte[]? TryParseHexBytes(string s)
+    {
+        var bytes = new List<byte>();
+        foreach (var tok in s.Split([' ', '\t', '\n', '\r', ','], StringSplitOptions.RemoveEmptyEntries))
+        {
+            string h = tok.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? tok[2..] : tok;
+            if (h.Length == 0 || h.Length % 2 != 0) return null;
+            for (int i = 0; i < h.Length; i += 2)
+            {
+                if (!byte.TryParse(h.AsSpan(i, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b)) return null;
+                bytes.Add(b);
+            }
+        }
+        return bytes.Count > 0 ? bytes.ToArray() : null;
     }
 
     // ---- open + analyze ----
@@ -183,6 +268,7 @@ public partial class MainWindow : Window
             PopulateLists(result);
             Linear.SetResult(result);
             Hex.SetImage(image);
+            SavePatchedBtn.IsEnabled = image.IsDirty;
             _funcStarts = result.Functions.Select(f => f.Va).ToArray();
 
             ulong target = initialVa ?? (image.EntryVa != 0 ? image.EntryVa
