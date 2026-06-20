@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private DebugSession? _dbg;
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
+    private bool _restartPending;           // relaunch the target once the current debuggee has exited
     private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
 
     private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
@@ -142,6 +143,14 @@ public partial class MainWindow : Window
     private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
     private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
 
+    private void OnDebugRestart(object sender, RoutedEventArgs e)
+    {
+        if (_dbg is null) return;
+        _restartPending = true;   // OnDbgExited relaunches the target once this debuggee is gone
+        StatusText.Text = "Restarting…";
+        _dbg.Stop();
+    }
+
     // ---- FunCap-style function capture ----
 
     private void OnCaptureAll(object sender, RoutedEventArgs e)
@@ -245,7 +254,9 @@ public partial class MainWindow : Window
             Hex.SetImage(_result.Image);
             Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
             CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; ArgsModeBtn.IsEnabled = true; OnceModeBtn.IsEnabled = true;
+            RestartBtn.IsEnabled = true;
         }
+        DbgRunBtn.Content = "▶ Continue";   // Run doubles as Continue (F5) during a session
         Linear.SetCurrentIp(_dbg.CurrentIp);
         Linear.Refresh();
         Debug.Refresh();
@@ -260,6 +271,7 @@ public partial class MainWindow : Window
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
         _dbg?.AbortCapture();   // process is gone: drop capture state and close the log (no live removal needed)
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; ArgsModeBtn.IsEnabled = false; OnceModeBtn.IsEnabled = false;
+        RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run";
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;
         Hex.WriteByteAt = null;
@@ -276,6 +288,13 @@ public partial class MainWindow : Window
             Hex.SetImage(_image);
         }
         StatusText.Text = $"Debuggee exited (code {code}).";
+
+        if (_restartPending)
+        {
+            _restartPending = false;
+            var img = _image;
+            if (img is { Format: BinaryFormat.Pe }) Dispatcher.BeginInvoke(() => BeginDebug(d => d.Launch(img.FilePath)));
+        }
     }
 
     // ---- patching ----
