@@ -143,8 +143,17 @@ public sealed class PeImage : IBinaryImage
     {
         if (rva < SizeOfHeaders) return (int)rva;
         foreach (var s in _sections)
-            if (rva >= (uint)(s.StartVa - ImageBase) && rva < (uint)(s.EndVa - ImageBase))
-                return (int)(rva - (s.StartVa - ImageBase)) + s.FileOffset;
+        {
+            long secRva = (long)(s.StartVa - ImageBase);
+            // Translate within the section's RAW data only (FileSize = SizeOfRawData). An RVA in a section's
+            // virtual-only tail (VirtualSize > raw size) has no file bytes; mapping it via EndVa would fold
+            // it into the next section's raw data. Bound the result like VaToOffset does.
+            if (rva >= secRva && rva < secRva + s.FileSize)
+            {
+                long off = (rva - secRva) + s.FileOffset;
+                return off >= 0 && off < _f.Length ? (int)off : -1;
+            }
+        }
         return -1;
     }
 

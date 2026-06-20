@@ -25,8 +25,12 @@ public sealed class DebugSession
     public uint LastExceptionCode { get; private set; }
     public bool IsStopped { get; private set; }
 
-    /// <summary>Active FunCap-style function-capture session, or null.</summary>
-    public FunctionCapture? Capture { get; private set; }
+    /// <summary>Active FunCap-style function-capture session, or null. Read on the UI thread (the capture
+    /// poll timer) and written/read on the debug-loop thread (OnStopped nulls it during teardown), so the
+    /// backing field is volatile — the null-swap must be visible across threads. FunctionCapture's own state
+    /// is internally locked, so observing the reference (or null) is sufficient.</summary>
+    public FunctionCapture? Capture { get => _capture; private set => _capture = value; }
+    private volatile FunctionCapture? _capture;
 
     public event Action? Stopped;
     public event Action? Running;

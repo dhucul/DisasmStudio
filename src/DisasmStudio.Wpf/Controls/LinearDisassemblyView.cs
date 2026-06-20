@@ -119,7 +119,7 @@ public sealed class LinearDisassemblyView : Grid
     /// <summary>Centre the view on a VA and select that instruction.</summary>
     public void GoToVa(ulong va)
     {
-        if (_result is null) return;
+        if (_result is null || _result.Linear.Count == 0) return;
         long line = _result.Linear.IndexOf(va);
         _caretInstr = line;
         _selAnchor = line;
@@ -239,7 +239,7 @@ public sealed class LinearDisassemblyView : Grid
 
     private void MoveCaret(long newInstr, bool extend = false)
     {
-        if (_result is null) return;
+        if (_result is null || _result.Linear.Count == 0) return;   // empty index: Clamp(_,0,-1) would throw
         _caretInstr = Math.Clamp(newInstr, 0, _result.Linear.Count - 1);
         if (!extend || _selAnchor < 0) _selAnchor = _caretInstr;   // collapse selection unless extending
         EnsureCaretVisible();
