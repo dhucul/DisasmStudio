@@ -38,6 +38,7 @@ public sealed class FunctionCapture
     private readonly Dictionary<ulong, HashSet<ulong>> _edges = [];  // caller-func VA -> set of callee-func VAs
     private readonly bool _once;                            // capture each function once, then drop its entry bp
     private readonly bool _argsOnly;                        // skip return capture (no return breakpoints) for speed
+    private readonly bool _annotate;                        // dereference values (slower) vs raw hex only (faster)
     private readonly object _logLock = new();               // serialize log writes (engine) vs flush (UI)
     private StreamWriter? _log;
 
@@ -48,19 +49,30 @@ public sealed class FunctionCapture
     /// <summary>Raised (engine thread) after each captured record so the UI can refresh on its own cadence.</summary>
     public event Action? Captured;
 
-    public FunctionCapture(DebuggerEngine eng, DereferenceResolver deref, IEnumerable<(ulong Va, string Name)> funcs, bool captureOnce, bool argsOnly)
+    public FunctionCapture(DebuggerEngine eng, DereferenceResolver deref, IEnumerable<(ulong Va, string Name)> funcs, bool captureOnce, bool argsOnly, bool annotate)
     {
         _eng = eng;
         _deref = deref;
         _once = captureOnce;
         _argsOnly = argsOnly;
+        _annotate = annotate;
         _names = new Dictionary<ulong, string>();
         foreach (var (va, name) in funcs) _names[va] = name;
         _sorted = _names.Keys.ToArray();
         Array.Sort(_sorted);
     }
 
+    // Dereference a value (x64dbg-style annotation), or "" when annotation is off — the per-argument
+    // memory reads + symbol/string lookups here are the dominant per-capture cost.
+    private string Annotate(ulong v) => _annotate ? Annotate(v) : "";
+
     public IReadOnlyList<CaptureRecord> Snapshot() { lock (_lock) return _records.ToList(); }
+
+    /// <summary>Copy only the records added since <paramref name="from"/> (the UI appends incrementally).</summary>
+    public IReadOnlyList<CaptureRecord> SnapshotFrom(int from)
+    {
+        lock (_lock) return from < _records.Count ? _records.GetRange(from, _records.Count - from) : [];
+    }
 
     public Dictionary<ulong, HashSet<ulong>> EdgesSnapshot()
     {
@@ -204,7 +216,7 @@ public sealed class FunctionCapture
             ThreadId = _eng.CurrentThreadId,
             Depth = call.Depth,
             RetValue = rv,
-            RetDeref = _deref.Describe(rv),
+            RetDeref = Annotate(rv),
             Args = call.Args,
         };
         lock (_lock) _records.Add(ret);
@@ -218,12 +230,12 @@ public sealed class FunctionCapture
         var list = new List<(string, ulong, string)>();
         if (_eng.Is32)
         {
-            for (int i = 0; i < 6; i++) { ulong v = ReadPtr(regs.Sp + (ulong)(4 * (i + 1))); list.Add(($"arg{i}", v, _deref.Describe(v))); }
+            for (int i = 0; i < 6; i++) { ulong v = ReadPtr(regs.Sp + (ulong)(4 * (i + 1))); list.Add(($"arg{i}", v, Annotate(v))); }
         }
         else
         {
-            foreach (var r in new[] { "rcx", "rdx", "r8", "r9" }) { ulong v = regs[r]; list.Add((r, v, _deref.Describe(v))); }
-            for (int i = 0; i < 2; i++) { ulong v = ReadPtr(regs.Sp + 0x28 + (ulong)(8 * i)); list.Add(($"arg{4 + i}", v, _deref.Describe(v))); }
+            foreach (var r in new[] { "rcx", "rdx", "r8", "r9" }) { ulong v = regs[r]; list.Add((r, v, Annotate(v))); }
+            for (int i = 0; i < 2; i++) { ulong v = ReadPtr(regs.Sp + 0x28 + (ulong)(8 * i)); list.Add(($"arg{4 + i}", v, Annotate(v))); }
         }
         return list;
     }

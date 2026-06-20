@@ -32,6 +32,7 @@
                 <Button x:Name="CaptureFnBtn" Content="Capture Fn" Click="OnCaptureFunc" Margin="6,0,0,0" IsEnabled="False" ToolTip="Capture every call of the function at the current address" />
                 <CheckBox x:Name="OnceCheck" Content="First call only" IsChecked="True" Margin="12,0,0,0" IsEnabled="False" ToolTip="Capture each function once, then let it run at full speed (fast for large programs). Uncheck to capture every call (detailed but much slower)." />
                 <CheckBox x:Name="RetCheck" Content="Capture returns" IsChecked="True" Margin="12,0,0,0" IsEnabled="False" ToolTip="Also capture each function's return value (sets a return breakpoint). Uncheck for args-only: about half the events, faster." />
+                <CheckBox x:Name="DerefCheck" Content="Dereference args" IsChecked="True" Margin="12,0,0,0" IsEnabled="False" ToolTip="Annotate values with the string/symbol they point to (e.g. rcx → &quot;C:\…&quot;). This per-argument lookup is the main per-hit cost — uncheck to log raw hex values only, which is faster for dense captures." />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
                 <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" />
                 <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,0,0,0" />

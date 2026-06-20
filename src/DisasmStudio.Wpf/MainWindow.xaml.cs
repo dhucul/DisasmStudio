@@ -40,6 +40,7 @@ public partial class MainWindow : Window
     private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
     private int _captureShown;               // records already pushed to the panel
     private int _captureEdges = -1;          // last call-graph edge total (rebuild only on change)
+    private string? _captureLogPath;         // last chosen capture-log path (Save-As default)
     private readonly HashSet<ulong> _captureCommented = [];   // entries already annotated inline
 
     private ObservableCollection<FunctionItem> _functions = [];
@@ -179,12 +180,25 @@ public partial class MainWindow : Window
         // (writing into a running process can corrupt it). Require a stop before starting a capture.
         if (_dbg is not { IsStopped: true }) { StatusText.Text = "Pause the debuggee before starting a capture."; return; }
 
+        // Choose where the capture log is written (defaults to the last path, then ~/funcap.txt).
+        string defaultPath = _captureLogPath ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "funcap.txt");
+        var dlg = new SaveFileDialog
+        {
+            Title = "Save capture log",
+            Filter = "Text log|*.txt|All files|*.*",
+            FileName = Path.GetFileName(defaultPath),
+            InitialDirectory = Path.GetDirectoryName(defaultPath),
+            OverwritePrompt = false,   // the log is meant to be overwritten; the user already picked the file
+        };
+        if (dlg.ShowDialog(this) != true) return;   // cancelled — don't start a capture
+        string log = _captureLogPath = dlg.FileName;
+
         // Read the capture-option checkboxes (settings — they hold state, they don't trigger anything).
         bool once = OnceCheck.IsChecked == true;
         bool argsOnly = RetCheck.IsChecked != true;
+        bool annotate = DerefCheck.IsChecked == true;
 
-        string log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "funcap.txt");
-        var cap = _dbg!.StartCapture(funcVa, log, once, argsOnly);
+        var cap = _dbg!.StartCapture(funcVa, log, once, argsOnly, annotate);
         if (cap is null) { StatusText.Text = "Capture needs the program stopped at least once first."; return; }
 
         _captureShown = 0; _captureEdges = -1; _captureCommented.Clear();
@@ -216,15 +230,15 @@ public partial class MainWindow : Window
         bool is32 = _dbg!.Engine.Is32;
 
         cap.FlushLog();   // periodically persist the buffered log so an abnormal exit loses little
-        var recs = cap.Snapshot();
-        if (recs.Count > _captureShown)
+        var newRecs = cap.SnapshotFrom(_captureShown);   // only the records added since last tick
+        if (newRecs.Count > 0)
         {
-            Debug.AppendCapture(recs, _captureShown, is32);
+            Debug.AppendCapture(newRecs, 0, is32);
             if (_result?.Comments is IDictionary<ulong, string> comments)
-                for (int i = _captureShown; i < recs.Count; i++)
-                    if (!recs[i].IsReturn && _captureCommented.Add(recs[i].CalleeVa))
-                        comments[recs[i].CalleeVa] = FunctionCapture.ArgComment(recs[i], is32);
-            _captureShown = recs.Count;
+                foreach (var r in newRecs)
+                    if (!r.IsReturn && _captureCommented.Add(r.CalleeVa))
+                        comments[r.CalleeVa] = FunctionCapture.ArgComment(r, is32);
+            _captureShown += newRecs.Count;
             Linear.Refresh();   // surface the new inline comments
         }
 
@@ -246,7 +260,7 @@ public partial class MainWindow : Window
             Linear.SetResult(_result, _dbg.LiveDecoder);
             Hex.SetImage(_result.Image);
             Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
-            CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true;
+            CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true; DerefCheck.IsEnabled = true;
             RestartBtn.IsEnabled = true;
         }
         DbgRunBtn.Content = "▶ Continue"; DbgRunBtn.IsEnabled = true; SetStepButtons(true);   // Run doubles as Continue (F5) during a session
@@ -263,7 +277,7 @@ public partial class MainWindow : Window
         _captureTimer?.Stop();
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
         _dbg?.AbortCapture();   // process is gone: drop capture state and close the log (no live removal needed)
-        CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false;
+        CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false; DerefCheck.IsEnabled = false;
         RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run"; DbgRunBtn.IsEnabled = true; SetStepButtons(false);   // re-enable for a fresh Run
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;
