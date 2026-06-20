@@ -106,7 +106,10 @@ public static class JumpTableRecovery
     {
         var list = new List<ulong>();
         var seen = new HashSet<ulong>();
-        int limit = count > 0 ? Math.Min(count + 1, MaxEntries) : UnknownCap;
+        // FindBoundsCount already returns the entry count (N+1 for `cmp idx,N; ja default`), so use it
+        // directly — `count + 1` read one entry past the table (a spurious case when the next bytes happen to
+        // look like a code address). The IsExecutableVa break below still bounds an unknown/over-large count.
+        int limit = count > 0 ? Math.Min(count, MaxEntries) : UnknownCap;
         for (int i = 0; i < limit; i++)
         {
             var b = image.ReadBytesAtVa(tableStart + (ulong)(i * entrySize), entrySize);

@@ -53,7 +53,9 @@ public sealed class CodeBitmap
         int r = RegionOf(va);
         if (r < 0) return false;
         long i = (long)(va - _start[r]);
-        return (_words[r][i >> 6] & (1UL << (int)(i & 63))) != 0;
+        long wi = i >> 6;
+        if (wi >= _words[r].LongLength) return false;   // beyond the bitmap (the word array is clamped for a >2 GB section)
+        return (_words[r][wi] & (1UL << (int)(i & 63))) != 0;
     }
 
     /// <summary>Next code byte at/after <paramref name="va"/>, else <paramref name="limit"/>.</summary>

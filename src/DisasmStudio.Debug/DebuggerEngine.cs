@@ -594,7 +594,7 @@ public sealed class DebuggerEngine
         var dec = Decoder.Create(Is32 ? 32 : 64, new ByteArrayCodeReader(bytes));
         dec.IP = ip;
         dec.Decode(out var instr);
-        if (instr.IsInvalid) return false;
+        if (instr.IsInvalid || instr.Length > bytes.Length) return false;   // invalid, or a truncated read at a region boundary
         len = instr.Length;
         return instr.FlowControl is FlowControl.Call or FlowControl.IndirectCall;
     }
