@@ -90,17 +90,18 @@ internal static class Native
         public uint dwFirstChance;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    // Full 152 bytes (x64): the ExceptionInformation array has 15 ulong entries, so the struct must be
+    // sized correctly or EXCEPTION_DEBUG_INFO.dwFirstChance (which follows it) is read at the wrong offset.
+    [StructLayout(LayoutKind.Explicit, Size = 152)]
     public struct EXCEPTION_RECORD
     {
-        public uint ExceptionCode;
-        public uint ExceptionFlags;
-        public ulong ExceptionRecord;
-        public ulong ExceptionAddress;
-        public uint NumberParameters;
-        public uint _align;
-        public ulong Info0;   // ExceptionInformation[0] (e.g. access-violation r/w + watchpoint addr)
-        public ulong Info1;
+        [FieldOffset(0)] public uint ExceptionCode;
+        [FieldOffset(4)] public uint ExceptionFlags;
+        [FieldOffset(8)] public ulong ExceptionRecord;
+        [FieldOffset(16)] public ulong ExceptionAddress;
+        [FieldOffset(24)] public uint NumberParameters;
+        [FieldOffset(32)] public ulong Info0;   // ExceptionInformation[0] (e.g. access-violation r/w + watchpoint addr)
+        [FieldOffset(40)] public ulong Info1;
     }
 
     [StructLayout(LayoutKind.Sequential)]
