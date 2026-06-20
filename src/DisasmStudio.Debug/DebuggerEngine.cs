@@ -232,6 +232,15 @@ public sealed class DebuggerEngine
                 }
                 return false;   // launched: skip past it toward the entry bp
             }
+            // A breakpoint exception at an address that is no longer one of ours is a *stale/phantom*
+            // breakpoint: the CPU hit our 0xCC, the kernel queued the event, and the breakpoint was removed
+            // and its byte restored before we processed the queue (capture teardown, a capture-once entry, or
+            // a sibling thread that hit it while it was briefly disarmed for a single-step). RIP is now parked
+            // one byte into the restored instruction — rewind over the (now-absent) 0xCC and continue
+            // silently, or resuming would execute mid-instruction and fault (0xC0000005). A byte that is still
+            // 0xCC is a genuine int3 in the program (e.g. __debugbreak / anti-debug), so leave it to surface.
+            var live = ReadMemory(addr, 1);   // active bps were handled above, so this is the true byte
+            if (live.Length == 1 && live[0] != 0xCC) { SetIp(hThread, addr); return false; }
             if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }
             Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
             return true;
