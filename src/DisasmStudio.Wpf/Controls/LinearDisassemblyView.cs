@@ -56,6 +56,7 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? PatchRequested;
     public event Action<ulong>? BreakpointToggleRequested;
     public event Action<ulong>? RunToCursorRequested;
+    public event Action<ulong>? CaptureFunctionRequested;
 
     /// <summary>Set the debuggee's current instruction (highlighted + centred); 0 clears it.</summary>
     public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va); else _surface.InvalidateVisual(); }
@@ -557,6 +558,8 @@ public sealed class LinearDisassemblyView : Grid
         toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
         var runTo = new MenuItem { Header = "Run to cursor" };
         runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
+        var captureFn = new MenuItem { Header = "Capture this function" };
+        captureFn.Click += (_, _) => { if (CaretVa != 0) CaptureFunctionRequested?.Invoke(CaretVa); };
         menu.Items.Add(copy);
         menu.Items.Add(selectAll);
         menu.Items.Add(new Separator());
@@ -568,6 +571,7 @@ public sealed class LinearDisassemblyView : Grid
         menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
         menu.Items.Add(runTo);
+        menu.Items.Add(captureFn);
         menu.Items.Add(patch);
         _surface.ContextMenu = menu;
     }

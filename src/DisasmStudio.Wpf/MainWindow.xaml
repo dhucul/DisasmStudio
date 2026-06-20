@@ -83,7 +83,13 @@
                     <TextBox x:Name="FuncFilter" DockPanel.Dock="Top" Margin="8,0,8,6"
                              TextChanged="OnFuncFilter" />
                     <DataGrid x:Name="FuncList" SelectionChanged="OnFuncSelected" MouseDoubleClick="OnFuncActivate"
+                              PreviewMouseRightButtonDown="OnFuncRightClick"
                               CanUserAddRows="False" CanUserReorderColumns="False" CanUserResizeRows="False">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Capture this function" Click="OnCaptureSelectedFunc" />
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="200"
                                                 ElementStyle="{StaticResource GridCellText}" />

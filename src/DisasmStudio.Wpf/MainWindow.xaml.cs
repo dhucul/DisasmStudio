@@ -81,6 +81,7 @@ public partial class MainWindow : Window
         Decompiler.SaveCRequested += SaveFunctionC;
         Linear.BreakpointToggleRequested += va => { _dbg?.ToggleBreakpoint(va); Linear.Refresh(); Debug.Refresh(); };
         Linear.RunToCursorRequested += va => _dbg?.RunToCursor(va);
+        Linear.CaptureFunctionRequested += CaptureFunctionAt;
         Debug.NavigateRequested += va => _nav.Navigate(va);
         PreviewKeyDown += OnWindowPreviewKeyDown;
     }
@@ -167,12 +168,30 @@ public partial class MainWindow : Window
 
     private void OnCaptureFunc(object sender, RoutedEventArgs e)
     {
-        if (_dbg is null || _nav.Current is not ulong va) return;
-        // Stopping a capture is asynchronous (it drains while frozen), so don't start a second one over it.
-        if (_dbg.Capture is not null) { StatusText.Text = "Stop the current capture first."; return; }
+        if (_nav.Current is ulong va) CaptureFunctionAt(va);
+    }
+
+    // Capture the function containing va (used by "Capture Fn" and the right-click "Capture this function").
+    private void CaptureFunctionAt(ulong va)
+    {
+        if (_dbg is null) { StatusText.Text = "Start debugging (Run) before capturing a function."; return; }
+        if (_dbg.Capture is not null) { StatusText.Text = "Stop the current capture first."; return; }   // drain is async
         var fn = FindFunction(va);
-        if (fn is null) { StatusText.Text = "No function at the current address to capture."; return; }
-        StartCapture(fn.Va);   // the function at the current address
+        if (fn is null) { StatusText.Text = "No function at that address to capture."; return; }
+        StartCapture(fn.Va);
+    }
+
+    private void OnCaptureSelectedFunc(object sender, RoutedEventArgs e)
+    {
+        if (FuncList.SelectedItem is FunctionItem fi) CaptureFunctionAt(fi.Va);
+    }
+
+    private void OnFuncRightClick(object sender, MouseButtonEventArgs e)
+    {
+        // Select the row under the cursor so the context menu acts on what was right-clicked.
+        var dep = e.OriginalSource as DependencyObject;
+        while (dep is not null and not DataGridRow) dep = System.Windows.Media.VisualTreeHelper.GetParent(dep);
+        if (dep is DataGridRow row) row.IsSelected = true;
     }
 
     private void StartCapture(ulong funcVa)
