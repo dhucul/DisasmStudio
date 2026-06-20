@@ -858,6 +858,7 @@ public partial class MainWindow : Window
     private Function? FindFunction(ulong va)
     {
         if (_result is null || _funcStarts.Length == 0) return null;
+        if (va < _result.Image.MinVa || va >= _result.Image.MaxVa) return null;   // outside the analyzed image (e.g. a foreign module during debug)
         int lo = 0, hi = _funcStarts.Length - 1, best = -1;
         while (lo <= hi)
         {

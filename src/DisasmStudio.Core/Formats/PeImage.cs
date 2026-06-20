@@ -171,13 +171,18 @@ public sealed class PeImage : IBinaryImage
             uint rawSize = _f.ReadU32(h + 16);
             uint rawPtr = _f.ReadU32(h + 20);
             uint chars = _f.ReadU32(h + 36);
+            // Clamp the raw pointer/size into the file: a corrupt header can declare values >= 2 GB, which the
+            // (int) cast would turn negative — a negative FileSize makes (ulong)FileSize huge, so EndVa
+            // balloons and SectionAt/ContainsVa then matches almost any VA.
+            long fileOff = Math.Min(rawPtr, (uint)_f.Length);
+            long fileSz = Math.Clamp((long)rawSize, 0, _f.Length - fileOff);
             list.Add(new Section
             {
                 Name = name,
                 StartVa = ImageBase + vaddr,
                 VirtualSize = vsize,
-                FileOffset = (int)rawPtr,
-                FileSize = (int)rawSize,
+                FileOffset = (int)fileOff,
+                FileSize = (int)fileSz,
                 IsExecutable = (chars & 0x20000000) != 0 || (chars & 0x00000020) != 0,
                 IsReadable = (chars & 0x40000000) != 0,
                 IsWritable = (chars & 0x80000000) != 0,
