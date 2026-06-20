@@ -22,6 +22,7 @@ public sealed class DebugSession
     public RegisterSet? Registers { get; private set; }
     public ulong CurrentIp { get; private set; }
     public StopReason LastReason { get; private set; }
+    public uint LastExceptionCode { get; private set; }
     public bool IsStopped { get; private set; }
 
     /// <summary>Active FunCap-style function-capture session, or null.</summary>
@@ -70,6 +71,7 @@ public sealed class DebugSession
         Registers = Engine.GetRegisters();
         CurrentIp = Registers?.Ip ?? s.Address;
         LastReason = s.Reason;
+        LastExceptionCode = s.ExceptionCode;
         IsStopped = true;
         Deref = new DereferenceResolver(Engine, LiveResult!.Names, Engine.Modules);
         Stopped?.Invoke();

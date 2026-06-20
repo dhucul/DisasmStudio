@@ -268,7 +268,8 @@ public partial class MainWindow : Window
         Debug.Refresh();
         if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp);   // graph follows RIP too
         string? name = _result?.NameFor(_dbg.CurrentIp);
-        StatusText.Text = $"{_dbg.LastReason} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
+        string extra = _dbg.LastReason == StopReason.Exception ? $" (code 0x{_dbg.LastExceptionCode:X8})" : "";
+        StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
     }
 
     private void OnDbgExited(int code)

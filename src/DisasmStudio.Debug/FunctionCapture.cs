@@ -98,6 +98,7 @@ public sealed class FunctionCapture
         var toArm = new List<ulong>(_names.Count);
         lock (_lock) foreach (var va in _names.Keys) if (_entries.Add(va)) toArm.Add(va);
         try { _eng.SetBreakpoints(toArm); } catch { }   // page-batched arming (fast for thousands of bps)
+        _eng.PassFirstChanceExceptions = true;          // don't stop on the program's own exceptions
         Active = true;
     }
 
@@ -109,6 +110,7 @@ public sealed class FunctionCapture
             if (_entries.Add(va)) { try { _eng.SetBreakpoint(va); } catch { } }
             Active = true;
         }
+        _eng.PassFirstChanceExceptions = true;
     }
 
     /// <summary>Mark capture for teardown on the upcoming Pause stop, when the debuggee is frozen and
@@ -128,6 +130,7 @@ public sealed class FunctionCapture
             foreach (var va in _retBps) { try { _eng.RemoveBreakpoint(va); } catch { } }
             _entries.Clear(); _retBps.Clear(); _pending.Clear();
         }
+        _eng.PassFirstChanceExceptions = false;   // restore normal stop-on-exception behavior
         lock (_logLock) { try { _log?.Flush(); _log?.Dispose(); } catch { } _log = null; }
     }
 

@@ -35,6 +35,10 @@ public sealed class DebuggerEngine
     public bool IsStopped { get; private set; }
     public uint CurrentThreadId { get; private set; }
 
+    /// <summary>When set (during capture), first-chance exceptions are passed to the debuggee's own
+    /// handlers without stopping; only a second-chance (fatal/unhandled) exception surfaces.</summary>
+    public bool PassFirstChanceExceptions { get; set; }
+
     private readonly object _lock = new();
     private readonly Dictionary<uint, IntPtr> _threads = [];
     private readonly Dictionary<ulong, ModuleInfo> _modules = [];
@@ -116,7 +120,7 @@ public sealed class DebuggerEngine
                 IsStopped = false;
                 if (mode == ResumeMode.Stop) { DoStop(ev); break; }
                 Running?.Invoke();
-                DoResume(mode, target, ev);
+                DoResume(mode, target, ev, cont);
             }
             else Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
         }
@@ -239,15 +243,14 @@ public sealed class DebuggerEngine
             return false;
         }
 
-        // any other exception (AV, etc.): report; pass it to the app on resume.
-        if (!_pauseRequested && !_stopping)
-        {
-            cont = Native.DBG_EXCEPTION_NOT_HANDLED;
-            Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, addr, code));
-            return true;
-        }
+        // any other exception (AV, C++ EH, etc.): hand it to the debuggee's own handler on resume.
         cont = Native.DBG_EXCEPTION_NOT_HANDLED;
-        return false;
+        if (_pauseRequested || _stopping) return false;
+        // While capturing, let the program handle its own first-chance exceptions without stopping; only a
+        // second-chance (unhandled / fatal) exception surfaces.
+        if (PassFirstChanceExceptions && ev.Exception.dwFirstChance != 0) return false;
+        Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, addr, code));
+        return true;
     }
 
     private bool _seenEntry;
@@ -255,11 +258,13 @@ public sealed class DebuggerEngine
     private bool _stepActive;
 
     // ---- resume / stepping (loop thread) ----
-    private void DoResume(ResumeMode mode, ulong target, in Native.DEBUG_EVENT ev)
+    // cont carries the continuation status from HandleEvent: DBG_CONTINUE for our breakpoints/steps, or
+    // DBG_EXCEPTION_NOT_HANDLED for a real exception so the debuggee's own handler runs when we resume.
+    private void DoResume(ResumeMode mode, ulong target, in Native.DEBUG_EVENT ev, uint cont)
     {
         IntPtr hThread = ThreadHandle(ev.dwThreadId);
         using var c = new Ctx(Is32);
-        if (!c.Get(hThread)) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_CONTINUE); return; }
+        if (!c.Get(hThread)) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont); return; }
         ulong ip = c.Ip;
         bool onBp = false; lock (_lock) onBp = _swBps.TryGetValue(ip, out var b) && b.Armed;
 
@@ -293,7 +298,7 @@ public sealed class DebuggerEngine
                 break;
             }
         }
-        Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_CONTINUE);
+        Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
     }
 
     // ---- public commands (UI thread) ----
