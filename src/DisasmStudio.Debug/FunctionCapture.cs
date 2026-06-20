@@ -36,6 +36,7 @@ public sealed class FunctionCapture
     private readonly Dictionary<ulong, Stack<CaptureRecord>> _pending = [];   // retAddr -> calls awaiting return
     private readonly List<CaptureRecord> _records = [];     // all records (guarded by _lock)
     private readonly Dictionary<ulong, HashSet<ulong>> _edges = [];  // caller-func VA -> set of callee-func VAs
+    private int _edgeCount;                                 // distinct caller->callee edges (cheap change check)
     private readonly bool _once;                            // capture each function once, then drop its entry bp
     private readonly bool _argsOnly;                        // skip return capture (no return breakpoints) for speed
     private readonly bool _annotate;                        // dereference values (slower) vs raw hex only (faster)
@@ -64,7 +65,7 @@ public sealed class FunctionCapture
 
     // Dereference a value (x64dbg-style annotation), or "" when annotation is off — the per-argument
     // memory reads + symbol/string lookups here are the dominant per-capture cost.
-    private string Annotate(ulong v) => _annotate ? Annotate(v) : "";
+    private string Annotate(ulong v) => _annotate ? _deref.Describe(v) : "";
 
     public IReadOnlyList<CaptureRecord> Snapshot() { lock (_lock) return _records.ToList(); }
 
@@ -78,6 +79,9 @@ public sealed class FunctionCapture
     {
         lock (_lock) return _edges.ToDictionary(k => k.Key, v => new HashSet<ulong>(v.Value));
     }
+
+    /// <summary>Number of distinct caller→callee edges — a cheap value to detect call-graph changes.</summary>
+    public int EdgeCount { get { lock (_lock) return _edgeCount; } }
 
     public string NameOf(ulong va) => _names.TryGetValue(va, out var n) && !string.IsNullOrEmpty(n) ? n : $"sub_{va:X}";
 
@@ -179,7 +183,7 @@ public sealed class FunctionCapture
             if (callerFunc != 0)
             {
                 if (!_edges.TryGetValue(callerFunc, out var set)) { set = []; _edges[callerFunc] = set; }
-                set.Add(ea);
+                if (set.Add(ea)) _edgeCount++;
             }
             // Capture-once: drop this function's entry breakpoint now (we are frozen, so removal is safe).
             // Hot functions then run at full speed, and this resume needs no single-step re-arm.

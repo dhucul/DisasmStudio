@@ -242,9 +242,8 @@ public partial class MainWindow : Window
             Linear.Refresh();   // surface the new inline comments
         }
 
-        var edges = cap.EdgesSnapshot();
-        int total = edges.Values.Sum(s => s.Count);
-        if (total != _captureEdges) { _captureEdges = total; Debug.RebuildCallGraph(edges, cap.NameOf); }
+        // Rebuild the call graph only when its edge set actually changed (avoids copying it every tick).
+        if (cap.EdgeCount != _captureEdges) { _captureEdges = cap.EdgeCount; Debug.RebuildCallGraph(cap.EdgesSnapshot(), cap.NameOf); }
     }
 
     private void OnDbgStopped()
