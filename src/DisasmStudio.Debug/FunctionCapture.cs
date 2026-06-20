@@ -95,8 +95,10 @@ public sealed class FunctionCapture
     /// <summary>Capture every known function.</summary>
     public void StartAll()
     {
+        // Only arm entries that are in executable memory; a function mistakenly identified in a data/RO
+        // section would otherwise have a 0xCC written into data the program reads, corrupting it.
         var toArm = new List<ulong>(_names.Count);
-        lock (_lock) foreach (var va in _names.Keys) if (_entries.Add(va)) toArm.Add(va);
+        lock (_lock) foreach (var va in _names.Keys) if (_eng.IsExecutable(va) && _entries.Add(va)) toArm.Add(va);
         try { _eng.SetBreakpoints(toArm); } catch { }   // page-batched arming (fast for thousands of bps)
         _eng.PassFirstChanceExceptions = true;          // don't stop on the program's own exceptions
         Active = true;
@@ -107,7 +109,7 @@ public sealed class FunctionCapture
     {
         lock (_lock)
         {
-            if (_entries.Add(va)) { try { _eng.SetBreakpoint(va); } catch { } }
+            if (_eng.IsExecutable(va) && _entries.Add(va)) { try { _eng.SetBreakpoint(va); } catch { } }
             Active = true;
         }
         _eng.PassFirstChanceExceptions = true;
@@ -162,10 +164,10 @@ public sealed class FunctionCapture
     {
         ulong retAddr = ReadPtr(regs.Sp);
         ulong callerFunc = FuncContaining(retAddr);
-        // Only capture a return when [rsp] looks like a real return address (executable). When a function is
-        // reached by a jump/tail-call rather than a call, [rsp] is unrelated data, and writing a breakpoint
-        // there would corrupt the debuggee.
-        bool captureReturn = !_argsOnly && _eng.IsExecutable(retAddr);
+        // Only capture a return when [rsp] is a genuine return address (executable and preceded by a call).
+        // When a function is reached by a jump/tail-call rather than a call, [rsp] is unrelated stack data,
+        // and writing a 0xCC breakpoint there would corrupt the debuggee (an access violation on continue).
+        bool captureReturn = !_argsOnly && _eng.IsReturnAddress(retAddr);
         var rec = new CaptureRecord
         {
             CalleeVa = ea,

@@ -568,6 +568,16 @@ public sealed class DebuggerEngine
 
     /// <summary>Heuristic step-out target: the first stack value that is a return address (executable,
     /// and the bytes just before it decode as a call).</summary>
+    /// <summary>True if <paramref name="addr"/> is a plausible return address: executable, with the bytes
+    /// just before it decoding as a call that ends exactly there. Used to avoid writing a capture return
+    /// breakpoint onto unrelated stack data when a function was reached by a jump rather than a call.</summary>
+    public bool IsReturnAddress(ulong addr)
+    {
+        if (addr == 0 || addr < 16 || !IsExecutable(addr)) return false;
+        var pre = ReadMemory(addr - 16, 16);
+        return pre.Length == 16 && EndsWithCall(pre, addr);
+    }
+
     private ulong FindReturnAddress(ulong sp)
     {
         var stack = ReadMemory(sp, 0x400);
@@ -575,9 +585,7 @@ public sealed class DebuggerEngine
         for (int i = 0; i + ptr <= stack.Length; i += ptr)
         {
             ulong v = ptr == 8 ? BitConverter.ToUInt64(stack, i) : BitConverter.ToUInt32(stack, i);
-            if (v == 0 || !IsExecutable(v)) continue;
-            var pre = ReadMemory(v - 16, 16);
-            if (pre.Length == 16 && EndsWithCall(pre, v)) return v;
+            if (IsReturnAddress(v)) return v;
         }
         return 0;
     }
