@@ -32,12 +32,14 @@ public sealed class DebuggerEngine
     public ulong EntryPoint { get; private set; }
     public IntPtr ProcessHandle => _proc;
     public bool IsActive { get; private set; }
-    public bool IsStopped { get; private set; }
+    public bool IsStopped { get => _isStopped; private set => _isStopped = value; }   // read on the UI thread
+    private volatile bool _isStopped;
     public uint CurrentThreadId { get; private set; }
 
     /// <summary>When set (during capture), first-chance exceptions are passed to the debuggee's own
     /// handlers without stopping; only a second-chance (fatal/unhandled) exception surfaces.</summary>
-    public bool PassFirstChanceExceptions { get; set; }
+    public bool PassFirstChanceExceptions { get => _passFirstChance; set => _passFirstChance = value; }   // cross-thread
+    private volatile bool _passFirstChance;
 
     /// <summary>Per-exception-code policy (x64dbg/IDA-style): which exceptions break the UI vs pass straight
     /// to the program. Defaults to "break on everything, pass to the program" — the original behaviour.</summary>
@@ -63,8 +65,8 @@ public sealed class DebuggerEngine
     private readonly Dictionary<uint, StepState> _stepping = [];   // thread -> in-flight single-step
     private readonly HashSet<ulong> _reArmOnNextStop = [];         // bps disarmed for step-over/out/run-to, re-armed on the next stop
     private bool _seenSystemBp;
-    private bool _pauseRequested;
-    private bool _stopping;
+    private volatile bool _pauseRequested;   // set by the UI thread (Pause), read by the debug loop
+    private volatile bool _stopping;         // set by the UI thread (Stop), read by the debug loop
     private bool _ended;
 
     public IReadOnlyList<ModuleInfo> Modules { get { lock (_lock) return _modules.Values.OrderBy(m => m.Base).ToList(); } }
@@ -365,7 +367,10 @@ public sealed class DebuggerEngine
     private void Cleanup()
     {
         IsActive = false; IsStopped = false;
-        if (_attached && _proc != IntPtr.Zero) { /* detached */ }
+        // Release the OS handles the debug events handed us: any thread handles still open (threads that never
+        // delivered EXIT_THREAD because the process was terminated) and the process handle itself.
+        lock (_lock) { foreach (var h in _threads.Values) Native.CloseHandle(h); _threads.Clear(); }
+        if (_proc != IntPtr.Zero) { Native.CloseHandle(_proc); _proc = IntPtr.Zero; }
     }
 
     // ---- breakpoints ----
@@ -411,13 +416,16 @@ public sealed class DebuggerEngine
 
             Native.VirtualProtectEx(_proc, page, (nuint)n, Native.PAGE_EXECUTE_READWRITE, out uint old);
             var originals = new List<(ulong Va, byte Orig)>(vas.Count);
+            List<ulong>? tail = null;
             foreach (var va in vas)
             {
                 int off = (int)(va - page);
-                if (off >= n) continue;          // in the page's unreadable tail
+                if (off >= n) { (tail ??= []).Add(va); continue; }   // in the page's unreadable tail — can't arm
                 originals.Add((va, buf[off]));
                 buf[off] = 0xCC;
             }
+            // Don't leave breakpoints we couldn't arm registered as phantoms (listed but never fire).
+            if (tail is not null) lock (_lock) foreach (var va in tail) _swBps.Remove(va);
             Native.WriteProcessMemory(_proc, page, buf, (nuint)n, out _);
             Native.VirtualProtectEx(_proc, page, (nuint)n, old, out _);
             Native.FlushInstructionCache(_proc, page, (nuint)n);
