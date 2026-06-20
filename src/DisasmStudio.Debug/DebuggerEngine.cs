@@ -39,6 +39,10 @@ public sealed class DebuggerEngine
     /// handlers without stopping; only a second-chance (fatal/unhandled) exception surfaces.</summary>
     public bool PassFirstChanceExceptions { get; set; }
 
+    /// <summary>When set before launching, stop at the loader (system) breakpoint instead of skipping to
+    /// the entry point — earlier, so capture can include TLS callbacks and static DLL DllMains.</summary>
+    public bool StopAtLoaderBreakpoint { get; set; }
+
     private readonly object _lock = new();
     private readonly Dictionary<uint, IntPtr> _threads = [];
     private readonly Dictionary<ulong, ModuleInfo> _modules = [];
@@ -217,6 +221,15 @@ public sealed class DebuggerEngine
             {
                 if (isWx86) _seenWx86Bp = true; else _seenSystemBp = true;
                 if (_attached) { Stopped?.Invoke(new StopInfo(StopReason.Attached, ev.dwThreadId, addr, code)); return true; }
+                // Optionally stop at the loader breakpoint of the target's bitness (the matching loader has
+                // mapped the modules) instead of skipping to the entry point, so capture can begin earlier.
+                if (StopAtLoaderBreakpoint && isWx86 == Is32)
+                {
+                    RemoveTempBpIfPresent(EntryPoint);   // breaking earlier — drop the redundant entry-point stop
+                    _seenEntry = true;
+                    Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
+                    return true;
+                }
                 return false;   // launched: skip past it toward the entry bp
             }
             if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }

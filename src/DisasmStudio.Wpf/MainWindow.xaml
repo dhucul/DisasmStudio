@@ -27,6 +27,7 @@
                 <Button Content="⏹ Stop" Click="OnDebugStop" Margin="6,0,0,0" />
                 <Button x:Name="RestartBtn" Content="⟳ Restart" Click="OnDebugRestart" Margin="6,0,0,0" IsEnabled="False" ToolTip="Terminate the debuggee and launch it again from the start" />
                 <Button Content="Attach…" Click="OnAttach" Margin="6,0,0,0" ToolTip="Attach the debugger to a running process" />
+                <CheckBox x:Name="LoaderBreakCheck" Content="Break at loader" Margin="12,0,0,0" ToolTip="When you Run, stop at the loader breakpoint (before the entry point) instead of at the entry point — so a capture started there can include TLS callbacks and static DLL DllMains. Set this before Run." />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
                 <Button x:Name="CaptureBtn" Content="⦿ Capture" Click="OnCaptureAll" IsEnabled="False" ToolTip="FunCap: log each function's arguments + return value on its first call, then stop intercepting it (fast for large programs)" />
                 <Button x:Name="CaptureFnBtn" Content="Capture Fn" Click="OnCaptureFunc" Margin="6,0,0,0" IsEnabled="False" ToolTip="Capture every call of the function at the current address" />

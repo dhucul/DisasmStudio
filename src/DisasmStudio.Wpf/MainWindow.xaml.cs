@@ -132,6 +132,7 @@ public partial class MainWindow : Window
         Debug.SetSession(_dbg);
         DebugDock.Visibility = Visibility.Visible;
         Linear.IsBreakpointAt = va => _dbg?.HasBreakpoint(va) ?? false;
+        _dbg.Engine.StopAtLoaderBreakpoint = LoaderBreakCheck.IsChecked == true;   // break before the entry point
         StatusText.Text = "Starting debugger…";
         start(_dbg);
     }
