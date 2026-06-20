@@ -39,6 +39,8 @@ public partial class MainWindow : Window
     private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
     private int _captureShown;               // records already pushed to the panel
     private int _captureEdges = -1;          // last call-graph edge total (rebuild only on change)
+    private bool _captureArgsOnly;           // skip return capture for speed (set by the Args+Ret/Args only toggle)
+    private bool _captureOnce = true;        // capture each function once vs every call (First call/All calls toggle)
     private readonly HashSet<ulong> _captureCommented = [];   // entries already annotated inline
 
     private ObservableCollection<FunctionItem> _functions = [];
@@ -148,7 +150,7 @@ public partial class MainWindow : Window
         // A capture is in progress: stop it (toggle). If it is already draining, ignore the extra click so we
         // don't issue a second Pause or start a new capture over the one being torn down.
         if (_dbg.Capture is { } c) { if (!c.Draining) StopCapture(); return; }
-        StartCapture(0);
+        StartCapture(0);   // all functions
     }
 
     private void OnCaptureFunc(object sender, RoutedEventArgs e)
@@ -158,13 +160,25 @@ public partial class MainWindow : Window
         if (_dbg.Capture is not null) { StatusText.Text = "Stop the current capture first."; return; }
         var fn = FindFunction(va);
         if (fn is null) { StatusText.Text = "No function at the current address to capture."; return; }
-        StartCapture(fn.Va);
+        StartCapture(fn.Va);   // the function at the current address
+    }
+
+    private void OnToggleArgsMode(object sender, RoutedEventArgs e)
+    {
+        _captureArgsOnly = !_captureArgsOnly;
+        ArgsModeBtn.Content = _captureArgsOnly ? "Args only" : "Args+Ret";
+    }
+
+    private void OnToggleOnceMode(object sender, RoutedEventArgs e)
+    {
+        _captureOnce = !_captureOnce;
+        OnceModeBtn.Content = _captureOnce ? "First call" : "All calls";
     }
 
     private void StartCapture(ulong funcVa)
     {
         string log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "funcap.txt");
-        var cap = _dbg!.StartCapture(funcVa, log);
+        var cap = _dbg!.StartCapture(funcVa, log, _captureOnce, _captureArgsOnly);
         if (cap is null) { StatusText.Text = "Capture needs the program stopped at least once first."; return; }
 
         _captureShown = 0; _captureEdges = -1; _captureCommented.Clear();
@@ -173,7 +187,10 @@ public partial class MainWindow : Window
         _captureTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _captureTimer.Tick -= OnCaptureTick; _captureTimer.Tick += OnCaptureTick;
         _captureTimer.Start();
-        StatusText.Text = funcVa == 0 ? $"Capturing all functions → {log}" : $"Capturing {cap.NameOf(funcVa)} → {log}";
+        string scope = funcVa == 0 ? "all functions" : cap.NameOf(funcVa);
+        string freq = _captureOnce ? "first call" : "every call";
+        string args = _captureArgsOnly ? ", args only" : "";
+        StatusText.Text = $"Capturing {scope} ({freq}{args}) → {log}";
         _dbg.Go();   // run so captures start flowing
     }
 
@@ -192,6 +209,7 @@ public partial class MainWindow : Window
         if (cap is null) return;
         bool is32 = _dbg!.Engine.Is32;
 
+        cap.FlushLog();   // periodically persist the buffered log so an abnormal exit loses little
         var recs = cap.Snapshot();
         if (recs.Count > _captureShown)
         {
@@ -222,7 +240,7 @@ public partial class MainWindow : Window
             Linear.SetResult(_result, _dbg.LiveDecoder);
             Hex.SetImage(_result.Image);
             Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
-            CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true;
+            CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; ArgsModeBtn.IsEnabled = true; OnceModeBtn.IsEnabled = true;
         }
         Linear.SetCurrentIp(_dbg.CurrentIp);
         Linear.Refresh();
@@ -237,7 +255,7 @@ public partial class MainWindow : Window
         _captureTimer?.Stop();
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
         _dbg?.AbortCapture();   // process is gone: drop capture state and close the log (no live removal needed)
-        CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false;
+        CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; ArgsModeBtn.IsEnabled = false; OnceModeBtn.IsEnabled = false;
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;
         Hex.WriteByteAt = null;

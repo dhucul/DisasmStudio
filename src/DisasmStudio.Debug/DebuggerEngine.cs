@@ -337,6 +337,54 @@ public sealed class DebuggerEngine
         }
     }
 
+    /// <summary>
+    /// Arm many software breakpoints with page-batched memory access: for thousands of breakpoints
+    /// clustered on a few code pages this does one protect-change + read + write + flush per page instead
+    /// of per byte (≈5 syscalls per page vs per breakpoint). Must be called while the debuggee is frozen,
+    /// as all breakpoint changes must. Addresses already set are skipped.
+    /// </summary>
+    public void SetBreakpoints(IReadOnlyCollection<ulong> addresses)
+    {
+        if (_proc == IntPtr.Zero || addresses.Count == 0) return;
+
+        // Register the new breakpoints (skip duplicates) and group them by 4 KiB page.
+        var byPage = new Dictionary<ulong, List<ulong>>();
+        lock (_lock)
+            foreach (var va in addresses)
+            {
+                if (!_swBps.TryAdd(va, new Breakpoint { Address = va })) continue;
+                ulong page = va & ~0xFFFUL;
+                if (!byPage.TryGetValue(page, out var list)) { list = []; byPage[page] = list; }
+                list.Add(va);
+            }
+
+        const int PageSize = 0x1000;
+        var buf = new byte[PageSize];
+        foreach (var (page, vas) in byPage)
+        {
+            Native.ReadProcessMemory(_proc, page, buf, (nuint)PageSize, out var read);
+            int n = (int)read;
+            if (n == 0) { lock (_lock) foreach (var va in vas) _swBps.Remove(va); continue; }
+
+            Native.VirtualProtectEx(_proc, page, (nuint)n, Native.PAGE_EXECUTE_READWRITE, out uint old);
+            var originals = new List<(ulong Va, byte Orig)>(vas.Count);
+            foreach (var va in vas)
+            {
+                int off = (int)(va - page);
+                if (off >= n) continue;          // in the page's unreadable tail
+                originals.Add((va, buf[off]));
+                buf[off] = 0xCC;
+            }
+            Native.WriteProcessMemory(_proc, page, buf, (nuint)n, out _);
+            Native.VirtualProtectEx(_proc, page, (nuint)n, old, out _);
+            Native.FlushInstructionCache(_proc, page, (nuint)n);
+
+            lock (_lock)
+                foreach (var (va, orig) in originals)
+                    if (_swBps.TryGetValue(va, out var bp)) { bp.Original = orig; bp.Armed = true; }
+        }
+    }
+
     public void RemoveBreakpoint(ulong va)
     {
         lock (_lock)

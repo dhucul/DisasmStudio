@@ -90,11 +90,11 @@ public sealed class DebugSession
     // ---- FunCap-style function capture ----
 
     /// <summary>Start capturing function I/O. <paramref name="funcVa"/> is 0 for "all functions", else a single one.</summary>
-    public FunctionCapture? StartCapture(ulong funcVa, string? logPath)
+    public FunctionCapture? StartCapture(ulong funcVa, string? logPath, bool captureOnce, bool argsOnly)
     {
         if (LiveResult is null) return null;
         var deref = new DereferenceResolver(Engine, LiveResult.Names, Engine.Modules);
-        var cap = new FunctionCapture(Engine, deref, LiveResult.Functions.Select(f => (f.Va, f.Name)));
+        var cap = new FunctionCapture(Engine, deref, LiveResult.Functions.Select(f => (f.Va, f.Name)), captureOnce, argsOnly);
         if (logPath is not null) cap.SetLogFile(logPath);
         Capture = cap;
         if (funcVa == 0) cap.StartAll(); else cap.StartFunction(funcVa);

@@ -36,6 +36,9 @@ public sealed class FunctionCapture
     private readonly Dictionary<ulong, Stack<CaptureRecord>> _pending = [];   // retAddr -> calls awaiting return
     private readonly List<CaptureRecord> _records = [];     // all records (guarded by _lock)
     private readonly Dictionary<ulong, HashSet<ulong>> _edges = [];  // caller-func VA -> set of callee-func VAs
+    private readonly bool _once;                            // capture each function once, then drop its entry bp
+    private readonly bool _argsOnly;                        // skip return capture (no return breakpoints) for speed
+    private readonly object _logLock = new();               // serialize log writes (engine) vs flush (UI)
     private StreamWriter? _log;
 
     public bool Active { get; private set; }
@@ -45,10 +48,12 @@ public sealed class FunctionCapture
     /// <summary>Raised (engine thread) after each captured record so the UI can refresh on its own cadence.</summary>
     public event Action? Captured;
 
-    public FunctionCapture(DebuggerEngine eng, DereferenceResolver deref, IEnumerable<(ulong Va, string Name)> funcs)
+    public FunctionCapture(DebuggerEngine eng, DereferenceResolver deref, IEnumerable<(ulong Va, string Name)> funcs, bool captureOnce, bool argsOnly)
     {
         _eng = eng;
         _deref = deref;
+        _once = captureOnce;
+        _argsOnly = argsOnly;
         _names = new Dictionary<ulong, string>();
         foreach (var (va, name) in funcs) _names[va] = name;
         _sorted = _names.Keys.ToArray();
@@ -66,19 +71,18 @@ public sealed class FunctionCapture
 
     public void SetLogFile(string path)
     {
-        try { _log = new StreamWriter(path, append: false) { AutoFlush = true }; }
+        // Buffered (no per-line flush) for speed; flushed on StopCapture. 64 KiB buffer.
+        try { _log = new StreamWriter(path, append: false, System.Text.Encoding.UTF8, 1 << 16) { AutoFlush = false }; }
         catch { _log = null; }
     }
 
     /// <summary>Capture every known function.</summary>
     public void StartAll()
     {
-        lock (_lock)
-        {
-            foreach (var va in _names.Keys)
-                if (_entries.Add(va)) { try { _eng.SetBreakpoint(va); } catch { } }
-            Active = true;
-        }
+        var toArm = new List<ulong>(_names.Count);
+        lock (_lock) foreach (var va in _names.Keys) if (_entries.Add(va)) toArm.Add(va);
+        try { _eng.SetBreakpoints(toArm); } catch { }   // page-batched arming (fast for thousands of bps)
+        Active = true;
     }
 
     /// <summary>Capture a single function.</summary>
@@ -108,8 +112,7 @@ public sealed class FunctionCapture
             foreach (var va in _retBps) { try { _eng.RemoveBreakpoint(va); } catch { } }
             _entries.Clear(); _retBps.Clear(); _pending.Clear();
         }
-        try { _log?.Flush(); _log?.Dispose(); } catch { }
-        _log = null;
+        lock (_logLock) { try { _log?.Flush(); _log?.Dispose(); } catch { } _log = null; }
     }
 
     /// <summary>
@@ -154,15 +157,21 @@ public sealed class FunctionCapture
         lock (_lock)
         {
             rec.Depth = _pending.Values.Sum(st => st.Count);
-            if (!_pending.TryGetValue(retAddr, out var stack)) { stack = new Stack<CaptureRecord>(); _pending[retAddr] = stack; }
-            stack.Push(rec);
-            // Own the return breakpoint only if we set it; never touch a pre-existing (user/entry) one.
-            if (!_eng.HasBreakpoint(retAddr)) { try { _eng.SetBreakpoint(retAddr); _retBps.Add(retAddr); } catch { } }
+            if (!_argsOnly)   // schedule a return breakpoint to capture the return value (skipped in args-only mode)
+            {
+                if (!_pending.TryGetValue(retAddr, out var stack)) { stack = new Stack<CaptureRecord>(); _pending[retAddr] = stack; }
+                stack.Push(rec);
+                // Own the return breakpoint only if we set it; never touch a pre-existing (user/entry) one.
+                if (!_eng.HasBreakpoint(retAddr)) { try { _eng.SetBreakpoint(retAddr); _retBps.Add(retAddr); } catch { } }
+            }
             if (callerFunc != 0)
             {
                 if (!_edges.TryGetValue(callerFunc, out var set)) { set = []; _edges[callerFunc] = set; }
                 set.Add(ea);
             }
+            // Capture-once: drop this function's entry breakpoint now (we are frozen, so removal is safe).
+            // Hot functions then run at full speed, and this resume needs no single-step re-arm.
+            if (_once && _entries.Remove(ea)) { try { _eng.RemoveBreakpoint(ea); } catch { } }
             _records.Add(rec);
         }
         WriteLog(rec);
@@ -242,8 +251,11 @@ public sealed class FunctionCapture
     private void WriteLog(CaptureRecord r)
     {
         if (_log is null) return;
-        try { _log.WriteLine(Format(r, _eng.Is32)); } catch { }
+        lock (_logLock) { try { _log?.WriteLine(Format(r, _eng.Is32)); } catch { } }
     }
+
+    /// <summary>Flush the buffered log (called periodically so abnormal termination loses little).</summary>
+    public void FlushLog() { lock (_logLock) { try { _log?.Flush(); } catch { } } }
 
     /// <summary>One-line (multi-line for calls) textual form, used for the log file and the panel.</summary>
     public static string Format(CaptureRecord r, bool is32)
