@@ -10,3 +10,6 @@ artifacts/
 
 ## scratch / verification harnesses
 .smoke*/
+
+## installer build output (the .iss script is tracked; the compiled setup.exe is not)
+installer/Output/
