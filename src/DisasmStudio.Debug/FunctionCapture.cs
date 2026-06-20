@@ -40,6 +40,8 @@ public sealed class FunctionCapture
     private readonly bool _once;                            // capture each function once, then drop its entry bp
     private readonly bool _argsOnly;                        // skip return capture (no return breakpoints) for speed
     private readonly bool _annotate;                        // dereference values (slower) vs raw hex only (faster)
+    private readonly Func<ulong, bool>? _isCodeStart;       // gate: only arm 0xCC where a real code instruction starts
+    private readonly Func<ulong, bool>? _isReachable;       // gate (large images only): function is a real call target / symbol
     private readonly object _logLock = new();               // serialize log writes (engine) vs flush (UI)
     private StreamWriter? _log;
 
@@ -50,17 +52,48 @@ public sealed class FunctionCapture
     /// <summary>Raised (engine thread) after each captured record so the UI can refresh on its own cadence.</summary>
     public event Action? Captured;
 
-    public FunctionCapture(DebuggerEngine eng, DereferenceResolver deref, IEnumerable<(ulong Va, string Name)> funcs, bool captureOnce, bool argsOnly, bool annotate)
+    public FunctionCapture(DebuggerEngine eng, DereferenceResolver deref, IEnumerable<(ulong Va, string Name)> funcs, bool captureOnce, bool argsOnly, bool annotate, Func<ulong, bool>? isCodeStart = null, Func<ulong, bool>? isReachable = null)
     {
         _eng = eng;
         _deref = deref;
         _once = captureOnce;
         _argsOnly = argsOnly;
         _annotate = annotate;
+        _isCodeStart = isCodeStart;
+        _isReachable = isReachable;
         _names = new Dictionary<ulong, string>();
         foreach (var (va, name) in funcs) _names[va] = name;
         _sorted = _names.Keys.ToArray();
         Array.Sort(_sorted);
+    }
+
+    /// <summary>True when <paramref name="va"/> is a genuine code instruction start per the analysis (or when
+    /// no classifier was supplied). Guards against arming a 0xCC inside a jump/lookup table that lives in an
+    /// executable section: those bytes pass <see cref="DebuggerEngine.IsExecutable"/> but are read as data,
+    /// not executed, so the breakpoint never fires and silently corrupts the table — crashing the debuggee.</summary>
+    private bool IsCode(ulong va) => _isCodeStart is null || _isCodeStart(va);
+
+    /// <summary>True when <paramref name="va"/> sits in a dense cluster of entries — at least
+    /// <see cref="DenseCount"/> function VAs within +/-<see cref="DenseRadius"/> bytes. Real functions are
+    /// never packed that tightly; such a cluster is a jump/lookup table the analysis decoded as code (and
+    /// the linear classifier therefore did not flag as data, so <see cref="IsCode"/> alone can't catch it).
+    /// Arming a 0xCC inside it corrupts the pointers the program reads through the table and crashes it.</summary>
+    private const int DenseRadius = 0x20;
+    private const int DenseCount = 6;
+    private bool IsDenselyPacked(ulong va)
+    {
+        ulong lo = va > DenseRadius ? va - DenseRadius : 0;
+        ulong hi = va + DenseRadius;
+        int i = LowerBound(lo), n = 0;
+        for (; i < _sorted.Length && _sorted[i] <= hi; i++)
+            if (++n >= DenseCount) return true;
+        return false;
+    }
+    private int LowerBound(ulong x)
+    {
+        int lo = 0, hi = _sorted.Length;
+        while (lo < hi) { int mid = (lo + hi) >> 1; if (_sorted[mid] < x) lo = mid + 1; else hi = mid; }
+        return lo;
     }
 
     // Dereference a value (x64dbg-style annotation), or "" when annotation is off — the per-argument
@@ -92,13 +125,37 @@ public sealed class FunctionCapture
         catch { _log = null; }
     }
 
+    public int ArmedCount { get; private set; }
+    public int SkippedDense { get; private set; }
+    public int SkippedNonCode { get; private set; }
+    public int SkippedUnreachable { get; private set; }
+
+    /// <summary>Above this many discovered "functions" the analysis is over-identifying code (treating data
+    /// tables as functions). Past it we only arm functions we can prove are reachable code — direct call
+    /// targets and named symbols — since arming data the program reads corrupts it and crashes the debuggee.</summary>
+    private const int OverIdentifiedThreshold = 50_000;
+
     /// <summary>Capture every known function.</summary>
     public void StartAll()
     {
-        // Only arm entries that are in executable memory; a function mistakenly identified in a data/RO
-        // section would otherwise have a 0xCC written into data the program reads, corrupting it.
+        // Only arm entries that are executable AND a genuine code instruction start (IsCode) AND not part of a
+        // dense cluster (IsDenselyPacked): a "function" mistakenly identified inside a jump/lookup table in an
+        // executable section would otherwise get a 0xCC written into data the program reads as pointers,
+        // corrupting it and crashing the debuggee. On binaries where the analysis wildly over-identifies code,
+        // also require the function be provably reachable (a real call target / symbol), since the bulk of
+        // those false positives are data and density alone can't catch the sparser ones.
+        bool requireReachable = _isReachable != null && _names.Count > OverIdentifiedThreshold;
         var toArm = new List<ulong>(_names.Count);
-        lock (_lock) foreach (var va in _names.Keys) if (_eng.IsExecutable(va) && _entries.Add(va)) toArm.Add(va);
+        lock (_lock)
+            foreach (var va in _names.Keys)
+            {
+                if (!_eng.IsExecutable(va)) continue;
+                if (!IsCode(va)) { SkippedNonCode++; continue; }
+                if (IsDenselyPacked(va)) { SkippedDense++; continue; }
+                if (requireReachable && !_isReachable!(va)) { SkippedUnreachable++; continue; }
+                if (_entries.Add(va)) toArm.Add(va);
+            }
+        ArmedCount = toArm.Count;
         try { _eng.SetBreakpoints(toArm); } catch { }   // page-batched arming (fast for thousands of bps)
         _eng.PassFirstChanceExceptions = true;          // don't stop on the program's own exceptions
         Active = true;
@@ -109,7 +166,7 @@ public sealed class FunctionCapture
     {
         lock (_lock)
         {
-            if (_eng.IsExecutable(va) && _entries.Add(va)) { try { _eng.SetBreakpoint(va); } catch { } }
+            if (_eng.IsExecutable(va) && IsCode(va) && _entries.Add(va)) { try { _eng.SetBreakpoint(va); } catch { } }
             Active = true;
         }
         _eng.PassFirstChanceExceptions = true;

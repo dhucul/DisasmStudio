@@ -96,7 +96,26 @@ public sealed class DebugSession
     {
         if (LiveResult is null) return null;
         var deref = new DereferenceResolver(Engine, LiveResult.Names, Engine.Modules);
-        var cap = new FunctionCapture(Engine, deref, LiveResult.Functions.Select(f => (f.Va, f.Name)), captureOnce, argsOnly, annotate);
+        // Gate breakpoint arming on "this VA is a genuine code instruction start" per the analysis's linear
+        // index — so capture never writes a 0xCC into a jump/lookup table that sits in an executable section.
+        var linear = LiveResult.Linear;
+        bool isCodeStart(ulong va) { long line = linear.IndexOf(va); return linear.VaAt(line) == va && !linear.IsDataAt(line); }
+        // Reachability gate (used only when the analysis over-identifies code): a function is "real" if it is
+        //   - in the x64 .pdata table (FunctionStarts) — the authoritative function list, which includes
+        //     indirect-only functions (vtable methods/callbacks) but never data tables; or
+        //   - a direct call target (static xref DB), a named symbol, or the entry point.
+        // Data tables / pointer-scan false positives satisfy none of these, so they stay excluded. (A byte-
+        // level "looks like code" heuristic was tried and removed: common opcodes are common byte values, so
+        // table data decodes to a plausible first instruction and slipped through, re-corrupting the image.)
+        ulong slide = LiveResult.Image.ImageBase - _static.Image.ImageBase;
+        var xrefs = _static.Xrefs;
+        var symVas = new HashSet<ulong>();
+        foreach (var s in LiveResult.Image.Symbols) symVas.Add(s.Va);
+        var pdata = new HashSet<ulong>(LiveResult.Image.FunctionStarts);
+        ulong entryVa = LiveResult.Image.EntryVa;
+        bool isReachable(ulong va) => va == entryVa || pdata.Contains(va) || symVas.Contains(va)
+            || xrefs.To(va - slide).Any(x => x.Kind == XrefKind.Call);
+        var cap = new FunctionCapture(Engine, deref, LiveResult.Functions.Select(f => (f.Va, f.Name)), captureOnce, argsOnly, annotate, isCodeStart, isReachable);
         if (logPath is not null) cap.SetLogFile(logPath);
         Capture = cap;
         if (funcVa == 0) cap.StartAll(); else cap.StartFunction(funcVa);
