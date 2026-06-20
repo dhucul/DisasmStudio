@@ -56,10 +56,12 @@ public sealed class DebuggerEngine
 
     private readonly BlockingCollection<(ResumeMode Mode, ulong Target)> _resume = new();
 
-    // step state (loop-thread only)
-    private ulong _reArmAfterStep;   // sw bp byte to re-write on the next single-step
-    private ulong _reArmOnNextStop;  // sw bp byte to re-write on the next stop (over/out/runto)
-    private bool _stopAfterStep;
+    // Step state (loop-thread only) — keyed by debuggee thread id. A multi-threaded debuggee can have several
+    // threads each mid single-step at once (e.g. each stepping off a breakpoint during a Go), so this must not
+    // be a single global, or one thread's step event clobbers/cross-attributes another's → a breakpoint left
+    // un-rearmed (lost) or a stray 0xCC / misclassified stop.
+    private readonly Dictionary<uint, StepState> _stepping = [];   // thread -> in-flight single-step
+    private readonly HashSet<ulong> _reArmOnNextStop = [];         // bps disarmed for step-over/out/run-to, re-armed on the next stop
     private bool _seenSystemBp;
     private bool _pauseRequested;
     private bool _stopping;
@@ -121,8 +123,8 @@ public sealed class DebuggerEngine
 
             if (stop)
             {
-                // Re-arm a breakpoint we stepped off (for step over/out/run-to) regardless of why we stopped.
-                if (_reArmOnNextStop != 0) { ArmAddr(_reArmOnNextStop); _reArmOnNextStop = 0; }
+                // Re-arm any breakpoints we stepped off (for step over/out/run-to) regardless of why we stopped.
+                if (_reArmOnNextStop.Count > 0) { foreach (var a in _reArmOnNextStop) ArmAddr(a); _reArmOnNextStop.Clear(); }
                 IsStopped = true;
                 var (mode, target) = _resume.Take();
                 IsStopped = false;
@@ -165,6 +167,7 @@ public sealed class DebuggerEngine
                 return false;
             case Native.EXIT_THREAD_DEBUG_EVENT:
                 lock (_lock) { if (_threads.Remove(ev.dwThreadId, out var h)) Native.CloseHandle(h); }
+                _stepping.Remove(ev.dwThreadId);   // a thread that exited mid-step leaves no stale entry
                 ThreadsChanged?.Invoke();
                 return false;
             case Native.LOAD_DLL_DEBUG_EVENT:
@@ -252,21 +255,23 @@ public sealed class DebuggerEngine
 
         if (code is Native.EXCEPTION_SINGLE_STEP or Native.STATUS_WX86_SINGLE_STEP)
         {
-            // hardware breakpoint? Dr6 low bits identify the slot.
+            bool stepping = _stepping.TryGetValue(ev.dwThreadId, out var st);
+            // Hardware watchpoint? Dr6 low bits identify the slot — but only when THIS thread isn't the one we
+            // armed a software single-step on (its trap #DB is indistinguishable from a watchpoint otherwise).
             using (var c = new Ctx(Is32))
             {
-                if (c.Get(hThread) && (c.Dr6 & 0xF) != 0 && !_stepActive)
+                if (c.Get(hThread) && (c.Dr6 & 0xF) != 0 && !stepping)
                 {
                     c.Dr6 = 0; c.Set(hThread);
                     Stopped?.Invoke(new StopInfo(StopReason.Watchpoint, ev.dwThreadId, c.Ip, code));
                     return true;
                 }
             }
-            if (_reArmAfterStep != 0) { ArmAddr(_reArmAfterStep); _reArmAfterStep = 0; }
-            bool wasStep = _stepActive; _stepActive = false;
-            if (_stopAfterStep) { _stopAfterStep = false; Stopped?.Invoke(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
-            if (wasStep) return false;   // step-off of a bp during a Go — keep running
-            return false;
+            if (!stepping) return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
+            _stepping.Remove(ev.dwThreadId);
+            if (st.ReArm != 0) ArmAddr(st.ReArm);   // re-arm the breakpoint this thread stepped off
+            if (st.StopAfter) { Stopped?.Invoke(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
+            return false;   // step-off of a breakpoint during a Go — keep running
         }
 
         // Any other exception (AV, C++ EH, etc.). The filter decides whether to break and whether to pass it
@@ -284,7 +289,11 @@ public sealed class DebuggerEngine
 
     private bool _seenEntry;
     private bool _seenWx86Bp;
-    private bool _stepActive;
+
+    /// <summary>A debuggee thread's in-flight single-step: the breakpoint to re-arm when its step completes
+    /// (0 if none) and whether to surface a Step stop (StepInto/StepOver) vs silently continue (a step-off of
+    /// a breakpoint during a Go).</summary>
+    private readonly record struct StepState(ulong ReArm, bool StopAfter);
 
     // ---- resume / stepping (loop thread) ----
     // cont carries the continuation status from HandleEvent: DBG_CONTINUE for our breakpoints/steps, or
@@ -305,24 +314,24 @@ public sealed class DebuggerEngine
         {
             case ResumeMode.StepOver when IsCallAt(ip, out int len):
                 AddTempBp(ip + (ulong)len);
-                if (onBp) { DisarmAddr(ip); _reArmOnNextStop = ip; }
+                if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
                 break;
             case ResumeMode.StepOut:
             {
                 ulong ret = FindReturnAddress(c.Sp);
                 if (ret != 0) AddTempBp(ret);
-                if (onBp) { DisarmAddr(ip); _reArmOnNextStop = ip; }
+                if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
                 break;
             }
             case ResumeMode.RunToCursor:
                 AddTempBp(target);
-                if (onBp) { DisarmAddr(ip); _reArmOnNextStop = ip; }
+                if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
                 break;
             default: // Go, StepInto, StepOver-of-noncall
             {
                 bool single = mode is ResumeMode.StepInto || mode == ResumeMode.StepOver;
-                if (onBp) { DisarmAddr(ip); _reArmAfterStep = ip; c.TrapFlag = true; _stepActive = true; _stopAfterStep = single; }
-                else if (single) { c.TrapFlag = true; _stepActive = true; _stopAfterStep = true; }
+                if (onBp) { DisarmAddr(ip); _stepping[ev.dwThreadId] = new StepState(ip, single); c.TrapFlag = true; }
+                else if (single) { _stepping[ev.dwThreadId] = new StepState(0, true); c.TrapFlag = true; }
                 c.Set(hThread);
                 break;
             }
