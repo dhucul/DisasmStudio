@@ -1,0 +1,161 @@
+using System.Reflection;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+
+namespace DisasmStudio.Wpf;
+
+/// <summary>Read-only Help dialogs (Keyboard Shortcuts, About) — code-built and themed to match the rest of
+/// the app, same pattern as <see cref="Dialogs"/> / <see cref="ExceptionDialog"/>.</summary>
+internal static class HelpDialog
+{
+    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x16, 0x1B, 0x22));
+    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xE6, 0xEA, 0xF0));
+    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xAE, 0xB7, 0xC4));
+    private static readonly Brush Accent = new SolidColorBrush(Color.FromRgb(0x4D, 0x8D, 0xF7));
+    private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
+
+    private static readonly (string Title, (string Key, string Desc)[] Items)[] Groups =
+    [
+        ("Debugger", [
+            ("F5", "Run / continue"),
+            ("F7", "Step into"),
+            ("F8", "Step over"),
+            ("Shift+F11", "Step out"),
+            ("F2", "Toggle breakpoint on the caret instruction"),
+            ("Ctrl+Z", "Undo the last patch"),
+            ("(toolbar)", "Pause · Stop · Restart · Attach… · Exceptions…"),
+        ]),
+        ("Navigation", [
+            ("Ctrl+G", "Go to address"),
+            ("↑ / ↓", "Move the caret one instruction"),
+            ("PageUp / PageDown", "Move the caret one screen"),
+            ("Home / End", "First / last instruction"),
+            ("Enter", "Follow the branch/call under the caret"),
+            ("Double-click", "Follow the target"),
+            ("◀ Back / Forward ▶", "Navigation history"),
+            ("Address box + Go", "Jump to a hex address"),
+            ("Double-click a row", "Jump from a side panel (Functions, Strings, Imports, Exports, Sections, Xrefs)"),
+        ]),
+        ("Linear view", [
+            ("Ctrl+C", "Copy the selected lines"),
+            ("Ctrl+A", "Select all"),
+            ("Shift + move keys", "Extend the selection"),
+            ("Right-click", "Xrefs · open in graph · decompile · save ASM · run-to-cursor · capture · patch…"),
+            ("Drag the divider", "Resize the bytes / disassembly split"),
+        ]),
+        ("Hex view", [
+            ("← ↑ → ↓", "Move the byte caret"),
+            ("Home / End", "Start / end of the row"),
+            ("PageUp / PageDown", "Scroll a screen"),
+            ("0-9, A-F", "Type to edit the byte at the caret"),
+            ("Ctrl+C", "Copy the selection as hex"),
+            ("Right-click", "Copy as hex / text"),
+        ]),
+        ("Graph", [
+            ("Ctrl + Wheel", "Zoom in / out"),
+            ("Shift + Wheel", "Pan vertically"),
+            ("Drag", "Pan"),
+            ("Click a block", "Sync the linear view to it"),
+        ]),
+        ("Decompiler", [
+            ("↑ / ↓, PageUp/Down", "Move the caret"),
+            ("Enter / double-click", "Follow a call / branch"),
+            ("Low / Medium / High / Pseudo-C", "Switch IL level (buttons)"),
+        ]),
+    ];
+
+    /// <summary>Scrollable, grouped keyboard-shortcut reference.</summary>
+    public static void ShowShortcuts(Window owner)
+    {
+        var stack = new StackPanel { Margin = new Thickness(18, 14, 18, 14) };
+        foreach (var (title, items) in Groups)
+        {
+            stack.Children.Add(new TextBlock
+            {
+                Text = title, Foreground = Accent, FontWeight = FontWeights.SemiBold, FontSize = 13,
+                Margin = new Thickness(0, stack.Children.Count == 0 ? 0 : 14, 0, 6),
+            });
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(168) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            foreach (var (key, desc) in items)
+            {
+                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                int r = grid.RowDefinitions.Count - 1;
+                var k = new TextBlock { Text = key, Foreground = Fg, FontFamily = Mono, Margin = new Thickness(0, 1, 12, 1) };
+                var d = new TextBlock { Text = desc, Foreground = Sub, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 1, 0, 1) };
+                Grid.SetRow(k, r); Grid.SetColumn(k, 0);
+                Grid.SetRow(d, r); Grid.SetColumn(d, 1);
+                grid.Children.Add(k);
+                grid.Children.Add(d);
+            }
+            stack.Children.Add(grid);
+        }
+        stack.Children.Add(new TextBlock
+        {
+            Text = "Press F1 to reopen this.", Foreground = new SolidColorBrush(Color.FromRgb(0x79, 0x82, 0x8F)),
+            FontStyle = FontStyles.Italic, Margin = new Thickness(0, 16, 0, 0),
+        });
+
+        var scroll = new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        Show(owner, "Keyboard shortcuts", scroll, width: 560, height: 640, resizable: true);
+    }
+
+    /// <summary>Name, version, tagline, and a short feature overview.</summary>
+    public static void ShowAbout(Window owner)
+    {
+        string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0";
+        var panel = new StackPanel { Margin = new Thickness(20, 18, 20, 8) };
+        panel.Children.Add(new TextBlock { Text = "DisasmStudio", Foreground = Fg, FontSize = 22, FontWeight = FontWeights.SemiBold });
+        panel.Children.Add(new TextBlock { Text = $"Version {version}", Foreground = Sub, Margin = new Thickness(0, 2, 0, 12) });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "A Binary Ninja–style disassembler and debugger for Windows.",
+            Foreground = Fg, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10),
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Loads PE / ELF / raw binaries and disassembles x86/x64 (via Iced). A virtualized linear listing, " +
+                   "per-function control-flow graph, and an editable hex view; a multi-level IL + Pseudo-C " +
+                   "decompiler; and a live user-mode debugger with software/hardware breakpoints, stepping, and " +
+                   "FunCap-style function capture.",
+            Foreground = Sub, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12),
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = $".NET {Environment.Version}  ·  {(Environment.Is64BitProcess ? "x64" : "x86")}",
+            Foreground = new SolidColorBrush(Color.FromRgb(0x79, 0x82, 0x8F)), FontFamily = Mono, FontSize = 11,
+        });
+        Show(owner, "About DisasmStudio", panel, width: 440, height: 0, resizable: false);
+    }
+
+    // Shared chrome: themed window, content fills, a single Close button docked bottom-right.
+    private static void Show(Window owner, string title, UIElement content, int width, int height, bool resizable)
+    {
+        var win = new Window
+        {
+            Title = title, Owner = owner, Width = width,
+            Background = Bg, Foreground = Fg,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = resizable ? ResizeMode.CanResize : ResizeMode.NoResize,
+        };
+        if (height > 0) win.Height = height; else win.SizeToContent = SizeToContent.Height;
+
+        var close = new Button { Content = "Close", IsCancel = true, IsDefault = true, MinWidth = 76 };
+        close.Click += (_, _) => win.DialogResult = true;
+        var bar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(16, 8, 16, 16),
+        };
+        bar.Children.Add(close);
+
+        var root = new DockPanel();
+        DockPanel.SetDock(bar, Dock.Bottom);
+        root.Children.Add(bar);
+        root.Children.Add(content);
+        win.Content = root;
+        win.ShowDialog();
+    }
+}

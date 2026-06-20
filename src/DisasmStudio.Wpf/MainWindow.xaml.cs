@@ -104,6 +104,7 @@ public partial class MainWindow : Window
             case Key.F7: OnStepInto(sender, e); e.Handled = true; break;
             case Key.F8: OnStepOver(sender, e); e.Handled = true; break;
             case Key.F11 when shift: OnStepOut(sender, e); e.Handled = true; break;
+            case Key.F1: HelpDialog.ShowShortcuts(this); e.Handled = true; break;
         }
     }
 
@@ -149,6 +150,21 @@ public partial class MainWindow : Window
     private void SetStepButtons(bool on) { StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = on; }
     private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
     private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
+
+    // The theme's MenuItem template is flat (no submenu popup), so drop the Help items via the button's
+    // ContextMenu — opened on left-click, placed below the button.
+    private void OnHelpMenu(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { ContextMenu: { } cm } b)
+        {
+            cm.PlacementTarget = b;
+            cm.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+            cm.IsOpen = true;
+        }
+    }
+
+    private void OnHelpShortcuts(object sender, RoutedEventArgs e) => HelpDialog.ShowShortcuts(this);
+    private void OnHelpAbout(object sender, RoutedEventArgs e) => HelpDialog.ShowAbout(this);
 
     // Edit the x64dbg-style exception policy. Swaps in a fresh filter (atomic for the debug thread), applies
     // live to a running session, and persists for next time.

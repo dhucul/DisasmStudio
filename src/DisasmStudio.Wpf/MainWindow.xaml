@@ -45,6 +45,16 @@
                 <Button Content="Go" Click="OnGo" Margin="6,0,0,0" />
                 <TextBlock x:Name="FileInfo" VerticalAlignment="Center" Margin="16,0,0,0"
                            Foreground="{StaticResource TextSecondary}" />
+                <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
+                <Button x:Name="HelpBtn" Content="Help ▾" Click="OnHelpMenu" ToolTip="Help (F1)">
+                    <Button.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="Keyboard Shortcuts" InputGestureText="F1" Click="OnHelpShortcuts" />
+                            <Separator />
+                            <MenuItem Header="About DisasmStudio…" Click="OnHelpAbout" />
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
             </WrapPanel>
         </Border>
 
