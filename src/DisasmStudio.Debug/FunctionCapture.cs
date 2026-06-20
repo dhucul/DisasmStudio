@@ -33,7 +33,7 @@ public sealed class FunctionCapture
     private readonly object _lock = new();
     private readonly HashSet<ulong> _entries = [];          // function-entry breakpoints we set
     private readonly HashSet<ulong> _retBps = [];           // return-address breakpoints we added
-    private readonly Dictionary<ulong, Stack<CaptureRecord>> _pending = [];   // retAddr -> calls awaiting return
+    private readonly Dictionary<(uint Tid, ulong Ret), Stack<CaptureRecord>> _pending = [];   // (thread, retAddr) -> calls awaiting return
     private readonly List<CaptureRecord> _records = [];     // all records (guarded by _lock)
     private readonly Dictionary<ulong, HashSet<ulong>> _edges = [];  // caller-func VA -> set of callee-func VAs
     private int _edgeCount;                                 // distinct caller->callee edges (cheap change check)
@@ -201,15 +201,16 @@ public sealed class FunctionCapture
     {
         if (!Active || s.Reason != StopReason.Breakpoint) return false;
         ulong ea = s.Address;
+        uint tid = s.ThreadId;
         bool isEntry, isRet, ours;
-        lock (_lock) { isEntry = _entries.Contains(ea); isRet = _pending.ContainsKey(ea); ours = isEntry || _retBps.Contains(ea); }
+        lock (_lock) { isEntry = _entries.Contains(ea); isRet = _pending.ContainsKey((tid, ea)); ours = isEntry || _retBps.Contains(ea); }
         if (!isEntry && !isRet) return false;
 
         var regs = _eng.GetRegisters();
         if (regs is null) return false;
 
-        if (isRet) HandleReturn(ea, regs);   // a stop can be both (recursion / tail) — return first
-        if (isEntry) HandleEntry(ea, regs);
+        if (isRet) HandleReturn(tid, ea, regs);   // a stop can be both (recursion / tail) — return first
+        if (isEntry) HandleEntry(tid, ea, regs);
 
         // If a user breakpoint also sits here, capture but let the stop surface (don't auto-resume).
         if (!ours) return false;
@@ -217,7 +218,7 @@ public sealed class FunctionCapture
         return true;
     }
 
-    private void HandleEntry(ulong ea, RegisterSet regs)
+    private void HandleEntry(uint tid, ulong ea, RegisterSet regs)
     {
         ulong retAddr = ReadPtr(regs.Sp);
         ulong callerFunc = FuncContaining(retAddr);
@@ -232,16 +233,16 @@ public sealed class FunctionCapture
             CallerVa = retAddr,
             CallerFuncVa = callerFunc,
             CallerName = callerFunc != 0 ? NameOf(callerFunc) : $"0x{retAddr:X}",
-            ThreadId = _eng.CurrentThreadId,
+            ThreadId = tid,
             Args = CaptureArgs(regs),
         };
 
         lock (_lock)
         {
-            rec.Depth = _pending.Values.Sum(st => st.Count);
+            rec.Depth = _pending.Where(kv => kv.Key.Tid == tid).Sum(kv => kv.Value.Count);   // this thread's nesting depth
             if (captureReturn)
             {
-                if (!_pending.TryGetValue(retAddr, out var stack)) { stack = new Stack<CaptureRecord>(); _pending[retAddr] = stack; }
+                if (!_pending.TryGetValue((tid, retAddr), out var stack)) { stack = new Stack<CaptureRecord>(); _pending[(tid, retAddr)] = stack; }
                 stack.Push(rec);
                 // Own the return breakpoint only if we set it; never touch a pre-existing (user/entry) one.
                 if (!_eng.HasBreakpoint(retAddr)) { try { _eng.SetBreakpoint(retAddr); _retBps.Add(retAddr); } catch { } }
@@ -260,17 +261,20 @@ public sealed class FunctionCapture
         Captured?.Invoke();
     }
 
-    private void HandleReturn(ulong ea, RegisterSet regs)
+    private void HandleReturn(uint tid, ulong ea, RegisterSet regs)
     {
         CaptureRecord? call;
         lock (_lock)
         {
-            if (!_pending.TryGetValue(ea, out var stack) || stack.Count == 0) return;
+            if (!_pending.TryGetValue((tid, ea), out var stack) || stack.Count == 0) return;
             call = stack.Pop();
             if (stack.Count == 0)
             {
-                _pending.Remove(ea);
-                if (_retBps.Remove(ea) && !_entries.Contains(ea)) { try { _eng.RemoveBreakpoint(ea); } catch { } }
+                _pending.Remove((tid, ea));
+                // The return breakpoint is shared by all threads — only remove it once no thread is still
+                // awaiting a return at this address.
+                if (!_pending.Keys.Any(k => k.Ret == ea) && _retBps.Remove(ea) && !_entries.Contains(ea))
+                    { try { _eng.RemoveBreakpoint(ea); } catch { } }
             }
         }
 
