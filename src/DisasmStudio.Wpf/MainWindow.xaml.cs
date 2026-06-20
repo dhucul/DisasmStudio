@@ -177,6 +177,10 @@ public partial class MainWindow : Window
 
     private void StartCapture(ulong funcVa)
     {
+        // Arming breakpoints writes the debuggee's code pages; that's only safe while it is frozen at a stop
+        // (writing into a running process can corrupt it). Require a stop before starting a capture.
+        if (_dbg is not { IsStopped: true }) { StatusText.Text = "Pause the debuggee before starting a capture."; return; }
+
         string log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "funcap.txt");
         var cap = _dbg!.StartCapture(funcVa, log, _captureOnce, _captureArgsOnly);
         if (cap is null) { StatusText.Text = "Capture needs the program stopped at least once first."; return; }
