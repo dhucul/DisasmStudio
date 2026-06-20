@@ -132,9 +132,18 @@ public static class CodeMap
                 int ps = PointerSize(image, va);
                 if (ps > 0) { va += (ulong)ps; continue; }
 
-                // A function / block. Descend immediately so consecutive blocks in the same run (no
-                // padding between them) are each found; NextGap then jumps past the marked code.
-                if (IsPrologue(image, va) || LooksLikeCode(image, dis, va, end))
+                // A function start — only a recognisable prologue (endbr64 / frame setup / push-run+alloc).
+                // Descend immediately so consecutive blocks in the same run (no padding between them) are each
+                // found; NextGap then jumps past the marked code.
+                //
+                // We deliberately do NOT accept "decodes to a ret/jmp/call within N instructions" as code:
+                // those opcodes are common byte values, so almost any data passes — which flooded the function
+                // list with hundreds of thousands of phantom sub_* and mis-marked jump tables / literals as
+                // code (the latter is also what let function-capture write 0xCC into those tables). Real code
+                // in a gap that no seed reaches and that has no prologue is left as data rather than guessed;
+                // genuinely indirect-only functions are still found via their prologue (endbr64), the
+                // code-pointer scan, or jump-table case edges.
+                if (IsPrologue(image, va))
                 {
                     one[0] = va;
                     Descend(image, code, one, jumpTables, token);
@@ -146,22 +155,6 @@ public static class CodeMap
             }
         }
         return seeds;
-    }
-
-    /// <summary>A position that decodes into valid instructions reaching a call/branch/return within a
-    /// short window is code — catches leaf functions, thunks, and cold blocks (incl. ja-over-int3,
-    /// which decode straight through the int3).</summary>
-    private static bool LooksLikeCode(IBinaryImage image, Disassembler dis, ulong va, ulong end)
-    {
-        ulong cur = va;
-        for (int i = 0; i < 64 && cur < end; i++)
-        {
-            if (!dis.TryDecodeAt(cur, out var ins) || ins.Length == 0) return false;
-            if (ins.FlowControl is FlowControl.Return or FlowControl.UnconditionalBranch
-                or FlowControl.IndirectBranch or FlowControl.Call) return true;
-            cur += (ulong)ins.Length;   // step over Next / ConditionalBranch / Interrupt (int3, int 0x29)
-        }
-        return false;
     }
 
     /// <summary>Aligned pointer-into-mapped-memory size at <paramref name="va"/> (8/4), or 0 if not a pointer.</summary>
