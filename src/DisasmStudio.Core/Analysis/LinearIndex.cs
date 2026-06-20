@@ -52,7 +52,9 @@ public sealed class LinearIndex
         return ni;
     }
 
-    /// <summary>Line index of <paramref name="va"/>, or the line of the nearest entry at/below it.</summary>
+    /// <summary>Line index of <paramref name="va"/> — the nearest entry at or below it, or 0 (the first line)
+    /// when <paramref name="va"/> precedes every entry. Callers needing an exact hit must compare
+    /// <see cref="VaAt"/> of the result to <paramref name="va"/>.</summary>
     public long IndexOf(ulong va)
     {
         if (Count == 0) return 0;

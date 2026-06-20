@@ -13,11 +13,13 @@ public readonly record struct Xref(ulong From, ulong To, XrefKind Kind);
 public sealed class XrefDatabase
 {
     private readonly Dictionary<ulong, List<Xref>> _toTarget = [];
+    private ulong[]? _sortedKeys;   // target VAs in order, built lazily for ToRange; invalidated on Add
 
     public void Add(ulong from, ulong to, XrefKind kind)
     {
         if (!_toTarget.TryGetValue(to, out var list)) _toTarget[to] = list = [];
         list.Add(new Xref(from, to, kind));
+        _sortedKeys = null;
     }
 
     /// <summary>Every reference that targets <paramref name="va"/>.</summary>
@@ -27,15 +29,27 @@ public sealed class XrefDatabase
     /// <summary>
     /// Every reference that targets any address in <c>[lo, hiExclusive)</c>. Used to catch code that
     /// points into the middle of a string (e.g. a suffix-merged literal) rather than its first byte.
-    /// The scan is capped so a very long span can't stall a click.
+    /// Binary-searches a sorted key array (built once after the sweep), so it covers the whole span in
+    /// O(log n + k) — no per-byte probe and no length cap that would silently drop tail references.
     /// </summary>
     public List<Xref> ToRange(ulong lo, ulong hiExclusive)
     {
         var result = new List<Xref>();
-        ulong cap = Math.Min(hiExclusive, lo + 4096);
-        for (ulong va = lo; va < cap; va++)
-            if (_toTarget.TryGetValue(va, out var list)) result.AddRange(list);
+        if (lo >= hiExclusive || _toTarget.Count == 0) return result;
+        var keys = _sortedKeys ??= BuildSortedKeys();
+        int lo2 = 0, hi2 = keys.Length;                       // lower-bound: first key >= lo
+        while (lo2 < hi2) { int mid = (lo2 + hi2) >> 1; if (keys[mid] < lo) lo2 = mid + 1; else hi2 = mid; }
+        for (int i = lo2; i < keys.Length && keys[i] < hiExclusive; i++)
+            result.AddRange(_toTarget[keys[i]]);
         return result;
+    }
+
+    private ulong[] BuildSortedKeys()
+    {
+        var keys = new ulong[_toTarget.Count];
+        _toTarget.Keys.CopyTo(keys, 0);
+        Array.Sort(keys);
+        return keys;
     }
 
     public bool HasRefsTo(ulong va) => _toTarget.ContainsKey(va);

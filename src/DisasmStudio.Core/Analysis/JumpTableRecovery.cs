@@ -27,6 +27,9 @@ public static class JumpTableRecovery
     {
         targets = [];
         if (!dis.TryDecodeAt(jmpVa, out var jmp) || jmp.FlowControl != FlowControl.IndirectBranch) return false;
+        // The back-scans below start from IndexOf(jmpVa) and walk preceding instructions; that's only valid if
+        // the jmp is an exact indexed entry (IndexOf otherwise returns the nearest-below line, off by one).
+        if (linear.VaAt(linear.IndexOf(jmpVa)) != jmpVa) return false;
         return jmp.Op0Kind switch
         {
             OpKind.Memory => TryMemoryTable(image, linear, dis, jmpVa, jmp, out targets),

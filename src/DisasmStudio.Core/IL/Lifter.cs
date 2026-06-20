@@ -85,13 +85,16 @@ public sealed class Lifter
                 break;
 
             case Mnemonic.Push:
+                // Store the operand at [sp - Ptr] BEFORE adjusting sp, so `push rsp` pushes the original sp.
+                Emit(new AssignStmt { Dest = new LoadExpr(new BinExpr(BinOp.Sub, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr), Ptr), Src = Operand(ins, 0, Ptr) });
                 Emit(new AssignStmt { Dest = new RegExpr(Sp), Src = new BinExpr(BinOp.Sub, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr) });
-                Emit(new AssignStmt { Dest = new LoadExpr(new RegExpr(Sp), Ptr), Src = Operand(ins, 0, Ptr) });
                 break;
 
             case Mnemonic.Pop:
                 Emit(new AssignStmt { Dest = Operand(ins, 0, Ptr), Src = new LoadExpr(new RegExpr(Sp), Ptr) });
-                Emit(new AssignStmt { Dest = new RegExpr(Sp), Src = new BinExpr(BinOp.Add, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr) });
+                // `pop rsp` loads rsp directly — the +Ptr is overridden; only adjust sp when popping another reg.
+                if (!(ins.Op0Kind == OpKind.Register && ins.Op0Register == Sp))
+                    Emit(new AssignStmt { Dest = new RegExpr(Sp), Src = new BinExpr(BinOp.Add, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr) });
                 break;
 
             case Mnemonic.Add: Arith(BinOp.Add, ins, Emit); break;
