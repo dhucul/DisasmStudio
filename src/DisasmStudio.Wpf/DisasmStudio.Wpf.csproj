@@ -10,7 +10,13 @@
     <AssemblyName>DisasmStudio</AssemblyName>
     <Version>1.0.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>DisasmStudio.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Embedded so the window/title-bar icon can reference it; ApplicationIcon sets the .exe icon. -->
+    <Resource Include="DisasmStudio.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DisasmStudio.Core\DisasmStudio.Core.csproj" />
