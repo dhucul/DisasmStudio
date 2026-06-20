@@ -97,16 +97,16 @@ public partial class MainWindow : Window
         switch (e.Key)
         {
             case Key.F5: OnDebugRun(sender, e); e.Handled = true; break;
-            case Key.F7: _dbg?.StepInto(); e.Handled = true; break;
-            case Key.F8: _dbg?.StepOver(); e.Handled = true; break;
-            case Key.F11 when shift: _dbg?.StepOut(); e.Handled = true; break;
+            case Key.F7: OnStepInto(sender, e); e.Handled = true; break;
+            case Key.F8: OnStepOver(sender, e); e.Handled = true; break;
+            case Key.F11 when shift: OnStepOut(sender, e); e.Handled = true; break;
         }
     }
 
     // ---- debugger ----
     private void OnDebugRun(object sender, RoutedEventArgs e)
     {
-        if (_dbg is not null) { _dbg.Go(); return; }
+        if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return; }   // continue only from a stop (else it skips the next stop)
         if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         BeginDebug(d => d.Launch(_image.FilePath));
@@ -125,7 +125,7 @@ public partial class MainWindow : Window
         _dbgViewLive = false;
         _dbg = new DebugSession(Dispatcher, _result!);
         _dbg.Stopped += OnDbgStopped;
-        _dbg.Running += () => StatusText.Text = "Running…";
+        _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); };   // no continue/step while running
         _dbg.Exited += OnDbgExited;
         _dbg.Output += m => StatusText.Text = m;
         Debug.SetSession(_dbg);
@@ -135,9 +135,12 @@ public partial class MainWindow : Window
         start(_dbg);
     }
 
-    private void OnStepInto(object sender, RoutedEventArgs e) => _dbg?.StepInto();
-    private void OnStepOver(object sender, RoutedEventArgs e) => _dbg?.StepOver();
-    private void OnStepOut(object sender, RoutedEventArgs e) => _dbg?.StepOut();
+    // Stepping is only valid from a stop; ignore it (button or key) while the debuggee is running, where it
+    // would queue a resume that the loop consumes at the next stop — silently skipping that stop.
+    private void OnStepInto(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepInto(); }
+    private void OnStepOver(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOver(); }
+    private void OnStepOut(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOut(); }
+    private void SetStepButtons(bool on) { StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = on; }
     private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
     private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
 
@@ -246,7 +249,7 @@ public partial class MainWindow : Window
             CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true;
             RestartBtn.IsEnabled = true;
         }
-        DbgRunBtn.Content = "▶ Continue";   // Run doubles as Continue (F5) during a session
+        DbgRunBtn.Content = "▶ Continue"; DbgRunBtn.IsEnabled = true; SetStepButtons(true);   // Run doubles as Continue (F5) during a session
         Linear.SetCurrentIp(_dbg.CurrentIp);
         Linear.Refresh();
         Debug.Refresh();
@@ -261,7 +264,7 @@ public partial class MainWindow : Window
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
         _dbg?.AbortCapture();   // process is gone: drop capture state and close the log (no live removal needed)
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false;
-        RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run";
+        RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run"; DbgRunBtn.IsEnabled = true; SetStepButtons(false);   // re-enable for a fresh Run
         Linear.SetCurrentIp(0);
         Linear.IsBreakpointAt = null;
         Hex.WriteByteAt = null;
