@@ -7,10 +7,12 @@ namespace DisasmStudio.Core.Formats;
 /// section header table; function names come from .symtab / .dynsym. VAs are the ELF virtual
 /// addresses directly (ImageBase is 0), so a PIE/ET_DYN object is shown at its link-time VAs.
 /// </summary>
-public sealed class ElfImage : IBinaryImage
+public sealed class ElfImage : IBinaryImage, IDisposable
 {
     private readonly MappedFile _f;
     private readonly bool _is64;
+
+    public void Dispose() => _f.Dispose();   // release the memory-mapped file
     private readonly List<Section> _sections = [];
     private readonly List<NamedSymbol> _symbols = [];
 

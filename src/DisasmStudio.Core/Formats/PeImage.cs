@@ -7,9 +7,11 @@ namespace DisasmStudio.Core.Formats;
 /// import parsing follow RipperStudio's read-only loader; export parsing is added so the
 /// disassembler can name exported functions. All reads go through a memory-mapped backing.
 /// </summary>
-public sealed class PeImage : IBinaryImage
+public sealed class PeImage : IBinaryImage, IDisposable
 {
     private readonly MappedFile _f;
+
+    public void Dispose() => _f.Dispose();   // release the memory-mapped file
     private readonly List<Section> _sections;
     private readonly List<NamedSymbol> _symbols = [];
     private readonly List<ImportEntry> _imports = [];

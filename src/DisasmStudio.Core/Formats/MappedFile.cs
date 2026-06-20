@@ -9,19 +9,31 @@ namespace DisasmStudio.Core.Formats;
 /// heap — the disassembler reads small slices on demand. All multi-byte reads are
 /// little-endian, matching x86/x64 and the Windows/Linux images we load.
 ///
-/// Not <see cref="IDisposable"/> on purpose: background analysis threads keep the image
-/// alive while they read it, and the mapping's SafeHandles release the OS handle when the
-/// object is finally collected.
+/// Disposable, and safe-by-default: <see cref="Dispose"/> releases the OS mapping deterministically, after
+/// which every read returns 0/empty (Length is zeroed) rather than throwing — so a late read from a
+/// background analysis thread that hasn't yet noticed cancellation degrades to garbage instead of crashing.
 /// </summary>
-public sealed class MappedFile
+public sealed class MappedFile : IDisposable
 {
     private readonly MemoryMappedFile _mmf;
     private readonly MemoryMappedViewAccessor _view;
     private readonly Dictionary<int, byte> _patches = [];   // in-memory edits, overlaid on every read
     private readonly List<Dictionary<int, (bool Had, byte Val)>> _undo = [];   // per-Patch pre-edit state, for undo
+    private bool _disposed;
 
-    public int Length { get; }
+    public int Length { get; private set; }
     public string Path { get; }
+
+    /// <summary>Release the OS mapping. After this every read returns 0/empty (Length is zeroed), so a stray
+    /// read from a not-yet-cancelled reader degrades safely rather than throwing ObjectDisposedException.</summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        Length = 0;          // bounds-checked reads now short-circuit without touching the view
+        _view.Dispose();
+        _mmf.Dispose();
+    }
 
     private MappedFile(MemoryMappedFile mmf, MemoryMappedViewAccessor view, int length, string path)
     {

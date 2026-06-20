@@ -4,10 +4,12 @@ namespace DisasmStudio.Core.Formats;
 /// A flat blob mapped 1:1 at a user-chosen base VA with a chosen bitness — for shellcode,
 /// memory dumps, or firmware. The whole file is one read+execute "section", so VA = base + offset.
 /// </summary>
-public sealed class RawImage : IBinaryImage
+public sealed class RawImage : IBinaryImage, IDisposable
 {
     private readonly MappedFile _f;
     private readonly Section _section;
+
+    public void Dispose() => _f.Dispose();   // release the memory-mapped file
 
     public string FilePath { get; }
     public BinaryFormat Format => BinaryFormat.Raw;

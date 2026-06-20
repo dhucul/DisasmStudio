@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     private IBinaryImage? _image;
     private AnalysisResult? _result;
     private CancellationTokenSource? _cts;
+    private Task _analysisDone = Task.CompletedTask;   // completes when the in-flight analysis ends (success/cancel/fault)
     private ulong[] _funcStarts = [];
     private string? _projectPath;
     private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
@@ -702,6 +703,10 @@ public partial class MainWindow : Window
 
     private async Task StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0, bool fresh = true)
     {
+        // On a fresh load, retire the previous file-backed image once the new one is up and its analysis stopped.
+        var prevImage = fresh ? _image : null;
+        var prevDone = _analysisDone;
+
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
@@ -726,7 +731,9 @@ public partial class MainWindow : Window
 
         try
         {
-            var result = await Task.Run(() => AnalysisEngine.Analyze(image, progress, token), token);
+            var task = Task.Run(() => AnalysisEngine.Analyze(image, progress, token), token);
+            _analysisDone = SilentlyAwait(task);
+            var result = await task;
             if (token.IsCancellationRequested) return;
 
             _result = result;
@@ -741,6 +748,16 @@ public partial class MainWindow : Window
                 : result.Functions.Count > 0 ? result.Functions[0].Va : image.MinVa);
             if (initialTab is >= 0 and <= 3) CenterTabs.SelectedIndex = initialTab;
             _nav.Navigate(target);
+
+            // The UI now references the new image and the previous analysis was cancelled — wait for it to
+            // actually stop, then release the previous file-backed mapping. Skipped while debugging, where the
+            // live session still reads the static image through LiveProcessImage. Disposal is safe-by-default
+            // (a disposed mapping reads as 0), so even a stray reader can't crash.
+            if (prevImage is not null && !ReferenceEquals(prevImage, image) && _dbg is null)
+            {
+                await prevDone;
+                (prevImage as IDisposable)?.Dispose();
+            }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -752,6 +769,18 @@ public partial class MainWindow : Window
             Progress.Visibility = Visibility.Collapsed;
             Progress.IsIndeterminate = false;
         }
+    }
+
+    /// <summary>Await a task purely for its completion (success/cancel/fault); the real outcome is handled by
+    /// the direct awaiter. Used to know when a cancelled analysis has actually stopped reading its image.</summary>
+    private static async Task SilentlyAwait(Task t) { try { await t; } catch { } }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        base.OnClosed(e);
+        _cts?.Cancel();
+        (_image as IDisposable)?.Dispose();
+        (_savedResult?.Image as IDisposable)?.Dispose();   // static image held across a debug session
     }
 
     private void PopulateLists(AnalysisResult result)
