@@ -41,8 +41,12 @@ public sealed class Lifter
 
     private Register Sp => _is64 ? Register.RSP : Register.ESP;
     private Register Ax => _is64 ? Register.RAX : Register.EAX;
-    private Register Dx => _is64 ? Register.RDX : Register.EDX;
     private int Ptr => _is64 ? 8 : 4;
+
+    // Width-sized accumulator (al/ax/eax/rax) and data (ah/dx/edx/rdx) registers for one-operand mul/div, so a
+    // 32-bit div reads as eax = eax / … instead of rax = rax / ….
+    private static Register AxW(int w) => w switch { 1 => Register.AL, 2 => Register.AX, 4 => Register.EAX, _ => Register.RAX };
+    private static Register DxW(int w) => w switch { 1 => Register.AH, 2 => Register.DX, 4 => Register.EDX, _ => Register.RDX };
 
     /// <summary>Lift a function (its CFG must already be built) into Low IL form.</summary>
     public LiftedFunction Lift(Function fn)
@@ -155,17 +159,21 @@ public sealed class Lifter
                 _flag = new FlagDef(FlagSource.Result, d, new Const(0, w));
                 break;
             }
-            case Mnemonic.Imul or Mnemonic.Mul:   // one-operand: rdx:rax = rax * src (high half dropped)
-                Emit(new AssignStmt { Dest = new RegExpr(Ax), Src = new BinExpr(ins.Mnemonic == Mnemonic.Mul ? BinOp.UMul : BinOp.Mul, new RegExpr(Ax), Operand(ins, 0, Ptr), Ptr) });
+            case Mnemonic.Imul or Mnemonic.Mul:   // one-operand: {a}x = {a}x * src at the operand width (high half dropped)
+            {
+                int w = DestWidth(ins);
+                Emit(new AssignStmt { Dest = new RegExpr(AxW(w)), Src = new BinExpr(ins.Mnemonic == Mnemonic.Mul ? BinOp.UMul : BinOp.Mul, new RegExpr(AxW(w)), Operand(ins, 0, w), w) });
                 _flag = default;
                 break;
+            }
 
             case Mnemonic.Div or Mnemonic.Idiv:
             {
                 bool s = ins.Mnemonic == Mnemonic.Idiv;
-                var src = Operand(ins, 0, Ptr);
-                Emit(new AssignStmt { Dest = new RegExpr(Dx), Src = new BinExpr(s ? BinOp.SMod : BinOp.UMod, new RegExpr(Ax), src, Ptr) });
-                Emit(new AssignStmt { Dest = new RegExpr(Ax), Src = new BinExpr(s ? BinOp.SDiv : BinOp.UDiv, new RegExpr(Ax), src, Ptr) });
+                int w = DestWidth(ins);                 // operand width: byte/word/dword/qword
+                var src = Operand(ins, 0, w);           // dividend modelled as {a}x; the high half in {d}x is ignored
+                Emit(new AssignStmt { Dest = new RegExpr(DxW(w)), Src = new BinExpr(s ? BinOp.SMod : BinOp.UMod, new RegExpr(AxW(w)), src, w) });
+                Emit(new AssignStmt { Dest = new RegExpr(AxW(w)), Src = new BinExpr(s ? BinOp.SDiv : BinOp.UDiv, new RegExpr(AxW(w)), src, w) });
                 _flag = default;
                 break;
             }

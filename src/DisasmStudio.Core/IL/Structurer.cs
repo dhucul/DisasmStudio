@@ -230,13 +230,21 @@ public sealed class Structurer
                 ulong merge = MergeOf(block.Start);
                 var stmt = new StructSwitchStmt { Va = sw.Va, Value = sw.Value };
                 var childStop = new HashSet<ulong>(stop); if (merge != 0) childStop.Add(merge);
-                int idx = 0;
-                foreach (var c in sw.Cases.Distinct())
+                // Group the case values (jump-table indices) by their target, in first-appearance order, so a
+                // target reached by several values emits `case 0: case 1: …` with the real selectors instead of
+                // a single synthetic ordinal lost to Distinct().
+                var byTarget = new Dictionary<ulong, List<long>>();
+                var order = new List<ulong>();
+                for (int i = 0; i < sw.Cases.Count; i++)
+                {
+                    if (!byTarget.TryGetValue(sw.Cases[i], out var vals)) { vals = []; byTarget[sw.Cases[i]] = vals; order.Add(sw.Cases[i]); }
+                    vals.Add(i);
+                }
+                foreach (var c in order)
                 {
                     var caseBody = (c == merge || _emitted.Contains(c) || childStop.Contains(c))
                         ? GotoSeq(c) : EmitSeq(c, childStop, loop, depth + 1);
-                    stmt.Cases.Add(new SwitchCase { Values = [idx], Body = caseBody });
-                    idx++;
+                    stmt.Cases.Add(new SwitchCase { Values = byTarget[c], Body = caseBody });
                 }
                 seq.Items.Add(stmt);
                 return merge != 0 && !_emitted.Contains(merge) ? merge : null;

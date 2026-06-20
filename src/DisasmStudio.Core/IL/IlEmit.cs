@@ -301,8 +301,12 @@ internal sealed class StructEmitter
                 _w.Flush(sw.Va, indent);
                 foreach (var cse in sw.Cases)
                 {
-                    _w.Kw("case"); _w.Sp(); var (t, _) = ExprWriter.Num(cse.Values.Count > 0 ? cse.Values[0] : 0); _w.Num(t); _w.Op(_comp ? ": ;" : ":");
-                    _w.Flush(0, indent + 1);
+                    if (cse.Values.Count == 0) { _w.Kw("default"); _w.Op(_comp ? ": ;" : ":"); _w.Flush(0, indent + 1); }
+                    foreach (var v in cse.Values)   // stack one `case N:` label per selector value
+                    {
+                        _w.Kw("case"); _w.Sp(); var (t, _) = ExprWriter.Num(v); _w.Num(t); _w.Op(_comp ? ": ;" : ":");
+                        _w.Flush(0, indent + 1);
+                    }
                     EmitStmt(cse.Body, indent + 2);
                 }
                 _w.Op("}"); _w.Flush(0, indent);

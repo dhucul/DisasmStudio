@@ -218,13 +218,17 @@ public static class MediumLifter
     private static CallExpr WithArgs(CallExpr ce, Dictionary<Loc, Expr> env, bool is64)
     {
         if (ce.Args.Count > 0 || !is64) return ce;
-        var args = new List<Expr>();
+        // Don't stop at the first register we couldn't recover: a real call often sets rcx and r8 but loads
+        // rdx from memory we didn't track. Collect all slots, then trim trailing unknowns and fill interior
+        // gaps with the register name, so e.g. f(a, rdx, c) is recovered instead of truncating to f(a).
+        var slots = new List<Expr?>(X64ArgRegs.Length);
         foreach (var r in X64ArgRegs)
-        {
-            if (!env.TryGetValue(new Loc(r, null), out var v)) break;
-            args.Add(v);
-        }
-        return args.Count == 0 ? ce : ce with { Args = args };
+            slots.Add(env.TryGetValue(new Loc(r, null), out var v) ? v : null);
+        int last = slots.FindLastIndex(a => a is not null);
+        if (last < 0) return ce;
+        var args = new List<Expr>(last + 1);
+        for (int i = 0; i <= last; i++) args.Add(slots[i] ?? new RegExpr(X64ArgRegs[i]));
+        return ce with { Args = args };
     }
 
     private static Expr Subst(Expr e, Dictionary<Loc, Expr> env)
