@@ -39,6 +39,10 @@ public sealed class DebuggerEngine
     /// handlers without stopping; only a second-chance (fatal/unhandled) exception surfaces.</summary>
     public bool PassFirstChanceExceptions { get; set; }
 
+    /// <summary>Per-exception-code policy (x64dbg/IDA-style): which exceptions break the UI vs pass straight
+    /// to the program. Defaults to "break on everything, pass to the program" — the original behaviour.</summary>
+    public ExceptionFilter ExceptionFilter { get; set; } = new();
+
     /// <summary>When set before launching, stop at the loader (system) breakpoint instead of skipping to
     /// the entry point — earlier, so capture can include TLS callbacks and static DLL DllMains.</summary>
     public bool StopAtLoaderBreakpoint { get; set; }
@@ -265,12 +269,15 @@ public sealed class DebuggerEngine
             return false;
         }
 
-        // any other exception (AV, C++ EH, etc.): hand it to the debuggee's own handler on resume.
-        cont = Native.DBG_EXCEPTION_NOT_HANDLED;
+        // Any other exception (AV, C++ EH, etc.). The filter decides whether to break and whether to pass it
+        // to the debuggee's own handler (DBG_EXCEPTION_NOT_HANDLED) or swallow it (DBG_CONTINUE) on resume.
+        bool firstChance = ev.Exception.dwFirstChance != 0;
+        var (brk, pass) = ExceptionFilter.Decide(code, firstChance);
+        cont = pass ? Native.DBG_EXCEPTION_NOT_HANDLED : Native.DBG_CONTINUE;
         if (_pauseRequested || _stopping) return false;
-        // While capturing, let the program handle its own first-chance exceptions without stopping; only a
-        // second-chance (unhandled / fatal) exception surfaces.
-        if (PassFirstChanceExceptions && ev.Exception.dwFirstChance != 0) return false;
+        // While capturing, let the program handle all its own first-chance exceptions without stopping.
+        if (PassFirstChanceExceptions && firstChance) return false;
+        if (!brk) return false;   // filter: don't break — exception was passed/swallowed per `pass`
         Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, addr, code));
         return true;
     }

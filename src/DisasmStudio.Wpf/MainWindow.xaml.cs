@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
 
     private DebugSession? _dbg;
+    private ExceptionFilter _exceptionFilter = ExceptionStore.Load();   // persisted x64dbg-style exception policy (swapped wholesale on edit)
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
     private bool _restartPending;           // relaunch the target once the current debuggee has exited
@@ -133,6 +134,7 @@ public partial class MainWindow : Window
         Debug.SetSession(_dbg);
         DebugDock.Visibility = Visibility.Visible;
         Linear.IsBreakpointAt = va => _dbg?.HasBreakpoint(va) ?? false;
+        _dbg.Engine.ExceptionFilter = _exceptionFilter;   // apply the persisted exception policy to this session
         _dbg.Engine.StopAtLoaderBreakpoint = LoaderBreakCheck.IsChecked == true;   // break before the entry point
         StatusText.Text = "Starting debugger…";
         start(_dbg);
@@ -146,6 +148,16 @@ public partial class MainWindow : Window
     private void SetStepButtons(bool on) { StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = on; }
     private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
     private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
+
+    // Edit the x64dbg-style exception policy. Swaps in a fresh filter (atomic for the debug thread), applies
+    // live to a running session, and persists for next time.
+    private void OnExceptions(object sender, RoutedEventArgs e)
+    {
+        if (ExceptionDialog.Show(this, _exceptionFilter) is not { } edited) return;
+        _exceptionFilter = edited;
+        ExceptionStore.Save(edited);
+        if (_dbg is not null) _dbg.Engine.ExceptionFilter = edited;   // atomic reference swap; in-flight Decide() finishes on the old one
+    }
 
     private void OnDebugRestart(object sender, RoutedEventArgs e)
     {
