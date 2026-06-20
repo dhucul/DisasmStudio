@@ -162,6 +162,10 @@ public sealed class FunctionCapture
     {
         ulong retAddr = ReadPtr(regs.Sp);
         ulong callerFunc = FuncContaining(retAddr);
+        // Only capture a return when [rsp] looks like a real return address (executable). When a function is
+        // reached by a jump/tail-call rather than a call, [rsp] is unrelated data, and writing a breakpoint
+        // there would corrupt the debuggee.
+        bool captureReturn = !_argsOnly && _eng.IsExecutable(retAddr);
         var rec = new CaptureRecord
         {
             CalleeVa = ea,
@@ -176,7 +180,7 @@ public sealed class FunctionCapture
         lock (_lock)
         {
             rec.Depth = _pending.Values.Sum(st => st.Count);
-            if (!_argsOnly)   // schedule a return breakpoint to capture the return value (skipped in args-only mode)
+            if (captureReturn)
             {
                 if (!_pending.TryGetValue(retAddr, out var stack)) { stack = new Stack<CaptureRecord>(); _pending[retAddr] = stack; }
                 stack.Push(rec);
