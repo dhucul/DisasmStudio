@@ -85,6 +85,9 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   threads and modules. 32-bit targets are debugged from the 64-bit host via WOW64.
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
+- **Help:** a *Help ▾* toolbar menu with a grouped keyboard-shortcut reference (also opened with **F1**) —
+  covering the debugger, navigation, and the linear / hex / graph / decompiler views — and an *About* box
+  (name, version, feature overview, runtime).
 - **High-DPI:** per-monitor-v2 aware; DPI-correct text and pixel-snapped lines that re-render sharply
   when moved between displays of different scale.
 
@@ -100,6 +103,52 @@ src/
 The analysis runs on a background thread: scan strings → one linear sweep building the instruction
 index + cross-references + call/branch targets → name resolution + function list. Per-function CFGs
 are built lazily when a function is opened in the graph, keeping huge files fast.
+
+## APIs & libraries
+
+A small, deliberate set of dependencies: one disassembler library, the OS debugging and symbol APIs, and
+the .NET base class library.
+
+**Iced (`Iced.Intel`, NuGet 1.21.0)** — the x86/x64 decoder *and* encoder. Everything that touches machine
+code goes through it: `Decoder` for disassembly, the formatter for operand text, `FlowControl`/operand
+metadata for the analysis (calls, branches, jump-table shapes), and the `Encoder`/`BlockEncoder` for the
+*Patch…* assembler.
+
+**Win32 debugging API (`kernel32.dll`, P/Invoke in `DisasmStudio.Debug/Native.cs`)** — the entire live
+debugger. Called only on Windows; 32-bit (WOW64) targets use the `Wow64*` context entry points.
+
+| Function | Used for |
+| --- | --- |
+| `CreateProcessW` (`DEBUG_ONLY_THIS_PROCESS`) | Launch the target under the debugger |
+| `DebugActiveProcess` / `DebugActiveProcessStop` | Attach to / detach from a running process by PID |
+| `DebugSetProcessKillOnExit` | Keep an attached process alive after we detach |
+| `WaitForDebugEvent` / `ContinueDebugEvent` | The debug-event loop — stops, exceptions, thread/module load |
+| `DebugBreakProcess` | Inject a break for *Pause* |
+| `ReadProcessMemory` / `WriteProcessMemory` | Read live memory (disasm, dump, stack) and write breakpoint / patch bytes |
+| `VirtualProtectEx` | Make a code page writable to plant / restore an `int3` (`0xCC`) |
+| `VirtualQueryEx` | Page state and protection (is an address committed / executable) |
+| `FlushInstructionCache` | Flush the i-cache after writing breakpoint or patch bytes |
+| `GetThreadContext` / `SetThreadContext` | Read / write x64 registers, the trap flag, and Dr0–7 |
+| `Wow64GetThreadContext` / `Wow64SetThreadContext` | The same for a 32-bit (WOW64) target |
+| `IsWow64Process` | Detect a 32-bit target so the right context is used |
+| `TerminateProcess` | Stop a launched debuggee |
+| `K32GetModuleFileNameEx` | Resolve a loaded module's path (modules panel, names) |
+| `CloseHandle` | Release process / thread / file handles |
+
+**`dbghelp.dll` — `UnDecorateSymbolName`** — demangles MSVC C++ names (`?…`) to readable signatures. Itanium
+names (`_Z…`, GCC/Clang/MinGW/ELF) are demangled by a built-in demangler instead
+(`DisasmStudio.Core/Analysis/Demangler.cs`).
+
+**.NET base class library:**
+- **`System.IO.MemoryMappedFiles`** — the on-disk binary is read through a read-only memory-mapped view
+  (`MappedFile`), so only the pages actually touched fault into RAM and a multi-hundred-MB target never sits
+  on the managed heap.
+- **`NativeMemory.AlignedAlloc` + `Marshal`** — the x64 `CONTEXT` must be 16-byte aligned for
+  `GetThreadContext`; registers are read/written through `Marshal` at fixed offsets (`ThreadContextAccess`).
+- **`System.Text.Json`** — `.dsproj` projects and the exception-filter policy
+  (`%AppData%\DisasmStudio\exceptions.json`) are serialized with it.
+- **WPF (`PresentationFramework` / `WindowsBase`)** — the UI: the custom virtualized controls, the dark
+  theme, and per-monitor-v2 high-DPI handling.
 
 ## Build & run
 
