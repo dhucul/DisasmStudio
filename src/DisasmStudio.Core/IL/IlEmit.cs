@@ -178,13 +178,18 @@ internal static class ExprWriter
         return v < 0 ? ($"-0x{-v:X}", true) : ($"0x{v:X}", true);
     }
 
-    /// <summary>Append the analysis's call-site annotation (decoded API arguments) as a trailing
-    /// comment — reusing the work <c>ApiAnnotator</c> already did.</summary>
-    public static void Annotate(IlWriter w, Stmt s, IReadOnlyDictionary<ulong, string>? comments)
+    /// <summary>Append the analysis's inline annotation for this statement's instruction — a referenced
+    /// string (e.g. the address of a lookup table loaded by a <c>lea</c>) or a decoded API call-site (its
+    /// arguments) — as a trailing comment, reusing the annotations <c>AnalysisEngine</c>/<c>ApiAnnotator</c>
+    /// already keyed by instruction VA. <paramref name="seen"/> keeps it to one comment per source
+    /// instruction, since one instruction can lower to several statements (e.g. a <c>push</c>).</summary>
+    public static void Annotate(IlWriter w, Stmt s, IReadOnlyDictionary<ulong, string>? comments, HashSet<ulong>? seen = null)
     {
         if (comments is null || s.Va == 0) return;
-        bool isCall = s is CallStmt || (s is AssignStmt { Src: CallExpr });
-        if (isCall && comments.TryGetValue(s.Va, out var cmt)) { w.Sp(); w.T("// " + cmt, AsmTokenKind.Comment); }
+        if (s is SwitchTermStmt) return;   // a switch already prints its own "// N cases" comment
+        if (!comments.TryGetValue(s.Va, out var cmt)) return;
+        if (seen is not null && !seen.Add(s.Va)) return;
+        w.Sp(); w.T("// " + cmt, AsmTokenKind.Comment);
     }
 }
 
@@ -194,6 +199,7 @@ internal static class BlockEmitter
     public static List<DecompLine> Emit(LiftedFunction fn, IReadOnlyDictionary<ulong, string>? comments)
     {
         var w = new IlWriter();
+        var seen = new HashSet<ulong>();
         // header comment
         w.T($"// {fn.Name}", AsmTokenKind.Comment);
         w.Flush(fn.Va, 0);
@@ -205,7 +211,7 @@ internal static class BlockEmitter
             foreach (var s in b.Stmts)
             {
                 if (s is NopStmt) continue;
-                if (ExprWriter.WriteLeaf(w, s, c: false)) { ExprWriter.Annotate(w, s, comments); w.Flush(s.Va, 1); }
+                if (ExprWriter.WriteLeaf(w, s, c: false)) { ExprWriter.Annotate(w, s, comments, seen); w.Flush(s.Va, 1); }
             }
         }
         return w.Lines;
@@ -223,6 +229,7 @@ internal sealed class StructEmitter
     private readonly IReadOnlySet<ulong> _labels;
     private readonly LiftedFunction _fn;
     private readonly IReadOnlyDictionary<ulong, string>? _comments;
+    private readonly HashSet<ulong> _annotated = [];
 
     private StructEmitter(LiftedFunction fn, IReadOnlySet<ulong> labels, bool pseudoC, bool compilable,
         IReadOnlyDictionary<ulong, string>? comments)
@@ -317,7 +324,7 @@ internal sealed class StructEmitter
             case NopStmt: break;
 
             default:
-                if (ExprWriter.WriteLeaf(_w, s, _c, _comp)) { Semi(); ExprWriter.Annotate(_w, s, _comments); _w.Flush(s.Va, indent); }
+                if (ExprWriter.WriteLeaf(_w, s, _c, _comp)) { Semi(); ExprWriter.Annotate(_w, s, _comments, _annotated); _w.Flush(s.Va, indent); }
                 break;
         }
     }
