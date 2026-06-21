@@ -256,7 +256,7 @@
                                           Background="{StaticResource Outline}" />
                             <DockPanel Grid.Row="2">
                                 <Grid DockPanel.Dock="Top" Margin="8,6">
-                                    <TextBlock x:Name="ResHeader" Foreground="{StaticResource TextMuted}" FontSize="11"
+                                    <TextBlock x:Name="ResHeader" Foreground="{StaticResource TextSecondary}" FontSize="11.5"
                                                Text="Select a resource" VerticalAlignment="Center"
                                                TextTrimming="CharacterEllipsis" Margin="0,0,110,0" />
                                     <Button x:Name="ResSaveBtn" Content="Save resource…" Click="OnSaveResource"
