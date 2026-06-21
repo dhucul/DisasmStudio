@@ -37,6 +37,12 @@ public sealed class DebugSession
     public event Action<int>? Exited;
     public event Action<string>? Output;
 
+    /// <summary>Raised (on the UI thread) when a capture has finished draining and been torn down on the
+    /// engine thread — the resume-after path returns without a <see cref="Stopped"/> callback, so this is the
+    /// UI's signal to rebuild the final call graph from the now-complete edge set. Carries the finished
+    /// capture (already stopped, but its edges are retained) so the handler can snapshot them.</summary>
+    public event Action<FunctionCapture>? CaptureFinished;
+
     public DebugSession(Dispatcher ui, AnalysisResult staticResult)
     {
         _ui = ui; _static = staticResult;
@@ -68,6 +74,11 @@ public sealed class DebugSession
         {
             cap.StopCapture();
             Capture = null;
+            // The drain may have captured a few more edges after the UI's pre-stop graph build; tell the UI to
+            // rebuild from the now-complete (retained) edge set. Marshalled because the resume path returns below
+            // without ever reaching OnStoppedUi.
+            var finished = cap;
+            _ui.BeginInvoke(() => CaptureFinished?.Invoke(finished));
             if (cap.ResumeAfter && s.Reason == StopReason.Paused) { Engine.Go(); return; }
         }
 

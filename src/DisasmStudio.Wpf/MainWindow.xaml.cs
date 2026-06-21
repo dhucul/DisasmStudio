@@ -159,6 +159,7 @@ public partial class MainWindow : Window
         _dbg.Stopped += OnDbgStopped;
         _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); };   // no continue/step while running
         _dbg.Exited += OnDbgExited;
+        _dbg.CaptureFinished += OnCaptureFinished;
         _dbg.Output += m => StatusText.Text = m;
         Debug.SetSession(_dbg);
         DebugDock.Visibility = Visibility.Visible;
@@ -305,6 +306,14 @@ public partial class MainWindow : Window
         _dbg?.StopCapture();
         CaptureBtn.Content = "⦿ Capture";
         StatusText.Text = "Capture stopped.";
+    }
+
+    /// <summary>A capture finished draining on the engine thread (async stop). Rebuild the graph once more so it
+    /// includes the edges captured during the drain window. Skip if a new capture has since started (don't let a
+    /// stale finished-capture clobber the new one's graph/throttle state) or the session is gone.</summary>
+    private void OnCaptureFinished(DisasmStudio.Debug.FunctionCapture finished)
+    {
+        if (_dbg is { Capture: null }) RebuildCaptureGraph(finished);
     }
 
     /// <summary>Rebuild the Call Graph tree from the current capture edge set and record when (for throttling).
