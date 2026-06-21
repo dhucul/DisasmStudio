@@ -44,7 +44,6 @@ public partial class MainWindow : Window
     private readonly record struct DllDebugParams(string HostExe, string CommandLine, string? WorkingDir, string DllPath, uint BreakRva, bool BreakIsEntry);
 
     private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
-    private int _captureShown;               // records already pushed to the panel
     private int _captureEdges = -1;          // last call-graph edge total (rebuild only on change)
     private string? _captureLogPath;         // last chosen capture-log path (Save-As default)
     private readonly HashSet<ulong> _captureCommented = [];   // entries already annotated inline
@@ -275,7 +274,7 @@ public partial class MainWindow : Window
         var cap = _dbg!.StartCapture(funcVa, log, once, argsOnly, annotate);
         if (cap is null) { StatusText.Text = "Capture needs the program stopped at least once first."; return; }
 
-        _captureShown = 0; _captureEdges = -1; _captureCommented.Clear();
+        _captureEdges = -1; _captureCommented.Clear();
         Debug.ClearCapture(); Debug.SelectCaptureTab();
         CaptureBtn.Content = "⦿ Capturing…";
         _captureTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
@@ -284,7 +283,7 @@ public partial class MainWindow : Window
         string scope = funcVa == 0 ? "all functions" : cap.NameOf(funcVa);
         string freq = once ? "first call" : "every call";
         string args = argsOnly ? ", args only" : "";
-        StatusText.Text = $"Capturing {scope} ({freq}{args}) → {log}";
+        StatusText.Text = $"Capturing {scope} ({freq}{args}) → {cap.CurrentLogPart} (split into ~5 MB parts as it grows)";
         _dbg.Go();   // run so captures start flowing
     }
 
@@ -304,20 +303,23 @@ public partial class MainWindow : Window
         bool is32 = _dbg!.Engine.Is32;
 
         cap.FlushLog();   // periodically persist the buffered log so an abnormal exit loses little
-        var newRecs = cap.SnapshotFrom(_captureShown);   // only the records added since last tick
-        if (newRecs.Count > 0)
+        var recs = cap.DrainPending();   // records queued since the last tick (bounded; full history is in the file)
+        if (recs.Count > 0)
         {
-            Debug.AppendCapture(newRecs, 0, is32);
+            Debug.AppendCapture(recs, is32);   // bounded recent view — does not retain the whole capture
+            bool addedComment = false;
             if (_result?.Comments is IDictionary<ulong, string> comments)
-                foreach (var r in newRecs)
+                foreach (var r in recs)
                     if (!r.IsReturn && _captureCommented.Add(r.CalleeVa))
-                        comments[r.CalleeVa] = FunctionCapture.ArgComment(r, is32);
-            _captureShown += newRecs.Count;
-            Linear.Refresh();   // surface the new inline comments
+                        { comments[r.CalleeVa] = FunctionCapture.ArgComment(r, is32); addedComment = true; }
+            if (addedComment) Linear.Refresh();   // re-render only when a NEW inline comment actually appeared
         }
 
         // Rebuild the call graph only when its edge set actually changed (avoids copying it every tick).
         if (cap.EdgeCount != _captureEdges) { _captureEdges = cap.EdgeCount; Debug.RebuildCallGraph(cap.EdgesSnapshot(), cap.NameOf); }
+
+        // Live progress so the user sees it working, without the panel holding the whole capture.
+        if (cap.Active) StatusText.Text = $"Capturing… {cap.TotalCount:N0} events → {cap.CurrentLogPart ?? "(log unavailable)"}";
     }
 
     private void OnDbgStopped()

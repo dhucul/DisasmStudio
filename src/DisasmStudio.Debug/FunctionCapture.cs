@@ -34,7 +34,12 @@ public sealed class FunctionCapture
     private readonly HashSet<ulong> _entries = [];          // function-entry breakpoints we set
     private readonly HashSet<ulong> _retBps = [];           // return-address breakpoints we added
     private readonly Dictionary<(uint Tid, ulong Ret), Stack<CaptureRecord>> _pending = [];   // (thread, retAddr) -> calls awaiting return
-    private readonly List<CaptureRecord> _records = [];     // all records (guarded by _lock)
+    // Records awaiting display, drained by the UI each tick. Bounded — the complete capture is persisted to the
+    // log file, not held in memory; the panel only shows a recent window. Capped so a fast capture with a slow
+    // UI can't grow the heap (and slow the GUI) without bound.
+    private readonly Queue<CaptureRecord> _pendingUi = new();   // guarded by _lock
+    private long _total;                                        // running count of all records (cheap progress)
+    private const int MaxPendingUi = 5000;
     private readonly Dictionary<ulong, HashSet<ulong>> _edges = [];  // caller-func VA -> set of callee-func VAs
     private int _edgeCount;                                 // distinct caller->callee edges (cheap change check)
     private readonly bool _once;                            // capture each function once, then drop its entry bp
@@ -44,6 +49,13 @@ public sealed class FunctionCapture
     private readonly Func<ulong, bool>? _isReachable;       // gate (large images only): function is a real call target / symbol
     private readonly object _logLock = new();               // serialize log writes (engine) vs flush (UI)
     private StreamWriter? _log;
+    private string? _logBase, _logExt;     // "<dir>\<name>" and ".ext" for numbered parts
+    private int _logPart;                  // current part number (1-based)
+    private long _partBytes;               // approx bytes written to the current part (drives rotation)
+
+    /// <summary>Max size of each capture-log part before it rolls to the next numbered file. Default ~5 MB so
+    /// any editor can open a part without slowing down. Set before capture starts.</summary>
+    public long MaxPartBytes { get; set; } = 5L * 1024 * 1024;
 
     public bool Active { get; private set; }
     public bool Draining { get; private set; }      // stop requested; waiting for a frozen stop to remove bps
@@ -100,12 +112,28 @@ public sealed class FunctionCapture
     // memory reads + symbol/string lookups here are the dominant per-capture cost.
     private string Annotate(ulong v) => _annotate ? _deref.Describe(v) : "";
 
-    public IReadOnlyList<CaptureRecord> Snapshot() { lock (_lock) return _records.ToList(); }
+    /// <summary>Total records captured so far (calls + returns) — a cheap progress counter for the UI.</summary>
+    public long TotalCount { get { lock (_lock) return _total; } }
 
-    /// <summary>Copy only the records added since <paramref name="from"/> (the UI appends incrementally).</summary>
-    public IReadOnlyList<CaptureRecord> SnapshotFrom(int from)
+    /// <summary>Remove and return the records queued since the last drain. The UI shows a bounded recent
+    /// window and persists nothing itself — the complete capture lives in the log file.</summary>
+    public IReadOnlyList<CaptureRecord> DrainPending()
     {
-        lock (_lock) return from < _records.Count ? _records.GetRange(from, _records.Count - from) : [];
+        lock (_lock)
+        {
+            if (_pendingUi.Count == 0) return [];
+            var list = new List<CaptureRecord>(_pendingUi.Count);
+            while (_pendingUi.Count > 0) list.Add(_pendingUi.Dequeue());
+            return list;
+        }
+    }
+
+    /// <summary>Queue a record for the UI (bounded) and bump the running total. Caller must hold <c>_lock</c>.</summary>
+    private void EnqueueForUi(CaptureRecord r)
+    {
+        _total++;
+        _pendingUi.Enqueue(r);
+        if (_pendingUi.Count > MaxPendingUi) _pendingUi.Dequeue();   // drop the oldest; the log file still has it
     }
 
     public Dictionary<ulong, HashSet<ulong>> EdgesSnapshot()
@@ -120,8 +148,32 @@ public sealed class FunctionCapture
 
     public void SetLogFile(string path)
     {
-        // Buffered (no per-line flush) for speed; flushed on StopCapture. 64 KiB buffer.
-        try { _log = new StreamWriter(path, append: false, System.Text.Encoding.UTF8, 1 << 16) { AutoFlush = false }; }
+        // Split the capture into numbered, editor-friendly parts ("<name>.001<ext>", ".002<ext>", …) instead
+        // of one ever-growing file — so any editor can open a piece without choking. Each part rolls at
+        // MaxPartBytes. The chosen path supplies the directory, base name and extension.
+        try
+        {
+            string dir = Path.GetDirectoryName(path) ?? "";
+            _logExt = Path.GetExtension(path);                       // includes the dot, e.g. ".txt"
+            _logBase = Path.Combine(dir, Path.GetFileNameWithoutExtension(path));
+            _logPart = 0;
+            lock (_logLock) OpenNextPart();
+        }
+        catch { _log = null; }
+    }
+
+    /// <summary>Path of the part currently being written (for status), or null when no log is set.</summary>
+    public string? CurrentLogPart => _logBase is null ? null : $"{_logBase}.{_logPart:D3}{_logExt}";
+
+    /// <summary>Close the current part and open the next. Must be called holding <c>_logLock</c>.</summary>
+    private void OpenNextPart()
+    {
+        try { _log?.Flush(); _log?.Dispose(); } catch { }
+        _log = null;
+        _logPart++;
+        _partBytes = 0;
+        // Buffered (no per-line flush) for speed; flushed on FlushLog / StopCapture. 64 KiB buffer.
+        try { _log = new StreamWriter(CurrentLogPart!, append: false, Encoding.UTF8, 1 << 16) { AutoFlush = false }; }
         catch { _log = null; }
     }
 
@@ -255,7 +307,7 @@ public sealed class FunctionCapture
             // Capture-once: drop this function's entry breakpoint now (we are frozen, so removal is safe).
             // Hot functions then run at full speed, and this resume needs no single-step re-arm.
             if (_once && _entries.Remove(ea)) { try { _eng.RemoveBreakpoint(ea); } catch { } }
-            _records.Add(rec);
+            EnqueueForUi(rec);
         }
         WriteLog(rec);
         Captured?.Invoke();
@@ -293,7 +345,7 @@ public sealed class FunctionCapture
             RetDeref = Annotate(rv),
             Args = call.Args,
         };
-        lock (_lock) _records.Add(ret);
+        lock (_lock) EnqueueForUi(ret);
         WriteLog(ret);
         Captured?.Invoke();
     }
@@ -337,7 +389,18 @@ public sealed class FunctionCapture
     private void WriteLog(CaptureRecord r)
     {
         if (_log is null) return;
-        lock (_logLock) { try { _log?.WriteLine(Format(r, _eng.Is32)); } catch { } }
+        string line = Format(r, _eng.Is32);
+        lock (_logLock)
+        {
+            if (_log is null) return;
+            try
+            {
+                _log.WriteLine(line);
+                _partBytes += line.Length + Environment.NewLine.Length;   // approx (ASCII log) — drives rotation
+                if (_partBytes >= MaxPartBytes) OpenNextPart();           // roll to the next editor-friendly part
+            }
+            catch { }
+        }
     }
 
     /// <summary>Flush the buffered log (called periodically so abnormal termination loses little).</summary>

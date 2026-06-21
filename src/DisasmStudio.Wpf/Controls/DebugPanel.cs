@@ -131,13 +131,21 @@ public sealed class DebugPanel : Grid
 
     public void SelectCaptureTab() { foreach (TabItem t in _tabs.Items) if ((string)t.Header == "Capture") { _tabs.SelectedItem = t; break; } }
 
-    /// <summary>Append capture records [<paramref name="from"/>..] as log lines; returns the new total shown.</summary>
-    public void AppendCapture(IReadOnlyList<CaptureRecord> recs, int from, bool is32)
+    /// <summary>Most recent capture rows kept in the panel — a live "it's working" view, not the whole capture
+    /// (the complete log is on disk). Bounded so a huge capture can't bloat the list and slow the GUI.</summary>
+    private const int MaxCaptureRows = 200;
+
+    /// <summary>Show a bounded recent window of capture records. Only the tail is added and the list is trimmed
+    /// to <see cref="MaxCaptureRows"/>, so the panel stays small and responsive no matter how large the capture.</summary>
+    public void AppendCapture(IReadOnlyList<CaptureRecord> recs, bool is32)
     {
+        if (recs.Count == 0) return;
         bool atEnd = _capture.Items.Count == 0 || _capture.SelectedIndex < 0;
-        for (int i = from; i < recs.Count; i++)
+        int start = Math.Max(0, recs.Count - MaxCaptureRows);   // only the tail can survive the trim anyway
+        for (int i = start; i < recs.Count; i++)
             _capture.Items.Add(new CaptureItem { Va = recs[i].CalleeVa, Text = FunctionCapture.Format(recs[i], is32) });
-        if (atEnd && _capture.Items.Count > 0) _capture.ScrollIntoView(_capture.Items[^1]);
+        while (_capture.Items.Count > MaxCaptureRows) _capture.Items.RemoveAt(0);
+        if (atEnd) _capture.ScrollIntoView(_capture.Items[^1]);
     }
 
     public void RebuildCallGraph(Dictionary<ulong, HashSet<ulong>> edges, Func<ulong, string> nameOf)
