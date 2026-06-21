@@ -18,6 +18,7 @@ public sealed class FullMemoryImage(DebuggerEngine eng) : IBinaryImage
     public string ArchName => eng.Is32 ? "x86" : "x64";
     public ulong ImageBase => 0;
     public ulong EntryVa => 0;
+    public bool IsDll => false;   // the whole address space, not a single module
     public IReadOnlyList<Section> Sections => [];
     public IReadOnlyList<NamedSymbol> Symbols => [];
     public IReadOnlyList<ImportEntry> Imports => [];

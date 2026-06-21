@@ -49,6 +49,12 @@ public sealed class DebugSession
     public void Launch(string path) => Engine.Launch(path);
     public void Attach(uint pid) => Engine.Attach(pid);
 
+    /// <summary>Debug a DLL by hosting it in <paramref name="hostExe"/> (rundll32 or a custom host) which
+    /// LoadLibrary's it; the engine breaks at <paramref name="breakRva"/> (the DLL's DllMain or a chosen
+    /// export) once it maps. <paramref name="breakIsEntry"/> marks a DllMain break (EntryPoint reason).</summary>
+    public void LaunchDll(string hostExe, string commandLine, string? workingDir, string targetDllPath, uint breakRva, bool breakIsEntry)
+        => Engine.LaunchHostingDll(hostExe, commandLine, workingDir, targetDllPath, breakRva, breakIsEntry);
+
     private void OnStopped(StopInfo s)
     {
         // Capture runs on the engine thread: one of its breakpoints records + auto-resumes (no UI stop).
@@ -70,14 +76,20 @@ public sealed class DebugSession
 
     private void OnStoppedUi(StopInfo s)
     {
-        LiveResult ??= LiveAnalysis.Build(Engine, _static).Result;
-        LiveDecoder ??= new LiveDisassembler(Engine);
+        // Build the rebased live analysis once the debugged module's base is known. For a launched EXE that is
+        // the process base, set at process-create (so true on the first stop); for a DLL hosted in an EXE the
+        // slide is only known when the DLL maps, so Engine.ImageBase stays 0 until then — defer the build.
+        if (LiveResult is null && Engine.ImageBase != 0)
+        {
+            LiveResult = LiveAnalysis.Build(Engine, _static).Result;
+            LiveDecoder = new LiveDisassembler(Engine);
+        }
         Registers = Engine.GetRegisters();
         CurrentIp = Registers?.Ip ?? s.Address;
         LastReason = s.Reason;
         LastExceptionCode = s.ExceptionCode;
         IsStopped = true;
-        Deref = new DereferenceResolver(Engine, LiveResult!.Names, Engine.Modules);
+        if (LiveResult is not null) Deref = new DereferenceResolver(Engine, LiveResult.Names, Engine.Modules);
         Stopped?.Invoke();
     }
 

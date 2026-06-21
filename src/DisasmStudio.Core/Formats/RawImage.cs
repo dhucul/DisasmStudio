@@ -18,6 +18,7 @@ public sealed class RawImage : IBinaryImage, IDisposable
     public string ArchName => Bitness == 64 ? "x64" : "x86";
     public ulong ImageBase { get; }
     public ulong EntryVa => ImageBase;
+    public bool IsDll => false;
     public IReadOnlyList<Section> Sections { get; }
     public IReadOnlyList<NamedSymbol> Symbols => [];
     public IReadOnlyList<ImportEntry> Imports => [];

@@ -23,6 +23,7 @@ public sealed class ElfImage : IBinaryImage, IDisposable
     public string ArchName { get; }
     public ulong ImageBase => 0;
     public ulong EntryVa { get; }
+    public bool IsDll => false;
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => [];

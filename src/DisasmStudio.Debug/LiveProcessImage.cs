@@ -45,6 +45,7 @@ public sealed class LiveProcessImage : IBinaryImage
     public string ArchName => _eng.Is32 ? "x86" : "x64";
     public ulong ImageBase => _eng.ImageBase;
     public ulong EntryVa => _static.EntryVa + Slide;
+    public bool IsDll => _static.IsDll;
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => _imports;

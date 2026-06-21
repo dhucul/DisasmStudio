@@ -44,6 +44,7 @@ public sealed class PeImage : IBinaryImage, IDisposable
     public string ArchName => Machine switch { 0x014C => "x86", 0x8664 => "x64", 0xAA64 => "arm64", _ => $"0x{Machine:X}" };
     public ulong ImageBase => Is64Bit ? _f.ReadU64(OptHeader + 24) : _f.ReadU32(OptHeader + 28);
     public ulong EntryVa => ImageBase + _f.ReadU32(OptHeader + 16);
+    public bool IsDll => (_f.ReadU16(FileHeader + 18) & 0x2000) != 0;   // COFF Characteristics: IMAGE_FILE_DLL
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => _imports;

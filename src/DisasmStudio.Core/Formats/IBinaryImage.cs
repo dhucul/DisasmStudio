@@ -21,6 +21,10 @@ public interface IBinaryImage
     /// <summary>Entry point VA, or 0 if the format has none.</summary>
     ulong EntryVa { get; }
 
+    /// <summary>True if this is a DLL (PE IMAGE_FILE_DLL characteristic). DLLs can't be launched
+    /// directly; the debugger hosts them in an EXE. Always false for ELF/Raw.</summary>
+    bool IsDll { get; }
+
     IReadOnlyList<Section> Sections { get; }
     IReadOnlyList<NamedSymbol> Symbols { get; }
     IReadOnlyList<ImportEntry> Imports { get; }

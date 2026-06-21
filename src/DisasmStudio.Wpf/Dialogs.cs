@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -10,6 +11,17 @@ internal static class Dialogs
 {
     private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x16, 0x1B, 0x22));
     private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xE6, 0xEA, 0xF0));
+
+    /// <summary>How to host a DLL under the debugger: the host EXE that loads it, the full command line
+    /// (incl. argv0), the working directory, and the chosen export's static VA to break at (null = "just
+    /// load — break at DllMain").</summary>
+    public sealed record DebugDllOptions(string HostExe, string CommandLine, string? WorkingDir,
+                                         ulong? ChosenExportVa);
+
+    private const string DllJustLoad = "(just load — break at DllMain)";
+    // rundll32 won't LoadLibrary without an entry token, so "just load" passes a harmless probe name instead:
+    // rundll32 LoadLibrary's the DLL (DllMain runs → the debugger breaks) and never calls a real export.
+    private const string DllLoadProbe = "DisasmStudioLoadProbe";
 
     /// <summary>Ask the base VA and bitness for opening a flat/raw blob.</summary>
     public static (ulong BaseVa, int Bitness)? AskRawOptions(Window owner)
@@ -55,6 +67,97 @@ internal static class Dialogs
         bool ok = ShowModal(owner, "Patch instruction", panel, box, 480);
         return ok ? (box.Text, nop.IsChecked == true) : null;
     }
+
+    /// <summary>Ask how to host a DLL under the debugger: which EXE loads it (rundll32 by default, or a
+    /// custom host), an optional export (from the DLL's export table), and command-line arguments. If an
+    /// export is chosen the debugger breaks at it (rundll32 calls it; a custom host is presumably its
+    /// consumer); otherwise it breaks at DllMain. A typed #ordinal has no resolvable address, so it falls
+    /// back to a DllMain break. Returns the host + command line, or null if cancelled.</summary>
+    public static DebugDllOptions? AskDebugDll(Window owner, string dllPath, int bitness,
+                                               IReadOnlyList<(string Name, ulong Va)> exports)
+    {
+        var mono = new FontFamily("Cascadia Mono, Consolas");
+
+        var hostBox = new TextBox { Text = Rundll32Path(bitness), FontFamily = mono };
+        var browse = new Button { Content = "Browse…", MinWidth = 76, Margin = new Thickness(8, 0, 0, 0) };
+        browse.Click += (_, _) =>
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Choose host EXE",
+                Filter = "Executable (*.exe)|*.exe|All files (*.*)|*.*",
+            };
+            if (dlg.ShowDialog(owner) == true) hostBox.Text = dlg.FileName;
+        };
+        var hostRow = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+        DockPanel.SetDock(browse, Dock.Right);
+        hostRow.Children.Add(browse);
+        hostRow.Children.Add(hostBox);
+
+        var exportBox = new ComboBox { IsEditable = true, FontFamily = mono, Margin = new Thickness(0, 0, 0, 10) };
+        exportBox.Items.Add(DllJustLoad);
+        foreach (var (name, _) in exports) exportBox.Items.Add(name);
+        exportBox.SelectedIndex = 0;
+
+        var argsBox = new TextBox { FontFamily = mono };
+
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label("Host EXE (rundll32 loads the DLL; or browse to a custom host)"));
+        panel.Children.Add(hostRow);
+        panel.Children.Add(Label("Export to break at (or “just load” to break at DllMain; #N for an ordinal)"));
+        panel.Children.Add(exportBox);
+        panel.Children.Add(Label("Command-line arguments (optional)"));
+        panel.Children.Add(argsBox);
+
+        bool ok = ShowModal(owner, "Debug DLL", panel, hostBox, 460);
+        if (!ok) return null;
+
+        string hostExe = hostBox.Text.Trim();
+        string exportText = (exportBox.Text ?? "").Trim();
+        string args = argsBox.Text.Trim();
+        bool justLoad = exportText.Length == 0 || exportText == DllJustLoad;
+
+        // Map a chosen export name back to its static VA (so we can break there if the DLL has no DllMain).
+        // An ordinal token (#N) or an unknown name has no VA — leave null and rely on DllMain / the load stop.
+        ulong? chosenVa = null;
+        if (!justLoad)
+            foreach (var (name, va) in exports)
+                if (string.Equals(name, exportText, StringComparison.Ordinal)) { chosenVa = va; break; }
+
+        bool isRundll32 = string.Equals(Path.GetFileName(hostExe), "rundll32.exe", StringComparison.OrdinalIgnoreCase);
+        string cmd;
+        if (isRundll32)
+        {
+            // rundll32 syntax: rundll32.exe "<dll>",<export>  — quote only the path, no space after the comma.
+            // "just load" uses the probe token (see DllLoadProbe) so rundll32 still LoadLibrary's the DLL and
+            // DllMain runs; an explicit export (or #ordinal) is forwarded as-is.
+            string token = justLoad ? DllLoadProbe : exportText;
+            cmd = Quote(hostExe) + " " + $"{Quote(dllPath)},{token}" + (args.Length == 0 ? "" : " " + args);
+        }
+        else
+        {
+            // A custom host loads the DLL itself; we only forward the user's args.
+            cmd = Quote(hostExe) + (args.Length == 0 ? "" : " " + args);
+        }
+
+        string? workDir = null;
+        try { workDir = Path.GetDirectoryName(Path.GetFullPath(dllPath)); } catch { /* keep null */ }
+
+        return new DebugDllOptions(hostExe, cmd, workDir, chosenVa);
+    }
+
+    /// <summary>The bitness-matched OS rundll32. The app runs 64-bit, so System32 is the real 64-bit dir
+    /// (no WOW64 redirection) and SysWOW64 is spelled literally for a 32-bit DLL.</summary>
+    private static string Rundll32Path(int bitness)
+    {
+        string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        string dir = bitness == 32 ? "SysWOW64" : "System32";
+        string p = Path.Combine(win, dir, "rundll32.exe");
+        return File.Exists(p) ? p : Path.Combine(win, "System32", "rundll32.exe");
+    }
+
+    private static string Quote(string s) =>
+        s.Length > 0 && !s.StartsWith('"') && s.Contains(' ') ? $"\"{s}\"" : s;
 
     /// <summary>Ask for a process id (decimal) to attach the debugger to.</summary>
     public static uint? AskPid(Window owner)

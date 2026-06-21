@@ -83,6 +83,13 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   **registers** (editable, with x64dbg-style **dereferencing** — `r9 → start`, `rcx → "C:\\…"`),
   the **stack** and a **memory dump** (both dereferenced), the **call stack**, and breakpoints,
   threads and modules. 32-bit targets are debugged from the 64-bit host via WOW64.
+- **Debug a DLL:** a DLL can't be launched on its own, so pressing Run on a loaded DLL opens a small
+  *Debug DLL* dialog that hosts it in an EXE (the way x64dbg uses a loaddll stub). The default host is
+  the bitness-matched OS `rundll32.exe`; you can browse to a custom host EXE (e.g. the real consumer
+  app) and pass command-line arguments, and optionally pick an exported function to break at. When the DLL
+  maps into the host the debugger retargets to it — `ImageBase`/disassembly rebased to the DLL's real
+  load address — and breaks at the chosen export (or, by default, the DLL's DllMain), from where everything above (stepping,
+  breakpoints, registers, stack) works on the DLL itself.
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
 - **Help:** a *Help ▾* toolbar menu with a grouped keyboard-shortcut reference (also opened with **F1**) —

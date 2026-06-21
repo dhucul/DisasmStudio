@@ -219,4 +219,37 @@ internal static class Native
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "K32GetModuleFileNameExW")]
     public static extern uint GetModuleFileNameEx(IntPtr hProcess, ulong hModule, char[] lpFilename, uint nSize);
+
+    // Resolve a path from a file handle — reliable at LOAD_DLL time (when GetModuleFileNameEx often isn't,
+    // since the loader hasn't yet registered the module). dwFlags 0 = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS.
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetFinalPathNameByHandleW(IntPtr hFile, char[] lpszFilePath, uint cchFilePath, uint dwFlags);
+
+    // File-identity match for a hosted DLL: two handles refer to the same file iff their
+    // (dwVolumeSerialNumber, nFileIndexHigh, nFileIndexLow) match — immune to casing / 8.3 / subst / symlink
+    // and to a same-named DLL loaded from a different directory.
+    public const uint FILE_READ_ATTRIBUTES = 0x80;
+    public const uint FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2, FILE_SHARE_DELETE = 0x4;
+    public const uint OPEN_EXISTING = 3;
+    public static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BY_HANDLE_FILE_INFORMATION
+    {
+        public uint dwFileAttributes;
+        public uint ftCreationLow, ftCreationHigh;
+        public uint ftLastAccessLow, ftLastAccessHigh;
+        public uint ftLastWriteLow, ftLastWriteHigh;
+        public uint dwVolumeSerialNumber;
+        public uint nFileSizeHigh, nFileSizeLow;
+        public uint nNumberOfLinks;
+        public uint nFileIndexHigh, nFileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetFileInformationByHandle(IntPtr hFile, out BY_HANDLE_FILE_INFORMATION info);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+        IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 }

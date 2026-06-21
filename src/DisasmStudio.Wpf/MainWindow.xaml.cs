@@ -37,7 +37,11 @@ public partial class MainWindow : Window
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
     private bool _restartPending;           // relaunch the target once the current debuggee has exited
+    private DllDebugParams? _dllDebug;      // set for a hosted-DLL session (null for an EXE); reused on Restart
     private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
+
+    // How the current DLL session is hosted, so Restart can relaunch it identically.
+    private readonly record struct DllDebugParams(string HostExe, string CommandLine, string? WorkingDir, string DllPath, uint BreakRva, bool BreakIsEntry);
 
     private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
     private int _captureShown;               // records already pushed to the panel
@@ -114,6 +118,27 @@ public partial class MainWindow : Window
         if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return; }   // continue only from a stop (else it skips the next stop)
         if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_image.IsDll)
+        {
+            // A DLL can't be launched directly — host it in an EXE (rundll32 by default, or a custom host)
+            // that LoadLibrary's it, and break at the DLL's DllMain (or a chosen export) once it maps.
+            var exports = _image.Symbols.Where(s => s.Kind == NamedSymbolKind.Export)
+                                        .Select(s => (s.Name, s.Va)).OrderBy(e => e.Name, StringComparer.Ordinal).ToList();
+            if (Dialogs.AskDebugDll(this, _image.FilePath, _image.Bitness, exports) is not { } opt) return;
+
+            // A chosen export → break at that export (rundll32 calls it; a custom host is presumably the real
+            // consumer that calls it). "Just load" → break at DllMain (RVA 0 = no DllMain → stop at the load event).
+            bool breakIsEntry = opt.ChosenExportVa is null;   // DllMain → EntryPoint reason; an export → Breakpoint
+            uint breakRva = opt.ChosenExportVa is ulong exportVa
+                ? (uint)(exportVa - _image.ImageBase)
+                : (uint)(_image.EntryVa - _image.ImageBase);
+
+            var p = new DllDebugParams(opt.HostExe, opt.CommandLine, opt.WorkingDir, _image.FilePath, breakRva, breakIsEntry);
+            _dllDebug = p;
+            BeginDebug(d => d.LaunchDll(p.HostExe, p.CommandLine, p.WorkingDir, p.DllPath, p.BreakRva, p.BreakIsEntry));
+            return;
+        }
+        _dllDebug = null;
         BeginDebug(d => d.Launch(_image.FilePath));
     }
 
@@ -349,7 +374,10 @@ public partial class MainWindow : Window
         {
             _restartPending = false;
             var img = _image;
-            if (img is { Format: BinaryFormat.Pe }) Dispatcher.BeginInvoke(() => BeginDebug(d => d.Launch(img.FilePath)));
+            if (_dllDebug is { } p)
+                Dispatcher.BeginInvoke(() => BeginDebug(d => d.LaunchDll(p.HostExe, p.CommandLine, p.WorkingDir, p.DllPath, p.BreakRva, p.BreakIsEntry)));
+            else if (img is { Format: BinaryFormat.Pe })
+                Dispatcher.BeginInvoke(() => BeginDebug(d => d.Launch(img.FilePath)));
         }
     }
 
@@ -733,6 +761,7 @@ public partial class MainWindow : Window
             // A new file: wipe the old session. A re-analyse after a patch/undo keeps the current
             // lists and navigation visible until the new results replace them (no empty flash).
             _result = null;
+            _dllDebug = null;   // a stale DLL-host config must not leak into a later EXE's Restart
             _nav.Reset();
             _changeStack.Clear();
             ClearLists();

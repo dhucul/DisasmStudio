@@ -20,10 +20,24 @@ public sealed class DebuggerEngine
     public event Action? ModulesChanged;
     public event Action? ThreadsChanged;
 
+    /// <summary>Raised on the debug-loop thread when the target DLL (hosted in an EXE) is mapped — i.e. when
+    /// <see cref="ImageBase"/> becomes the DLL's real base. Lets the UI build the rebased live analysis with
+    /// the correct slide, since for a hosted DLL the launched process is the host, not the debugged module.</summary>
+    public event Action? TargetLoaded;
+
     private Thread? _thread;
     private string? _launchPath;
     private uint _attachPid;
     private bool _attached;
+
+    // ---- hosting a DLL: launch a host EXE (rundll32 / custom) that LoadLibrary's the target DLL ----
+    private bool _hostingDll;
+    private string? _hostExe, _hostCmdLine, _hostWorkingDir;
+    private string? _targetDllPath;   // Path.GetFullPath of the DLL; path fallback when file identity is unavailable
+    private (uint Vol, uint Hi, uint Lo)? _targetFileId;   // authoritative match: volume serial + file index
+    private uint _breakRva;           // DllMain RVA, else the chosen export RVA, else 0 (stop at the load event)
+    private bool _breakIsEntry;       // the hosted break is the DLL entry (DllMain) → EntryPoint reason; an export → Breakpoint
+    private bool _targetLoaded;
 
     private IntPtr _proc;
     private uint _pid;
@@ -88,6 +102,24 @@ public sealed class DebuggerEngine
         _thread.Start();
     }
 
+    /// <summary>Launch <paramref name="hostExe"/> (rundll32 or a custom host) under the debugger so it loads
+    /// the target DLL. When the DLL maps, <see cref="ImageBase"/>/<see cref="EntryPoint"/> are set to the
+    /// DLL (not the host) and a temporary breakpoint is planted at <paramref name="breakRva"/> (the DLL's
+    /// DllMain, or a chosen export), so the first stop is inside the DLL. <paramref name="breakRva"/> of 0
+    /// (no DllMain / no chosen export) stops at the load event instead. <paramref name="breakIsEntry"/> is
+    /// true when the break is the DLL entry (DllMain) — it then surfaces as <see cref="StopReason.EntryPoint"/>;
+    /// a break at a chosen export surfaces as a normal <see cref="StopReason.Breakpoint"/>.</summary>
+    public void LaunchHostingDll(string hostExe, string commandLine, string? workingDir,
+                                 string targetDllPath, uint breakRva, bool breakIsEntry)
+    {
+        _hostExe = hostExe; _hostCmdLine = commandLine; _hostWorkingDir = workingDir;
+        _targetDllPath = SafeFullPath(targetDllPath);
+        _targetFileId = FileIdentityOfPath(_targetDllPath);
+        _breakRva = breakRva; _breakIsEntry = breakIsEntry; _hostingDll = true; _attached = false;
+        _thread = new Thread(DebugLoop) { IsBackground = true, Name = "Debugger" };
+        _thread.Start();
+    }
+
     private bool StartTarget()
     {
         if (_attached)
@@ -98,8 +130,13 @@ public sealed class DebuggerEngine
             return true;
         }
         var si = new Native.STARTUPINFO { cb = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Native.STARTUPINFO>() };
-        bool ok = Native.CreateProcessW(_launchPath, null, IntPtr.Zero, IntPtr.Zero, false,
-            Native.DEBUG_ONLY_THIS_PROCESS | Native.CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out var pi);
+        // Hosting a DLL: run the host EXE with the composed command line (which already starts with argv0, as
+        // CreateProcessW requires when lpApplicationName is set). Otherwise launch the target path directly.
+        string? appName = _hostingDll ? _hostExe        : _launchPath;
+        string? cmdLine = _hostingDll ? _hostCmdLine    : null;
+        string? workDir = _hostingDll ? _hostWorkingDir : null;
+        bool ok = Native.CreateProcessW(appName, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
+            Native.DEBUG_ONLY_THIS_PROCESS | Native.CREATE_NEW_CONSOLE, IntPtr.Zero, workDir, ref si, out var pi);
         if (!ok) { Output?.Invoke($"CreateProcess failed ({Marshal_LastError()})"); return false; }
         _pid = pi.dwProcessId;
         Native.CloseHandle(pi.hThread);
@@ -148,17 +185,24 @@ public sealed class DebuggerEngine
             {
                 var info = ev.CreateProcess;
                 _proc = info.hProcess;
-                ImageBase = info.lpBaseOfImage;
-                EntryPoint = info.lpStartAddress;
                 Native.IsWow64Process(_proc, out bool wow);
-                Is32 = wow;
-                lock (_lock)
+                Is32 = wow;   // host bitness == DLL bitness (rundll32 is bitness-matched), so this is correct
+                lock (_lock) _threads[ev.dwThreadId] = info.hThread;
+                if (!_hostingDll)
                 {
-                    _threads[ev.dwThreadId] = info.hThread;
-                    _modules[ImageBase] = new ModuleInfo(ImageBase, ModulePath(ImageBase) ?? _launchPath ?? "(target)");
+                    ImageBase = info.lpBaseOfImage;
+                    EntryPoint = info.lpStartAddress;
+                    lock (_lock) _modules[ImageBase] = new ModuleInfo(ImageBase, ModulePath(ImageBase) ?? _launchPath ?? "(target)");
+                    if (!_attached) AddTempBp(EntryPoint);   // launched: break at the entry point
+                }
+                else
+                {
+                    // The launched process is the HOST, not the debugged module: record it but leave ImageBase
+                    // (and the entry breakpoint) for the target DLL's LOAD_DLL event below.
+                    ulong hb = info.lpBaseOfImage;
+                    lock (_lock) _modules[hb] = new ModuleInfo(hb, ModulePath(hb) ?? _hostExe ?? "(host)");
                 }
                 ThreadsChanged?.Invoke(); ModulesChanged?.Invoke();
-                if (!_attached) AddTempBp(EntryPoint);   // launched: break at the entry point
                 if (info.hFile != IntPtr.Zero) Native.CloseHandle(info.hFile);   // the debugger owns the image file handle
                 return false;
             }
@@ -175,9 +219,28 @@ public sealed class DebuggerEngine
             case Native.LOAD_DLL_DEBUG_EVENT:
             {
                 ulong b = ev.LoadDll.lpBaseOfDll;
-                lock (_lock) _modules[b] = new ModuleInfo(b, ModulePath(b) ?? $"module_{b:X}");
-                if (ev.LoadDll.hFile != IntPtr.Zero) Native.CloseHandle(ev.LoadDll.hFile);   // close the DLL file handle
+                // Resolve the path from the event's file handle: at LOAD_DLL time the loader hasn't registered
+                // the module yet, so GetModuleFileNameEx usually returns null here (use it only as a fallback).
+                string? path = PathFromFileHandle(ev.LoadDll.hFile) ?? ModulePath(b);
+                lock (_lock) _modules[b] = new ModuleInfo(b, path ?? $"module_{b:X}");
                 ModulesChanged?.Invoke();
+
+                // Hosting a DLL: when the target maps, treat it as the debugged module — set ImageBase/EntryPoint
+                // to the DLL (so the live view rebases by the DLL's real ASLR slide) and break at DllMain.
+                bool matched = _hostingDll && !_targetLoaded && IsTargetModule(ev.LoadDll.hFile, path);
+                if (ev.LoadDll.hFile != IntPtr.Zero) Native.CloseHandle(ev.LoadDll.hFile);   // close after using it
+                if (matched)
+                {
+                    _targetLoaded = true;
+                    ImageBase = b;
+                    ulong entry = _breakRva != 0 ? b + _breakRva : 0;
+                    EntryPoint = entry;
+                    TargetLoaded?.Invoke();   // bridge builds the rebased live analysis now ImageBase is the DLL
+                    if (entry != 0) { AddTempBp(entry); return false; }   // run on; stop AT DllMain when it's reached
+                    // No DllMain and no chosen export: stop right here so the user can set breakpoints and Go.
+                    Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, b, 0));
+                    return true;
+                }
                 return false;
             }
             case Native.UNLOAD_DLL_DEBUG_EVENT:
@@ -187,6 +250,8 @@ public sealed class DebuggerEngine
             case Native.OUTPUT_DEBUG_STRING_EVENT:
                 return false;
             case Native.EXIT_PROCESS_DEBUG_EVENT:
+                if (_hostingDll && !_targetLoaded)
+                    Output?.Invoke("Target DLL was never loaded by the host (wrong-bitness rundll32, bad path, or the host didn't load it).");
                 _ended = true;
                 Exited?.Invoke((int)ev.ExitProcess.dwExitCode);
                 return false;
@@ -210,7 +275,9 @@ public sealed class DebuggerEngine
             if (RemoveTempBpIfPresent(addr))
             {
                 SetIp(hThread, addr);   // _reArmOnNextStop is handled centrally in the loop's stop branch
-                bool entry = !_attached && addr == EntryPoint && !_seenEntry;
+                // EntryPoint reason for a launched EXE's entry or a hosted DLL's DllMain; a hosted break planted
+                // at a chosen export (breakIsEntry == false) is a normal Breakpoint.
+                bool entry = !_attached && addr == EntryPoint && !_seenEntry && (!_hostingDll || _breakIsEntry);
                 _seenEntry = true;
                 Stopped?.Invoke(new StopInfo(entry ? StopReason.EntryPoint : StopReason.Breakpoint, ev.dwThreadId, addr, code));
                 return true;
@@ -232,7 +299,9 @@ public sealed class DebuggerEngine
                 if (_attached) { Stopped?.Invoke(new StopInfo(StopReason.Attached, ev.dwThreadId, addr, code)); return true; }
                 // Optionally stop at the loader breakpoint of the target's bitness (the matching loader has
                 // mapped the modules) instead of skipping to the entry point, so capture can begin earlier.
-                if (StopAtLoaderBreakpoint && isWx86 == Is32)
+                // When hosting a DLL the target isn't mapped yet (ImageBase is still 0), so always run on to
+                // the DLL's LOAD_DLL/DllMain stop rather than surfacing the host's loader breakpoint.
+                if (StopAtLoaderBreakpoint && !_hostingDll && isWx86 == Is32)
                 {
                     RemoveTempBpIfPresent(EntryPoint);   // breaking earlier — drop the redundant entry-point stop
                     _seenEntry = true;
@@ -643,5 +712,58 @@ public sealed class DebuggerEngine
         var buf = new char[260];
         uint n = Native.GetModuleFileNameEx(_proc, baseAddr, buf, (uint)buf.Length);
         return n > 0 ? new string(buf, 0, (int)n) : null;
+    }
+
+    /// <summary>The DOS path behind a file handle (the one a LOAD_DLL event hands us), or null. Reliable at
+    /// load time, unlike GetModuleFileNameEx. Strips the \\?\ extended-length prefix for normal comparison.</summary>
+    private static string? PathFromFileHandle(IntPtr hFile)
+    {
+        if (hFile == IntPtr.Zero) return null;
+        var buf = new char[600];
+        uint n = Native.GetFinalPathNameByHandleW(hFile, buf, (uint)buf.Length, 0);
+        if (n == 0 || n > buf.Length) return null;
+        string s = new(buf, 0, (int)n);
+        if (s.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) return @"\\" + s[8..];
+        if (s.StartsWith(@"\\?\", StringComparison.Ordinal)) return s[4..];
+        return s;
+    }
+
+    /// <summary>True if the module just loaded (handle from the LOAD_DLL event, plus its resolved path) is the
+    /// target DLL. Prefers file identity (volume serial + file index) — authoritative and immune to casing /
+    /// 8.3 / subst / symlink and to a same-named DLL loaded from another directory. Falls back to a path/
+    /// filename compare only when an identity can't be obtained for either side.</summary>
+    private bool IsTargetModule(IntPtr moduleFile, string? modulePath)
+    {
+        if (_targetFileId is { } want && FileIdentity(moduleFile) is { } got)
+            return got == want;   // authoritative
+        return modulePath is not null && PathMatchesTarget(modulePath);
+    }
+
+    private bool PathMatchesTarget(string modulePath)
+    {
+        if (_targetDllPath is null) return false;
+        if (string.Equals(SafeFullPath(modulePath), _targetDllPath, StringComparison.OrdinalIgnoreCase)) return true;
+        return string.Equals(System.IO.Path.GetFileName(modulePath), System.IO.Path.GetFileName(_targetDllPath),
+                             StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static (uint Vol, uint Hi, uint Lo)? FileIdentity(IntPtr hFile)
+    {
+        if (hFile == IntPtr.Zero || !Native.GetFileInformationByHandle(hFile, out var bi)) return null;
+        return (bi.dwVolumeSerialNumber, bi.nFileIndexHigh, bi.nFileIndexLow);
+    }
+
+    private static (uint Vol, uint Hi, uint Lo)? FileIdentityOfPath(string path)
+    {
+        IntPtr h = Native.CreateFileW(path, Native.FILE_READ_ATTRIBUTES,
+            Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE | Native.FILE_SHARE_DELETE,
+            IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero);
+        if (h == Native.INVALID_HANDLE_VALUE) return null;
+        try { return FileIdentity(h); } finally { Native.CloseHandle(h); }
+    }
+
+    private static string SafeFullPath(string path)
+    {
+        try { return System.IO.Path.GetFullPath(path); } catch { return path; }
     }
 }
