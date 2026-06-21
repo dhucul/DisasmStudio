@@ -19,6 +19,17 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   `.text` — int3 padding, jump tables, literals — renders as data (`db`/`dd`/`dq`/strings) instead of
   disassembled junk. Typically ~97% code, ~3% data. The same pass discovers indirect-only functions
   (e.g. COM vtable methods) that have no direct callers.
+- **Optional sections (resources, header, data) — IDA-style:** by default only code lands in the
+  listing. When you open a file (or later, from the **Sections** panel) you can fold any non-executable
+  section — `.rsrc`, `.data`, `.rdata`, `.reloc`, `.pdata` — and the **PE header** into the linear view,
+  where they render as data (`db`/`dd`/`dq` and recognised strings) in address order, just like IDA.
+  The choice is per-section, remembered in the `.dsproj`, and toggling a section re-analyses in place.
+- **Resource browser:** a **Resources** side tab parses the PE resource directory (`.rsrc`) into the
+  familiar type → name/id → language tree. Selecting a leaf previews it by type — manifests/HTML as
+  text, **version info** as parsed file/product versions + string fields, **string tables** decoded,
+  and **bitmaps/icons** rendered as images (the packed DIB is wrapped into a BMP/ICO for display);
+  anything else falls back to a hex dump. *Save resource…* writes the raw bytes, and double-clicking a
+  leaf navigates the other views to its address.
 - **Graph view:** per-function control-flow graph — basic-block cards of coloured instructions with
   colour-coded edges (taken / fall-through / jump / switch-case). Pan (drag), zoom (Ctrl+wheel),
   fit-to-view, click-to-sync with the linear view.
@@ -60,7 +71,8 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   `RegOpenKeyExW(hKey, lpSubKey=L"Software\\…", samDesired=KEY_READ)`,
   `VirtualAlloc(…, flAllocationType=MEM_COMMIT, flProtect=PAGE_EXECUTE_READWRITE)`. Shown inline in
   both linear and graph views.
-- **Side panels:** Functions, Strings, Imports, Exports, Sections, and live Cross-references.
+- **Side panels:** Functions, Strings, Imports, Exports, Sections (with per-section "load into listing"
+  toggles), Resources (the `.rsrc` tree + preview), and live Cross-references.
 - **C++ demangling:** mangled symbol names are demangled to readable signatures throughout (Functions
   list, Exports/Imports, labels) — MSVC names (`?…`) via the OS `UnDecorateSymbolName`, and Itanium
   names (`_Z…`, GCC/Clang/MinGW/ELF) via a built-in demangler. Anything unrecognised is left as-is.

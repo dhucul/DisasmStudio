@@ -3,6 +3,8 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using DisasmStudio.Core.Analysis;
+using DisasmStudio.Core.Formats;
 
 namespace DisasmStudio.Wpf;
 
@@ -11,6 +13,7 @@ internal static class Dialogs
 {
     private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x16, 0x1B, 0x22));
     private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xE6, 0xEA, 0xF0));
+    private static readonly Brush Muted = new SolidColorBrush(Color.FromRgb(0x79, 0x82, 0x8F));
 
     /// <summary>How to host a DLL under the debugger: the host EXE that loads it, the full command line
     /// (incl. argv0), the working directory, and the chosen export's static VA to break at (null = "just
@@ -43,6 +46,73 @@ internal static class Dialogs
         int bitness = bits.SelectedIndex == 0 ? 64 : 32;
         ulong baseVa = ParseHex(baseBox.Text) ?? (bitness == 64 ? 0x140000000UL : 0x400000UL);
         return (baseVa, bitness);
+    }
+
+    /// <summary>Show every section in the image and let the user fold optional ones into the listing as data.
+    /// Executable sections are listed checked + disabled ("always shown"); non-code sections with file bytes
+    /// (and the PE header) are toggleable; a section with no file data is shown disabled. The list scrolls, so
+    /// even a binary with many sections fits on screen. Returns the chosen options, an unchanged copy of
+    /// <paramref name="current"/> when there's nothing optional to load, or null if cancelled.</summary>
+    public static AnalysisOptions? AskLoadSections(Window owner, IBinaryImage image, AnalysisOptions current)
+    {
+        var outer = new StackPanel { Margin = new Thickness(16) };
+        outer.Children.Add(Label("Sections in this image. Code is always shown; tick a data section / the header to fold it into the listing as data:"));
+
+        var rows = new List<(CheckBox Box, string? Section, bool Header)>();   // toggleable rows only
+        var selectAll = new CheckBox { Content = "Select all data sections", Foreground = Fg, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 4) };
+        selectAll.Click += (_, _) => { bool on = selectAll.IsChecked == true; foreach (var (box, _, _) in rows) box.IsChecked = on; };
+        outer.Children.Add(selectAll);
+
+        // The section rows scroll so a many-section binary can't push the OK/Cancel buttons off-screen.
+        var list = new StackPanel();
+        outer.Children.Add(new ScrollViewer { Content = list, MaxHeight = 360, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+
+        void AddRow(string text, bool isChecked, bool enabled, string? section, bool header)
+        {
+            var cb = new CheckBox
+            {
+                Content = text,
+                Foreground = enabled ? Fg : Muted,
+                Margin = new Thickness(0, 6, 0, 0),
+                IsChecked = isChecked,
+                IsEnabled = enabled,
+                FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+            };
+            if (enabled)
+            {
+                cb.Click += (_, _) => { if (cb.IsChecked != true) selectAll.IsChecked = false; };   // keep "Select all" honest
+                rows.Add((cb, section, header));
+            }
+            list.Children.Add(cb);
+        }
+
+        if (image.HeaderRegion is { FileSize: > 0 })
+            AddRow("HEADER    (PE header)            [data]", current.IncludeHeader, true, null, true);
+        foreach (var s in image.Sections.OrderBy(s => s.StartVa))
+        {
+            bool exec = s.IsExecutable, hasData = s.FileSize > 0;
+            string tag = exec ? "[code · always]" : hasData ? "[data]" : "[no file data]";
+            AddRow($"{s.Name,-8} {s.StartVa:X}-{s.EndVa:X}  {tag}",
+                isChecked: exec || (hasData && current.IncludedDataSections.Contains(s.Name)),
+                enabled: !exec && hasData,
+                section: !exec && hasData ? s.Name : null, header: false);
+        }
+
+        if (rows.Count == 0) return current;   // nothing optional to choose (e.g. a raw blob: one code section)
+        selectAll.IsChecked = rows.All(r => r.Box.IsChecked == true);
+
+        bool ok = ShowModal(owner, "Load sections", outer, selectAll, 460);
+        if (!ok) return null;
+
+        var set = new HashSet<string>();
+        bool header = false;
+        foreach (var (box, section, isHeader) in rows)
+        {
+            if (box.IsChecked != true) continue;
+            if (isHeader) header = true;
+            else if (section is not null) set.Add(section);
+        }
+        return new AnalysisOptions { IncludedDataSections = set, IncludeHeader = header };
     }
 
     /// <summary>Ask how to patch the instruction at <paramref name="va"/>. Returns the assembly text

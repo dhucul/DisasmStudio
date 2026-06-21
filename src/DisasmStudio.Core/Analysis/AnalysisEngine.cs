@@ -18,9 +18,15 @@ public static class AnalysisEngine
     /// <summary>Cap the linear index so a pathological image can't exhaust memory (~8 bytes each).</summary>
     private const long MaxInstructions = 60_000_000;
 
-    public static AnalysisResult Analyze(IBinaryImage image, IProgress<string>? progress = null,
-        CancellationToken token = default)
+    /// <summary>Analyse with default options (code only) — preserves the original (image, progress, token)
+    /// call shape for callers that don't fold in extra sections.</summary>
+    public static AnalysisResult Analyze(IBinaryImage image, IProgress<string>? progress,
+        CancellationToken token = default) => Analyze(image, null, progress, token);
+
+    public static AnalysisResult Analyze(IBinaryImage image, AnalysisOptions? options = null,
+        IProgress<string>? progress = null, CancellationToken token = default)
     {
+        options ??= AnalysisOptions.None;
         var warnings = new List<string>();
 
         progress?.Report("Disassembling (linear sweep)…");
@@ -166,8 +172,58 @@ public static class AnalysisEngine
 
         // Classified linear index: real instructions, with padding / jump tables / literals collapsed
         // into data lines instead of disassembled junk.
+        // Structured data: parse the PE header, .pdata (RUNTIME_FUNCTIONs) and .reloc (fixup blocks) into
+        // labelled fields so — when loaded into the listing — they render as structure (dd/dw + field-name
+        // comments, begin RVAs resolved to function names) instead of a wall of db bytes.
+        var fieldList = new List<(ulong Va, int Size)>();
+        bool InLoaded(ulong va)
+        {
+            var s = image.SectionAt(va);
+            if (s is not null) return s.IsExecutable || options.IncludedDataSections.Contains(s.Name);
+            return options.IncludeHeader && image.HeaderRegion is { } hh && va >= hh.StartVa && va < hh.StartVa + (ulong)hh.FileSize;
+        }
+        void AddFields(IReadOnlyList<HeaderField> flds)
+        {
+            foreach (var fld in flds)
+            {
+                if (!InLoaded(fld.Va)) continue;   // only the fields that land in a loaded region show
+                if (fld.Label.Length > 0)
+                    comments[fld.Va] = fld.RefVa != 0 && names.TryGetValue(fld.RefVa, out var nm)
+                        ? $"{fld.Label} ({nm})" : fld.Label;
+                fieldList.Add((fld.Va, fld.Size));
+            }
+        }
+        if (options.IncludeHeader && image.Format == BinaryFormat.Pe && image.HeaderRegion is { } hr)
+        {
+            AddFields(PeHeaderLayout.Describe(image));
+            names.TryAdd(hr.StartVa, "HEADER");
+        }
+        // Name each in-listing section start (code always; data when loaded) as a collapsible landmark, and
+        // structure-parse the loaded .pdata / .reloc. TryAdd keeps a real function name if one starts there.
+        foreach (var sec in image.Sections)
+        {
+            if (sec.FileSize <= 0 || !(sec.IsExecutable || options.IncludedDataSections.Contains(sec.Name))) continue;
+            names.TryAdd(sec.StartVa, sec.Name);
+            if (options.IncludedDataSections.Contains(sec.Name))
+            {
+                if (sec.Name == ".pdata") AddFields(PeHeaderLayout.DescribePdata(image, sec));
+                else if (sec.Name == ".reloc") AddFields(PeHeaderLayout.DescribeReloc(image, sec));
+            }
+        }
+        // Import / export / TLS / debug tables (typically in .rdata/.idata/.edata/.tls) — parsed wherever they
+        // live and kept only where their section is loaded. Skipped entirely when no data section is loaded.
+        if (image is PeImage pe && options.IncludedDataSections.Count > 0)
+        {
+            try { AddFields(PeHeaderLayout.DescribeImports(pe)); } catch { }
+            try { AddFields(PeHeaderLayout.DescribeExports(pe)); } catch { }
+            try { AddFields(PeHeaderLayout.DescribeTls(pe)); } catch { }
+            try { AddFields(PeHeaderLayout.DescribeDebug(pe)); } catch { }
+        }
+        fieldList.Sort((a, b) => a.Va.CompareTo(b.Va));
+        var fields = fieldList.ToArray();
+
         progress?.Report("Classifying code vs data…");
-        var linear = BuildClassifiedIndex(image, code, stringByVa, token);
+        var linear = BuildClassifiedIndex(image, code, stringByVa, options, fields, token);
 
         progress?.Report("Identifying functions…");
         var jumpTargets = new HashSet<ulong>();
@@ -242,54 +298,108 @@ public static class AnalysisEngine
     }
 
     /// <summary>
-    /// Walk the executable sections producing the display index: a code line per real instruction, and
-    /// data runs (referenced strings as one line; aligned pointers as dd/dq; otherwise db rows ≤16 B)
-    /// for everything the code map left unmarked. Each data run stops at the next code start.
+    /// Produce the display index over an address-ordered set of regions: a code line per real instruction
+    /// (in executable sections, classified via the code map) and data runs (referenced strings as one
+    /// line; aligned pointers as dd/dq; otherwise db rows ≤16 B) for everything else. Non-executable
+    /// sections (and the PE header) the user folded in via <paramref name="options"/> are emitted purely
+    /// as data. Regions are emitted in strictly ascending, non-overlapping VA order — the index is
+    /// binary-searched, so duplicate/out-of-order entries would break navigation.
     /// </summary>
     private static LinearIndex BuildClassifiedIndex(IBinaryImage image, CodeBitmap code,
-        IReadOnlyDictionary<ulong, FoundString> stringByVa, CancellationToken token)
+        IReadOnlyDictionary<ulong, FoundString> stringByVa, AnalysisOptions options,
+        (ulong Va, int Size)[] fields, CancellationToken token)
     {
         var index = new LinearIndex();
         var dis = new Disassembler(image);
-        foreach (var sec in image.Sections.Where(s => s.IsExecutable && s.FileSize > 0).OrderBy(s => s.StartVa))
+
+        var regions = new List<(ulong Start, ulong End, bool IsCode)>();
+        foreach (var sec in image.Sections)
         {
-            ulong va = sec.StartVa;
+            if (sec.FileSize <= 0) continue;
             ulong end = sec.StartVa + (sec.VirtualSize > 0 ? Math.Min(sec.VirtualSize, (ulong)sec.FileSize) : (ulong)sec.FileSize);
+            if (sec.IsExecutable) regions.Add((sec.StartVa, end, true));
+            else if (options.IncludedDataSections.Contains(sec.Name)) regions.Add((sec.StartVa, end, false));
+        }
+        if (options.IncludeHeader && image.HeaderRegion is { FileSize: > 0 } h)
+            regions.Add((h.StartVa, h.StartVa + (ulong)h.FileSize, false));
+
+        regions.Sort((a, b) => a.Start.CompareTo(b.Start));
+        // Clamp each region's end to the next region's start so emitted VAs never overlap or go backwards.
+        for (int i = 0; i < regions.Count - 1; i++)
+            if (regions[i].End > regions[i + 1].Start)
+                regions[i] = (regions[i].Start, regions[i + 1].Start, regions[i].IsCode);
+
+        foreach (var (start, end, isCode) in regions)
+        {
+            ulong va = start;
             while (va < end)
             {
                 if ((index.Count & 0x3FFFF) == 0 && token.IsCancellationRequested) return index;
 
-                if (code.IsCode(va))
+                if (isCode && code.IsCode(va))
                 {
                     if (dis.TryDecodeAt(va, out var ins) && ins.Length > 0) { index.Add(va); va += (ulong)ins.Length; }
                     else { index.Add(va, isData: true); va++; } // defensive — code map only marks decodable
                     continue;
                 }
 
-                // Data gap [va, gapEnd): emit it as string / pointer / db-row lines.
-                ulong gapEnd = code.NextCode(va, end);
-                while (va < gapEnd)
-                {
-                    if (stringByVa.TryGetValue(va, out var fs))
-                    {
-                        ulong slen = (ulong)Math.Max(1, fs.Wide ? fs.Length * 2 : fs.Length);
-                        index.Add(va, isData: true);
-                        va += Math.Min(slen, gapEnd - va);
-                    }
-                    else
-                    {
-                        ulong rem = gapEnd - va;
-                        ulong chunk =
-                            va % 8 == 0 && rem >= 8 && IsPointer(image, va, 8) ? 8 :
-                            va % 4 == 0 && rem >= 4 && IsPointer(image, va, 4) ? 4 :
-                            Math.Min(16, rem);
-                        index.Add(va, isData: true);
-                        va += Math.Max(1, chunk);
-                    }
-                }
+                // Data run: a code section's gap stops at the next code byte; a data region runs to its end.
+                // Parsed structure fields (header / .pdata / .reloc) inside the run are emitted at their own
+                // boundaries; everything else falls to strings / dd-dq pointers / db rows.
+                ulong gapEnd = isCode ? code.NextCode(va, end) : end;
+                EmitData(index, image, stringByVa, fields, ref va, gapEnd, token);
             }
         }
         return index;
+    }
+
+    /// <summary>Emit one data run [va, end) as lines. A parsed structure field (from <paramref name="fields"/>,
+    /// sorted by VA) is emitted at its exact size; otherwise a referenced string is one line, an aligned
+    /// pointer is dd/dq, and the rest are db rows of ≤16 bytes — but never crossing the next field boundary.</summary>
+    private static void EmitData(LinearIndex index, IBinaryImage image,
+        IReadOnlyDictionary<ulong, FoundString> stringByVa, (ulong Va, int Size)[] fields,
+        ref ulong va, ulong end, CancellationToken token)
+    {
+        int fi = LowerBound(fields, va);   // first field at/after va
+        while (va < end)
+        {
+            if ((index.Count & 0x3FFFF) == 0 && token.IsCancellationRequested) return;
+            while (fi < fields.Length && fields[fi].Va < va) fi++;   // keep the cursor at/after va
+
+            if (fi < fields.Length && fields[fi].Va == va)           // a parsed structure field
+            {
+                index.Add(va, isData: true);
+                va += (ulong)Math.Min(Math.Max(1, fields[fi].Size), (int)Math.Min(end - va, int.MaxValue));
+                fi++;
+                continue;
+            }
+
+            ulong stop = fi < fields.Length && fields[fi].Va < end ? fields[fi].Va : end;   // don't cross a field
+            if (stringByVa.TryGetValue(va, out var fs))
+            {
+                ulong slen = (ulong)Math.Max(1, fs.Wide ? fs.Length * 2 : fs.Length);
+                index.Add(va, isData: true);
+                va += Math.Min(slen, stop - va);
+            }
+            else
+            {
+                ulong rem = stop - va;
+                ulong chunk =
+                    va % 8 == 0 && rem >= 8 && IsPointer(image, va, 8) ? 8 :
+                    va % 4 == 0 && rem >= 4 && IsPointer(image, va, 4) ? 4 :
+                    Math.Min(16, rem);
+                index.Add(va, isData: true);
+                va += Math.Max(1, chunk);
+            }
+        }
+    }
+
+    /// <summary>Index of the first field with VA ≥ <paramref name="va"/> (binary search over the sorted array).</summary>
+    private static int LowerBound((ulong Va, int Size)[] fields, ulong va)
+    {
+        int lo = 0, hi = fields.Length;
+        while (lo < hi) { int m = (lo + hi) >> 1; if (fields[m].Va < va) lo = m + 1; else hi = m; }
+        return lo;
     }
 
     private static bool IsPointer(IBinaryImage image, ulong va, int size)

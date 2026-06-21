@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 
 namespace DisasmStudio.Core.Formats;
@@ -17,6 +18,7 @@ public sealed class PeImage : IBinaryImage, IDisposable
     private readonly List<ImportEntry> _imports = [];
     private readonly Dictionary<ulong, ImportEntry> _importsByIat = [];
     private readonly List<ulong> _runtimeFunctions = [];
+    private ResourceTree? _resources;
 
     private readonly int _peHeader;
 
@@ -31,6 +33,7 @@ public sealed class PeImage : IBinaryImage, IDisposable
         ParseImports();
         ParseExports();
         ParseExceptions();
+        try { ParseResources(); } catch { _resources = null; }   // a corrupt .rsrc must not block loading
         ImportsByIatVa = _importsByIat;
     }
 
@@ -48,6 +51,16 @@ public sealed class PeImage : IBinaryImage, IDisposable
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => _imports;
+    public ResourceTree? Resources => _resources;
+    public Section? HeaderRegion => new()
+    {
+        Name = "HEADER",
+        StartVa = ImageBase,
+        VirtualSize = SizeOfHeaders,
+        FileOffset = 0,
+        FileSize = (int)Math.Min(SizeOfHeaders, (uint)_f.Length),
+        IsReadable = true,
+    };
     public IReadOnlyList<ulong> FunctionStarts => _runtimeFunctions;
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; }
     public int BackingLength => _f.Length;
@@ -142,6 +155,10 @@ public sealed class PeImage : IBinaryImage, IDisposable
         return (_f.ReadU32(off), _f.ReadU32(off + 4));
     }
 
+    /// <summary>A data-directory entry (RVA, Size), or (0,0) if absent — used to structure-parse the
+    /// import/export/TLS/debug tables for the listing.</summary>
+    public (uint Rva, uint Size) DataDirectory(int index) => DataDir(index);
+
     private int RvaToOffset(uint rva)
     {
         if (rva < SizeOfHeaders) return (int)rva;
@@ -231,9 +248,13 @@ public sealed class PeImage : IBinaryImage, IDisposable
                 uint intField = _f.ReadU32(b + 16);
                 if (nameField == 0 && iatField == 0 && intField == 0) break;
                 bool rvaBased = (attrs & 1) != 0;
-                nameRva = rvaBased ? nameField : (uint)(nameField - ImageBase);
-                iatRva = rvaBased ? iatField : (uint)(iatField - ImageBase);
-                intRva = rvaBased ? intField : (uint)(intField - ImageBase);
+                // Legacy (non-RVA) descriptors store absolute VAs; subtract ImageBase in 64-bit and only when
+                // the field is actually ≥ ImageBase, so x86 converts correctly and x64 (where these 32-bit
+                // fields can't hold a real VA) yields 0 rather than an underflowed garbage RVA.
+                uint VaToRva(uint v) => v >= ImageBase ? (uint)(v - ImageBase) : 0;
+                nameRva = rvaBased ? nameField : VaToRva(nameField);
+                iatRva = rvaBased ? iatField : VaToRva(iatField);
+                intRva = rvaBased ? intField : VaToRva(intField);
             }
 
             string dll = nameRva != 0 ? _f.ReadAsciiZ(RvaToOffset(nameRva)) : "?";
@@ -296,7 +317,9 @@ public sealed class PeImage : IBinaryImage, IDisposable
             uint nameRva = _f.ReadU32(nameRvaOff);
             ushort ord = _f.ReadU16(ordTbl + (int)i * 2);
             if (ord >= numFuncs) continue;
-            uint funcRva = _f.ReadU32(eat + ord * 4);
+            int eatOff = eat + ord * 4;
+            if (eatOff < 0 || eatOff + 4 > _f.Length) continue;   // EAT index must stay in the file
+            uint funcRva = _f.ReadU32(eatOff);
             if (funcRva == 0) continue;
             if (funcRva >= exportLo && funcRva < exportHi) continue; // forwarder, not code
 
@@ -319,6 +342,90 @@ public sealed class PeImage : IBinaryImage, IDisposable
             uint begin = _f.ReadU32(off + i * 12);
             if (begin != 0) _runtimeFunctions.Add(ImageBase + begin);
         }
+    }
+
+    // ---- resource directory (.rsrc), the standard 3-level type→name/id→language tree ----
+    private void ParseResources()
+    {
+        var (dirRva, _) = DataDir(2); // Resource
+        if (dirRva == 0 || RvaToOffset(dirRva) < 0) return;
+        int budget = 200_000;   // node cap — a corrupt directory can claim absurd entry counts
+        var roots = ReadResDir(dirRva, dirOffset: 0, depth: 0, ref budget);
+        if (roots.Count > 0) _resources = new ResourceTree { Roots = roots };
+    }
+
+    /// <summary>Read an IMAGE_RESOURCE_DIRECTORY at <paramref name="dirOffset"/> bytes from the resource base
+    /// (<paramref name="resBaseRva"/>). depth 0 = type, 1 = name/id, 2 = language(leaf).</summary>
+    private List<ResourceNode> ReadResDir(uint resBaseRva, uint dirOffset, int depth, ref int budget)
+    {
+        var nodes = new List<ResourceNode>();
+        if (depth > 3) return nodes;
+        int dirOff = RvaToOffset(resBaseRva + dirOffset);
+        if (dirOff < 0 || dirOff + 16 > _f.Length) return nodes;
+
+        int named = _f.ReadU16(dirOff + 12);
+        int ids = _f.ReadU16(dirOff + 14);
+        int total = named + ids;
+        for (int i = 0; i < total; i++)
+        {
+            if (budget-- <= 0) break;
+            int e = dirOff + 16 + i * 8;
+            if (e + 8 > _f.Length) break;
+            uint nameField = _f.ReadU32(e + 0);
+            uint offField = _f.ReadU32(e + 4);
+
+            string label;
+            uint? id = null;
+            if ((nameField & 0x80000000) != 0)
+                label = ReadResString(resBaseRva, nameField & 0x7FFFFFFF) ?? $"#{i}";
+            else
+            {
+                id = nameField;
+                label = depth == 0 ? ResourceTree.TypeName(nameField)
+                      : depth == 2 ? LangName(nameField)
+                      : $"#{nameField}";
+            }
+
+            if ((offField & 0x80000000) != 0)   // subdirectory
+            {
+                var children = ReadResDir(resBaseRva, offField & 0x7FFFFFFF, depth + 1, ref budget);
+                nodes.Add(new ResourceNode { Name = label, Id = id, Children = children });
+            }
+            else                                 // IMAGE_RESOURCE_DATA_ENTRY leaf
+            {
+                int leaf = RvaToOffset(resBaseRva + offField);
+                if (leaf < 0 || leaf + 16 > _f.Length) continue;
+                uint dataRva = _f.ReadU32(leaf + 0);
+                uint size = _f.ReadU32(leaf + 4);
+                uint codePage = _f.ReadU32(leaf + 8);
+                // Clamp the declared size to what's actually readable at the data RVA (a truncated/corrupt
+                // entry can claim more bytes than exist), so the reported size never exceeds the backing.
+                int dataOff = RvaToOffset(dataRva);
+                int avail = dataOff >= 0 ? Math.Max(0, _f.Length - dataOff) : 0;
+                var data = new ResourceDataEntry(dataRva, ImageBase + dataRva, (int)Math.Min(size, (uint)avail), codePage);
+                nodes.Add(new ResourceNode { Name = label, Id = id, Data = data });
+            }
+        }
+        return nodes;
+    }
+
+    /// <summary>Read an IMAGE_RESOURCE_DIR_STRING_U (WORD length + UTF-16 chars) at a resource-relative offset.</summary>
+    private string? ReadResString(uint resBaseRva, uint offset)
+    {
+        int off = RvaToOffset(resBaseRva + offset);
+        if (off < 0 || off + 2 > _f.Length) return null;
+        int len = _f.ReadU16(off);
+        var sb = new StringBuilder(len);
+        for (int i = 0; i < len && off + 2 + i * 2 + 2 <= _f.Length; i++)
+            sb.Append((char)_f.ReadU16(off + 2 + i * 2));
+        return sb.ToString();
+    }
+
+    private static string LangName(uint id)
+    {
+        if (id == 0) return "Neutral";
+        try { return $"{id} ({CultureInfo.GetCultureInfo((int)id).Name})"; }
+        catch { return $"#{id}"; }
     }
 
     private void Validate()

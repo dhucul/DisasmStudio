@@ -49,6 +49,8 @@ public sealed class LiveProcessImage : IBinaryImage
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => _imports;
+    public Section? HeaderRegion => null;     // header/resource browsing is a static-analysis feature
+    public ResourceTree? Resources => null;
     public IReadOnlyList<ulong> FunctionStarts => _funcs;
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa => _iat;
     public int BackingLength => _static.BackingLength;

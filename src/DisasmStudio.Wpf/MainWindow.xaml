@@ -44,6 +44,8 @@
                 <TextBox x:Name="AddrBox" Width="160" FontFamily="Cascadia Mono, Consolas"
                          KeyDown="OnAddrKeyDown" />
                 <Button Content="Go" Click="OnGo" Margin="6,0,0,0" />
+                <Button x:Name="SectionsBtn" Content="Sections ▾" Click="OnSectionsMenu" Margin="6,0,0,0"
+                        ToolTip="Jump to the start of a section (or the PE header) in the linear view — loads a data section into the listing if needed" />
                 <TextBlock x:Name="FileInfo" VerticalAlignment="Center" Margin="16,0,0,0"
                            Foreground="{StaticResource TextSecondary}" />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
@@ -206,18 +208,63 @@
                         </DockPanel>
                     </TabItem>
                     <TabItem Header="Sections">
-                        <ListBox x:Name="SectionList" MouseDoubleClick="OnSectionActivate"
-                                 FontFamily="Cascadia Mono, Consolas" FontSize="12">
-                            <ListBox.ItemTemplate>
-                                <DataTemplate>
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}" Width="80" />
-                                        <TextBlock Text="{Binding Range}" Foreground="{StaticResource TextSecondary}" Width="170" />
-                                        <TextBlock Text="{Binding Perms}" Foreground="{StaticResource TextMuted}" />
-                                    </StackPanel>
-                                </DataTemplate>
-                            </ListBox.ItemTemplate>
-                        </ListBox>
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextMuted}" FontSize="11"
+                                       Text="Double-click a row to jump (data → Hex). Right-click → 'Show in listing'. Tick to show/hide a section in the listing. In the listing, click the [+]/[−] in the gutter to collapse a section." />
+                            <ListBox x:Name="SectionList" MouseDoubleClick="OnSectionActivate"
+                                     PreviewMouseRightButtonDown="OnSectionRightClick"
+                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                <ListBox.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Show in listing + jump" Click="OnSectionJumpFold" />
+                                        <MenuItem Header="Jump (data opens in Hex)" Click="OnSectionJumpHex" />
+                                    </ContextMenu>
+                                </ListBox.ContextMenu>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <CheckBox IsChecked="{Binding Loaded, Mode=OneWay}" IsEnabled="{Binding CanToggle}"
+                                                      Click="OnSectionLoadToggle" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                      ToolTip="Show this section/header in the linear listing as data (re-analyses)" />
+                                            <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}" Width="72" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Range}" Foreground="{StaticResource TextSecondary}" Width="150" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Perms}" Foreground="{StaticResource TextMuted}" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                    </TabItem>
+                    <TabItem Header="Resources">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="2*" MinHeight="80" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="3*" MinHeight="120" />
+                            </Grid.RowDefinitions>
+                            <TreeView x:Name="ResTree" Grid.Row="0"
+                                      SelectedItemChanged="OnResourceSelected" MouseDoubleClick="OnResourceActivate"
+                                      FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                <TreeView.ItemTemplate>
+                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                        <TextBlock Text="{Binding Display}" Foreground="{StaticResource TextPrimary}" />
+                                    </HierarchicalDataTemplate>
+                                </TreeView.ItemTemplate>
+                            </TreeView>
+                            <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch"
+                                          Background="{StaticResource Outline}" />
+                            <DockPanel Grid.Row="2">
+                                <Grid DockPanel.Dock="Top" Margin="8,6">
+                                    <TextBlock x:Name="ResHeader" Foreground="{StaticResource TextMuted}" FontSize="11"
+                                               Text="Select a resource" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" Margin="0,0,110,0" />
+                                    <Button x:Name="ResSaveBtn" Content="Save resource…" Click="OnSaveResource"
+                                            HorizontalAlignment="Right" IsEnabled="False" />
+                                </Grid>
+                                <ContentControl x:Name="ResPreviewHost" />
+                            </DockPanel>
+                        </Grid>
                     </TabItem>
                 </TabControl>
             </Border>

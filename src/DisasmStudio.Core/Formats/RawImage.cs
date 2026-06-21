@@ -22,6 +22,8 @@ public sealed class RawImage : IBinaryImage, IDisposable
     public IReadOnlyList<Section> Sections { get; }
     public IReadOnlyList<NamedSymbol> Symbols => [];
     public IReadOnlyList<ImportEntry> Imports => [];
+    public Section? HeaderRegion => null;       // a flat blob has no header region
+    public ResourceTree? Resources => null;     // and no resource directory
     public IReadOnlyList<ulong> FunctionStarts => [];
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; } = new Dictionary<ulong, ImportEntry>();
     public int BackingLength => _f.Length;

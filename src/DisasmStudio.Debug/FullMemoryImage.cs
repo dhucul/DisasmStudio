@@ -22,6 +22,8 @@ public sealed class FullMemoryImage(DebuggerEngine eng) : IBinaryImage
     public IReadOnlyList<Section> Sections => [];
     public IReadOnlyList<NamedSymbol> Symbols => [];
     public IReadOnlyList<ImportEntry> Imports => [];
+    public Section? HeaderRegion => null;
+    public ResourceTree? Resources => null;
     public IReadOnlyList<ulong> FunctionStarts => [];
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa => NoImports;
     public int BackingLength => 0;

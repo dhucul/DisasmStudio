@@ -27,6 +27,8 @@ public sealed class ElfImage : IBinaryImage, IDisposable
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => _symbols;
     public IReadOnlyList<ImportEntry> Imports => [];
+    public Section? HeaderRegion => null;               // not surfaced for ELF (scope is the PE header)
+    public ResourceTree? Resources => null;             // ELF has no .rsrc resource directory
     public IReadOnlyList<ulong> FunctionStarts => [];   // ELF function starts come from .symtab/.dynsym (Symbols)
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; } = new Dictionary<ulong, ImportEntry>();
     public int BackingLength => _f.Length;

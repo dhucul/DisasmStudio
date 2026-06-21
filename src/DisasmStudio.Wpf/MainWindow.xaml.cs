@@ -30,6 +30,8 @@ public partial class MainWindow : Window
     private Task _analysisDone = Task.CompletedTask;   // completes when the in-flight analysis ends (success/cancel/fault)
     private ulong[] _funcStarts = [];
     private string? _projectPath;
+    private AnalysisOptions _loadOptions = AnalysisOptions.None;   // optional non-code sections / PE header folded into the listing
+    private ResourceNodeVm? _selectedResource;                    // current leaf in the Resources tree (for Save)
     private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
 
     private DebugSession? _dbg;
@@ -181,6 +183,61 @@ public partial class MainWindow : Window
 
     // The theme's MenuItem template is flat (no submenu popup), so drop the Help items via the button's
     // ContextMenu — opened on left-click, placed below the button.
+    /// <summary>Drop a menu of every section (and the PE header) to jump to its start in the linear view.</summary>
+    private void OnSectionsMenu(object sender, RoutedEventArgs e)
+    {
+        if (_image is null || _result is null || sender is not Button b) return;
+        var cm = new ContextMenu
+        {
+            PlacementTarget = b,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
+        };
+
+        void Add(string name, ulong va, bool code, bool isHeader, bool foldable)
+        {
+            var mi = new MenuItem { Header = $"{name,-10}  {va:X}   {(code ? "code" : "data")}" };
+            mi.Click += (_, _) => JumpToSection(va, isHeader ? null : name, isHeader, foldable);
+            cm.Items.Add(mi);
+        }
+
+        if (_image.HeaderRegion is { } hdr) Add("HEADER", hdr.StartVa, code: false, isHeader: true, foldable: hdr.FileSize > 0);
+        foreach (var s in _image.Sections.OrderBy(s => s.StartVa))
+            Add(s.Name, s.StartVa, s.IsExecutable, isHeader: false, foldable: !s.IsExecutable && s.FileSize > 0);
+
+        b.ContextMenu = cm;
+        cm.IsOpen = true;
+    }
+
+    /// <summary>Jump to a section start in the linear view. A not-yet-loaded data section / header is loaded
+    /// into the listing first (re-analyses) so the jump lands on real disassembly rather than the hex view.
+    /// Code sections (and already-loaded ones) jump straight there.</summary>
+    private async void JumpToSection(ulong va, string? sectionName, bool isHeader, bool loadable)
+    {
+        if (_image is null || _result is null) return;
+
+        bool needLoad = loadable &&
+            ((isHeader && !_loadOptions.IncludeHeader) ||
+             (sectionName is not null && !_loadOptions.IncludedDataSections.Contains(sectionName)));
+        if (needLoad)
+        {
+            long before = _result.Linear.Count;
+            var prevOptions = _loadOptions;
+            var set = new HashSet<string>(_loadOptions.IncludedDataSections);
+            if (!isHeader && sectionName is not null) set.Add(sectionName);
+            _loadOptions = _loadOptions with { IncludedDataSections = set, IncludeHeader = _loadOptions.IncludeHeader || isHeader };
+            CenterTabs.SelectedIndex = 0;                        // show the result in the linear view
+            var outcome = await StartAnalysis(_image, va, 0, fresh: false);   // re-analyse with the section loaded in, land on it
+            if (outcome == AnalyzeOutcome.Failed) { _loadOptions = prevOptions; return; }   // errored — undo the change
+            if (outcome == AnalyzeOutcome.Applied)
+                StatusText.Text = $"Loaded {sectionName ?? "HEADER"} into the listing: {before:N0} → {_result?.Linear.Count ?? before:N0} lines (@ {va:X})";
+            return;
+        }
+
+        bool inListing = _result.Linear.Count > 0 && _result.Linear.VaAt(_result.Linear.IndexOf(va)) == va;
+        if (inListing) CenterTabs.SelectedIndex = 0;   // Linear
+        _nav.Navigate(va);
+    }
+
     private void OnHelpMenu(object sender, RoutedEventArgs e)
     {
         if (sender is Button { ContextMenu: { } cm } b)
@@ -623,6 +680,11 @@ public partial class MainWindow : Window
         }
 
         _projectPath = dlg.FileName;
+        _loadOptions = new AnalysisOptions
+        {
+            IncludedDataSections = proj.LoadedSections is { Count: > 0 } ls ? new HashSet<string>(ls) : new HashSet<string>(),
+            IncludeHeader = proj.LoadHeader,
+        };
         await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab);
         Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(image.FilePath)})";
     }
@@ -656,6 +718,8 @@ public partial class MainWindow : Window
             RawBitness = _image.Format == BinaryFormat.Raw ? _image.Bitness : 0,
             CurrentVa = _nav.Current ?? _image.EntryVa,
             CenterTab = CenterTabs.SelectedIndex,
+            LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
+            LoadHeader = _loadOptions.IncludeHeader,
         };
         try { proj.Save(path); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
@@ -781,10 +845,17 @@ public partial class MainWindow : Window
             MessageBox.Show(this, ex.Message, "Open failed", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+
+        // IDA-style: let the user fold optional non-code sections / the PE header into the listing.
+        var opts = Dialogs.AskLoadSections(this, image, AnalysisOptions.None);
+        if (opts is null) { (image as IDisposable)?.Dispose(); return; }   // cancelled
+        _loadOptions = opts;
         await StartAnalysis(image);
     }
 
-    private async Task StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0, bool fresh = true)
+    private enum AnalyzeOutcome { Applied, Cancelled, Failed }
+
+    private async Task<AnalyzeOutcome> StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0, bool fresh = true)
     {
         // On a fresh load, retire the previous file-backed image once the new one is up and its analysis stopped.
         var prevImage = fresh ? _image : null;
@@ -815,10 +886,11 @@ public partial class MainWindow : Window
 
         try
         {
-            var task = Task.Run(() => AnalysisEngine.Analyze(image, progress, token), token);
+            var opts = _loadOptions;
+            var task = Task.Run(() => AnalysisEngine.Analyze(image, opts, progress, token), token);
             _analysisDone = SilentlyAwait(task);
             var result = await task;
-            if (token.IsCancellationRequested) return;
+            if (token.IsCancellationRequested) return AnalyzeOutcome.Cancelled;
 
             _result = result;
             PopulateLists(result);
@@ -842,11 +914,13 @@ public partial class MainWindow : Window
                 await prevDone;
                 (prevImage as IDisposable)?.Dispose();
             }
+            return AnalyzeOutcome.Applied;
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) { return AnalyzeOutcome.Cancelled; }
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "Analysis failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            return AnalyzeOutcome.Failed;
         }
         finally
         {
@@ -891,7 +965,21 @@ public partial class MainWindow : Window
         ExportList.ItemsSource = _exportsView;
 
         ImportList.ItemsSource = result.Image.Imports.Select(i => new ImportItem(i)).ToList();
-        SectionList.ItemsSource = result.Image.Sections.Select(s => new SectionItem(s)).ToList();
+
+        var sectionRows = new List<SectionItem>();
+        if (result.Image.HeaderRegion is { } hdr)
+            sectionRows.Add(new SectionItem(hdr, _loadOptions.IncludeHeader, isHeader: true));
+        sectionRows.AddRange(result.Image.Sections.Select(s =>
+            new SectionItem(s, _loadOptions.IncludedDataSections.Contains(s.Name))));
+        SectionList.ItemsSource = sectionRows;
+
+        ResTree.ItemsSource = result.Image.Resources is { Roots.Count: > 0 } res
+            ? res.Roots.Select(r => new ResourceNodeVm(r, r.Id)).ToList()
+            : null;
+        ResPreviewHost.Content = null;
+        ResSaveBtn.IsEnabled = false;
+        _selectedResource = null;
+        ResHeader.Text = result.Image.Resources is { Roots.Count: > 0 } ? "Select a resource" : "No resources";
     }
 
     private void ClearLists()
@@ -901,6 +989,11 @@ public partial class MainWindow : Window
         ExportList.ItemsSource = null;
         ImportList.ItemsSource = null;
         SectionList.ItemsSource = null;
+        ResTree.ItemsSource = null;
+        ResPreviewHost.Content = null;
+        ResSaveBtn.IsEnabled = false;
+        _selectedResource = null;
+        ResHeader.Text = "Select a resource";
         XrefList.ItemsSource = null;
         Graph.Clear();
         _graphFn = null;
@@ -921,8 +1014,18 @@ public partial class MainWindow : Window
         if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
 
         // Data targets read better in the hex view (skip while debugging — keep focus on the live code).
-        if (_dbg is null && !_result.Image.IsExecutableVa(va) && CenterTabs.SelectedIndex == 0)
+        // But if the section/header was folded into the listing, stay on Linear — that's where the user put it.
+        if (_dbg is null && !_result.Image.IsExecutableVa(va) && !IsLoadedIntoListing(va) && CenterTabs.SelectedIndex == 0)
             CenterTabs.SelectedIndex = 2;
+    }
+
+    /// <summary>True if <paramref name="va"/> lies in a non-code region the user folded into the listing.</summary>
+    private bool IsLoadedIntoListing(ulong va)
+    {
+        if (_image is null) return false;
+        if (_loadOptions.IncludeHeader && _image.HeaderRegion is { } h
+            && va >= h.StartVa && va < h.StartVa + (ulong)h.FileSize) return true;
+        return _image.SectionAt(va) is { } s && _loadOptions.IncludedDataSections.Contains(s.Name);
     }
 
     private void OnAddressFocused(ulong va)
@@ -1092,8 +1195,111 @@ public partial class MainWindow : Window
     }
     private void OnSectionActivate(object sender, MouseButtonEventArgs e)
     {
+        // Plain navigation: a non-folded data section lands in the hex view (it isn't in the listing).
+        // Right-click → "Jump + fold into listing" (or the toolbar "Sections ▾") to fold it into linear.
         if (SectionList.SelectedItem is SectionItem se) _nav.Navigate(se.Va);
     }
+
+    /// <summary>Select the section row under the cursor so the right-click menu acts on it.</summary>
+    private void OnSectionRightClick(object sender, MouseButtonEventArgs e)
+    {
+        var dep = e.OriginalSource as DependencyObject;
+        while (dep is not null and not ListBoxItem) dep = System.Windows.Media.VisualTreeHelper.GetParent(dep);
+        if (dep is ListBoxItem row) row.IsSelected = true;
+    }
+
+    /// <summary>Right-click menu: jump to the section, loading a non-code section into the linear listing.</summary>
+    private void OnSectionJumpFold(object sender, RoutedEventArgs e)
+    {
+        if (SectionList.SelectedItem is SectionItem se)
+            JumpToSection(se.Va, se.IsHeader ? null : se.Name, se.IsHeader, se.CanToggle);
+        else
+            StatusText.Text = "Select a section first, then right-click → Show in listing.";
+    }
+
+    /// <summary>Right-click menu: plain jump (a non-folded data section opens in Hex).</summary>
+    private void OnSectionJumpHex(object sender, RoutedEventArgs e)
+    {
+        if (SectionList.SelectedItem is SectionItem se) _nav.Navigate(se.Va);
+    }
+
+    /// <summary>Toggle whether a non-code section / the PE header is folded into the listing, then re-analyse
+    /// (keeping the current view) so the change takes effect.</summary>
+    private async void OnSectionLoadToggle(object sender, RoutedEventArgs e)
+    {
+        if (_image is null || _result is null) return;
+        if (sender is not CheckBox cb || cb.DataContext is not SectionItem item || !item.CanToggle) return;
+        bool on = cb.IsChecked == true;
+        if (item.Loaded == on) return;   // no-op (e.g. event fired during list rebuild)
+
+        var prevOptions = _loadOptions;
+        item.Loaded = on;
+        var set = new HashSet<string>(_loadOptions.IncludedDataSections);
+        bool header = _loadOptions.IncludeHeader;
+        if (item.IsHeader) header = on;
+        else if (on) set.Add(item.Name); else set.Remove(item.Name);
+        _loadOptions = _loadOptions with { IncludedDataSections = set, IncludeHeader = header };
+
+        // On enable, jump to the section in the linear view so the change is visibly applied (it usually lands
+        // at a high address you'd otherwise have to scroll to); on disable, stay put.
+        long before = _result.Linear.Count;
+        var outcome = await StartAnalysis(_image, on ? item.Va : _nav.Current, on ? 0 : CenterTabs.SelectedIndex, fresh: false);
+        if (outcome == AnalyzeOutcome.Failed)   // re-analysis errored — undo the option + checkbox change
+        {
+            _loadOptions = prevOptions;
+            item.Loaded = !on;
+            cb.IsChecked = !on;
+            return;
+        }
+        if (outcome == AnalyzeOutcome.Applied)
+            StatusText.Text = on
+                ? $"Loaded {item.Name} into the listing: {before:N0} → {_result?.Linear.Count ?? before:N0} lines (@ {item.Va:X})"
+                : $"Removed {item.Name}: {before:N0} → {_result?.Linear.Count ?? before:N0} lines";
+    }
+
+    // ---- resources ----
+    private void OnResourceSelected(object sender, RoutedPropertyChangedEventArgs<object> e) =>
+        ShowResource(e.NewValue as ResourceNodeVm);
+
+    private void ShowResource(ResourceNodeVm? vm)
+    {
+        _selectedResource = vm is { IsLeaf: true } ? vm : null;
+        if (vm is null || vm.Data is not { } d || _image is null)
+        {
+            ResHeader.Text = vm is null ? "Select a resource" : vm.Display;
+            ResPreviewHost.Content = null;
+            ResSaveBtn.IsEnabled = false;
+            return;
+        }
+        var bytes = _image.ReadBytesAtVa(d.DataVa, d.Size);
+        ResHeader.Text = $"{vm.Display}   VA {d.DataVa:X}   {bytes.Length:N0} B   cp{d.CodePage}";
+        ResPreviewHost.Content = ResourcePreview.Build(bytes, vm.TypeId);
+        ResSaveBtn.IsEnabled = bytes.Length > 0;
+    }
+
+    private void OnResourceActivate(object sender, MouseButtonEventArgs e)
+    {
+        if (ResTree.SelectedItem is ResourceNodeVm { Data: { } d }) _nav.Navigate(d.DataVa);
+    }
+
+    private void OnSaveResource(object sender, RoutedEventArgs e)
+    {
+        if (_selectedResource is not { Data: { } d } vm || _image is null) return;
+        var bytes = _image.ReadBytesAtVa(d.DataVa, d.Size);
+        var dlg = new SaveFileDialog { Title = "Save resource", FileName = SuggestResourceName(vm) };
+        if (dlg.ShowDialog(this) != true) return;
+        try { File.WriteAllBytes(dlg.FileName, bytes); StatusText.Text = $"Saved resource to {dlg.FileName}"; }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    /// <summary>A default filename for saving a leaf resource. Text types keep a readable extension; binary
+    /// types (whose bytes are a packed DIB, not a standalone file) save as raw .bin to avoid a misleading name.</summary>
+    private static string SuggestResourceName(ResourceNodeVm vm) => "resource" + vm.TypeId switch
+    {
+        ResourceTree.RT_MANIFEST => ".xml",
+        ResourceTree.RT_HTML => ".html",
+        _ => ".bin",
+    };
 
     private void OnExportActivate(object sender, MouseButtonEventArgs e)
     {

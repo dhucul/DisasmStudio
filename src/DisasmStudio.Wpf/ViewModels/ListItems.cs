@@ -53,11 +53,41 @@ public sealed class XrefItem(Xref x)
     public string Kind => x.Kind.ToString().ToLowerInvariant();
 }
 
-/// <summary>Row in the Sections list.</summary>
-public sealed class SectionItem(Section s)
+/// <summary>Node in the Resources tree. Carries the top-level resource <see cref="TypeId"/> down to every
+/// descendant so a selected leaf knows which preview renderer to use.</summary>
+public sealed class ResourceNodeVm
+{
+    private readonly ResourceNode _n;
+    public ResourceNodeVm(ResourceNode n, uint? typeId)
+    {
+        _n = n;
+        TypeId = typeId;
+        Children = n.Children.Select(c => new ResourceNodeVm(c, typeId)).ToList();
+    }
+
+    public uint? TypeId { get; }
+    public IReadOnlyList<ResourceNodeVm> Children { get; }
+    public ResourceDataEntry? Data => _n.Data;
+    public bool IsLeaf => _n.IsLeaf;
+    public string Display => IsLeaf && _n.Data is { } d ? $"{_n.Name}  ({d.Size:N0} bytes)" : _n.Name;
+}
+
+/// <summary>Row in the Sections list. <see cref="Loaded"/> tracks whether the section/header is folded
+/// into the linear listing as data; executable sections are always loaded and can't be toggled.</summary>
+public sealed class SectionItem(Section s, bool loaded, bool isHeader = false)
 {
     public ulong Va => s.StartVa;
     public string Name => s.Name;
     public string Range => $"{s.StartVa:X}-{s.EndVa:X}";
     public string Perms => $"{(s.IsReadable ? "R" : "-")}{(s.IsWritable ? "W" : "-")}{(s.IsExecutable ? "X" : "-")}";
+
+    /// <summary>True for the synthetic PE-header row (vs. a real section).</summary>
+    public bool IsHeader => isHeader;
+
+    /// <summary>Code sections are always in the listing, and a section with no file bytes (e.g. .bss) has
+    /// nothing to render — only non-code sections with data (and the header) can be toggled.</summary>
+    public bool CanToggle => !s.IsExecutable && s.FileSize > 0;
+
+    /// <summary>Whether this section/header is currently folded into the listing.</summary>
+    public bool Loaded { get; set; } = loaded || s.IsExecutable;
 }

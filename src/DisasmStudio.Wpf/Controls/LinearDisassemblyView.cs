@@ -32,6 +32,13 @@ public sealed class LinearDisassemblyView : Grid
     private long[] _labelInstrLines = [];
     private ulong[] _labelVa = [];
 
+    // Collapsible section regions (editor-style folding): each section / the PE header that's present in the
+    // listing can collapse to a single header row via the [+]/[−] gutter marker. _hidden holds the hidden
+    // display-row ranges for the currently-collapsed regions; it's empty (identity mapping) until you collapse.
+    private (ulong Va, long StartLine, long EndLine, string Name)[] _regions = [];
+    private readonly HashSet<ulong> _collapsed = [];
+    private (long Start, long End)[] _hidden = [];   // sorted, non-overlapping display-row ranges
+
     private long _topDisplay;       // first visible display line
     private long _caretInstr = -1;  // caret instruction index, or -1
     private long _selAnchor = -1;   // selection anchor; range = [min,max] of anchor & caret
@@ -90,6 +97,7 @@ public sealed class LinearDisassemblyView : Grid
     {
         if (_result is null) return;
         BuildLabelLines(_result);
+        BuildRegions(_result);
         ConfigureScroll();
         _surface.InvalidateVisual();
     }
@@ -100,6 +108,9 @@ public sealed class LinearDisassemblyView : Grid
     /// process-memory decoder while debugging) or the static file decoder when null.</summary>
     public void SetResult(AnalysisResult? result, IInstructionDecoder? decoder)
     {
+        // Collapse state is per-document: drop it when the image changes (a new file / the debug swap), but
+        // keep it across a same-image re-analysis (loading or unloading a section) so folds aren't lost.
+        if (!ReferenceEquals(result?.Image, _result?.Image)) _collapsed.Clear();
         _result = result;
         _caretInstr = -1;
         _selAnchor = -1;
@@ -111,6 +122,7 @@ public sealed class LinearDisassemblyView : Grid
             _fmt = new AsmFormatter(result.Names);
             _addrDigits = Math.Max(8, result.Image.MaxVa.ToString("X").Length);
             BuildLabelLines(result);
+            BuildRegions(result);
         }
         ConfigureScroll();
         _surface.InvalidateVisual();
@@ -123,9 +135,15 @@ public sealed class LinearDisassemblyView : Grid
         long line = _result.Linear.IndexOf(va);
         _caretInstr = line;
         _selAnchor = line;
+        // If the target sits inside a collapsed region, expand it so the jump is actually visible.
+        int rc = RegionContaining(line);
+        if (rc >= 0 && line > _regions[rc].StartLine && _collapsed.Contains(_regions[rc].Va))
+        { _collapsed.Remove(_regions[rc].Va); RebuildHidden(); ConfigureScroll(); }
         long disp = DisplayIndexOfInstr(line);
+        long vis = ToVisible(disp);
+        if (vis < 0) vis = 0;   // defensive: target still hidden → top
         long firstThird = Math.Max(0, VisibleRows / 3);
-        _topDisplay = Math.Clamp(disp - firstThird, 0, Math.Max(0, DisplayCount - 1));
+        _topDisplay = Math.Clamp(vis - firstThird, 0, Math.Max(0, VisibleCount - 1));
         SyncScrollValue();
         _surface.Focus();
         _surface.InvalidateVisual();
@@ -137,13 +155,13 @@ public sealed class LinearDisassemblyView : Grid
     {
         var lines = new List<long>();
         var vas = new List<ulong>();
-        // Code labels = named, executable addresses that land exactly on an instruction.
+        // A label is any named address that lands exactly on a line in the listing — code symbols
+        // (sub_/loc_/imports) and the data landmarks for a folded-in section or the PE header (HEADER, .rdata…).
         var seen = new HashSet<long>();
         foreach (var (va, _) in result.Names)
         {
-            if (!result.Image.IsExecutableVa(va)) continue;
             long line = result.Linear.IndexOf(va);
-            if (result.Linear.VaAt(line) != va) continue; // not an instruction boundary
+            if (result.Linear.VaAt(line) != va) continue; // not a line boundary in the listing
             if (!seen.Add(line)) continue;
             lines.Add(line);
             vas.Add(va);
@@ -152,6 +170,112 @@ public sealed class LinearDisassemblyView : Grid
         var order = Enumerable.Range(0, lines.Count).OrderBy(i => lines[i]).ToArray();
         _labelInstrLines = order.Select(i => lines[i]).ToArray();
         _labelVa = order.Select(i => vas[i]).ToArray();
+    }
+
+    // ---- collapsible section regions ----
+    private void BuildRegions(AnalysisResult result)
+    {
+        var list = new List<(ulong, long, long, string)>();
+        long n = result.Linear.Count;
+
+        void Add(ulong startVa, ulong endVa, string name)
+        {
+            if (n == 0) return;
+            long sl = result.Linear.IndexOf(startVa);
+            if (result.Linear.VaAt(sl) != startVa) return;             // section not present in the listing
+            long el = result.Linear.IndexOf(endVa);
+            if (el < n && result.Linear.VaAt(el) < endVa) el++;        // make end exclusive (first line at/after endVa)
+            el = Math.Min(el, n);
+            if (el > sl + 1) list.Add((startVa, sl, el, name));         // need ≥1 content line to be worth collapsing
+        }
+
+        if (result.Image.HeaderRegion is { FileSize: > 0 } h) Add(h.StartVa, h.StartVa + (ulong)h.FileSize, "HEADER");
+        foreach (var s in result.Image.Sections)
+            if (s.FileSize > 0)
+                Add(s.StartVa, s.StartVa + (s.VirtualSize > 0 ? Math.Min(s.VirtualSize, (ulong)s.FileSize) : (ulong)s.FileSize), s.Name);
+
+        list.Sort((a, b) => a.Item2.CompareTo(b.Item2));
+        _regions = list.ToArray();
+        _collapsed.RemoveWhere(va => !Array.Exists(_regions, r => r.Va == va));   // drop stale collapse state
+        RebuildHidden();
+    }
+
+    /// <summary>Recompute the hidden display-row ranges for the currently-collapsed regions. A collapsed region
+    /// keeps its first row (rendered as the summary) and hides the rest: (header+1 .. region end).</summary>
+    private void RebuildHidden()
+    {
+        if (_collapsed.Count == 0) { _hidden = []; return; }
+        var ranges = new List<(long, long)>();
+        foreach (var (va, sl, el, _) in _regions)
+        {
+            if (!_collapsed.Contains(va)) continue;
+            long dStart = DisplayIndexOfInstr(sl) + 1;   // keep the header row at sl, hide everything after it
+            long dEnd = DisplayIndexOfInstr(el);
+            if (dEnd > dStart) ranges.Add((dStart, dEnd));
+        }
+        ranges.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+        _hidden = ranges.ToArray();
+    }
+
+    private long HiddenTotal { get { long t = 0; foreach (var (s, e) in _hidden) t += e - s; return t; } }
+
+    /// <summary>Visible display rows (total display rows minus the rows hidden inside collapsed regions).</summary>
+    private long VisibleCount => Math.Max(0, DisplayCount - HiddenTotal);
+
+    /// <summary>Map a visible row index to the underlying display-row index (skips collapsed ranges).</summary>
+    private long ToDisplay(long visible)
+    {
+        long d = visible;
+        foreach (var (s, e) in _hidden) { if (s <= d) d += e - s; else break; }
+        return d;
+    }
+
+    /// <summary>Map a display-row index to its visible index, or -1 if that row is hidden in a collapsed region.</summary>
+    private long ToVisible(long display)
+    {
+        long sub = 0;
+        foreach (var (s, e) in _hidden)
+        {
+            if (e <= display) sub += e - s;
+            else if (s <= display) return -1;   // inside a collapsed range
+            else break;
+        }
+        return display - sub;
+    }
+
+    /// <summary>The collapsible region whose header (first) line is exactly <paramref name="instrLine"/>, or null.</summary>
+    private int RegionStartAt(long instrLine)
+    {
+        for (int i = 0; i < _regions.Length; i++) if (_regions[i].StartLine == instrLine) return i;
+        return -1;
+    }
+
+    /// <summary>Index of the region whose content range [Start, End) contains <paramref name="instrLine"/>, or -1.</summary>
+    private int RegionContaining(long instrLine)
+    {
+        for (int i = 0; i < _regions.Length; i++)
+            if (instrLine >= _regions[i].StartLine && instrLine < _regions[i].EndLine) return i;
+        return -1;
+    }
+
+    private void ToggleCollapse(ulong va)
+    {
+        // Anchor the content currently at the top so the viewport doesn't jump when a region above it
+        // collapses/expands (the visible-row index would otherwise point at different content).
+        long topLine = _result is not null ? ContentAt(ToDisplay(_topDisplay)).InstrLine : 0;
+
+        if (!_collapsed.Add(va)) _collapsed.Remove(va);
+        RebuildHidden();
+
+        long anchorVis = ToVisible(DisplayIndexOfInstr(topLine));
+        if (anchorVis < 0)   // the anchor line is now hidden → use its region's header
+        {
+            int rc = RegionContaining(topLine);
+            anchorVis = rc >= 0 ? ToVisible(DisplayIndexOfInstr(_regions[rc].StartLine)) : 0;
+        }
+        _topDisplay = Math.Clamp(Math.Max(0, anchorVis), 0, Math.Max(0, VisibleCount - 1));
+        ConfigureScroll();
+        _surface.InvalidateVisual();
     }
 
     private long DisplayCount => _result is null ? 0 : _result.Linear.Count + _labelInstrLines.Length;
@@ -169,7 +293,7 @@ public sealed class LinearDisassemblyView : Grid
     /// <summary>Resolve a display line to either a label header or an instruction.</summary>
     private (bool IsLabel, long InstrLine) ContentAt(long display)
     {
-        if (_result is null) return (false, 0);
+        if (_result is null || _result.Linear.Count == 0) return (false, 0);
         long n = _result.Linear.Count;
         // Smallest instruction index j with DisplayIndexOfInstr(j) >= display.
         long lo = 0, hi = n - 1, found = n - 1;
@@ -199,7 +323,7 @@ public sealed class LinearDisassemblyView : Grid
     {
         if (_result is null) { _scroll.Maximum = 0; return; }
         _scroll.Minimum = 0;
-        _scroll.Maximum = Math.Max(0, DisplayCount - VisibleRows);
+        _scroll.Maximum = Math.Max(0, VisibleCount - VisibleRows);
         _scroll.LargeChange = VisibleRows;
         _scroll.ViewportSize = VisibleRows;
         SyncScrollValue();
@@ -215,7 +339,7 @@ public sealed class LinearDisassemblyView : Grid
 
     private void ScrollByLines(long delta)
     {
-        _topDisplay = Math.Clamp(_topDisplay + delta, 0, Math.Max(0, DisplayCount - 1));
+        _topDisplay = Math.Clamp(_topDisplay + delta, 0, Math.Max(0, VisibleCount - 1));
         SyncScrollValue();
         _surface.InvalidateVisual();
     }
@@ -257,10 +381,19 @@ public sealed class LinearDisassemblyView : Grid
 
     private void EnsureCaretVisible()
     {
-        long caretDisp = DisplayIndexOfInstr(_caretInstr);
-        if (caretDisp < _topDisplay) _topDisplay = caretDisp;
-        else if (caretDisp >= _topDisplay + VisibleRows) _topDisplay = caretDisp - VisibleRows + 1;
-        _topDisplay = Math.Clamp(_topDisplay, 0, Math.Max(0, DisplayCount - 1));
+        long caretVis = ToVisible(DisplayIndexOfInstr(_caretInstr));
+        if (caretVis < 0)
+        {
+            // Keyboard nav moved the caret into a collapsed region — expand it so the caret stays visible
+            // (otherwise the selection would silently traverse hidden lines).
+            int rc = RegionContaining(_caretInstr);
+            if (rc >= 0 && _collapsed.Remove(_regions[rc].Va)) { RebuildHidden(); ConfigureScroll(); }
+            caretVis = ToVisible(DisplayIndexOfInstr(_caretInstr));
+            if (caretVis < 0) return;
+        }
+        if (caretVis < _topDisplay) _topDisplay = caretVis;
+        else if (caretVis >= _topDisplay + VisibleRows) _topDisplay = caretVis - VisibleRows + 1;
+        _topDisplay = Math.Clamp(_topDisplay, 0, Math.Max(0, VisibleCount - 1));
         SyncScrollValue();
     }
 
@@ -280,8 +413,16 @@ public sealed class LinearDisassemblyView : Grid
     private void OnClick(Point p, bool extend = false)
     {
         if (_result is null) return;
-        long display = Math.Clamp(_topDisplay + (long)(p.Y / _rowHeight), 0, Math.Max(0, DisplayCount - 1));
-        var (_, instrLine) = ContentAt(display);
+        long display = ToDisplay(Math.Clamp(_topDisplay + (long)(p.Y / _rowHeight), 0, Math.Max(0, VisibleCount - 1)));
+        var (isLabel, instrLine) = ContentAt(display);
+
+        // Click on the [+]/[−] gutter marker of a section header row → collapse/expand instead of selecting.
+        if (!extend && !isLabel && p.X <= GutterW)
+        {
+            int ri = RegionStartAt(instrLine);
+            if (ri >= 0) { ToggleCollapse(_regions[ri].Va); return; }
+        }
+
         _caretInstr = instrLine;
         if (!extend || _selAnchor < 0) _selAnchor = instrLine;   // shift-click extends; plain click collapses
         _surface.InvalidateVisual();
@@ -327,7 +468,9 @@ public sealed class LinearDisassemblyView : Grid
             long rawLen = line + 1 < _result.Linear.Count ? (long)(_result.Linear.VaAt(line + 1) - va) : 1;
             var bytes = _result.Image.ReadBytesAtVa(va, (int)Math.Clamp(rawLen, 1, 256));
             var (d, v, _) = ClassifyData(va, bytes);
-            return $"{addr}  {Hex(bytes)}  {d}{v}";
+            string dataText = $"{addr}  {Hex(bytes)}  {d}{v}";
+            if (_result.Comments.TryGetValue(va, out var dcm)) dataText += "   ; " + dcm;
+            return dataText;
         }
         if (!_dis!.TryDecodeAt(va, out var instr)) return $"{addr}  ??";
         string text = _fmt!.FormatText(instr);
@@ -350,8 +493,9 @@ public sealed class LinearDisassemblyView : Grid
 
         for (int r = 0; r < rows; r++)
         {
-            long display = _topDisplay + r;
-            if (display >= DisplayCount) break;
+            long visible = _topDisplay + r;
+            if (visible >= VisibleCount) break;
+            long display = ToDisplay(visible);
             double y = r * _rowHeight;
             var (isLabel, instrLine) = ContentAt(display);
             ulong va = _result.Linear.VaAt(instrLine);
@@ -360,6 +504,22 @@ public sealed class LinearDisassemblyView : Grid
             {
                 DrawLabel(dc, va, y, width, dpi);
                 continue;
+            }
+
+            // Collapsible section header row: draw the [+]/[−] gutter marker, and when collapsed render a
+            // one-line summary in place of the section's content.
+            int ri = RegionStartAt(instrLine);
+            if (ri >= 0)
+            {
+                bool collapsed = _collapsed.Contains(_regions[ri].Va);
+                Draw(dc, collapsed ? "[+]" : "[-]", 2, y, SyntaxTheme.Comment, dpi);
+                if (collapsed)
+                {
+                    long hiddenLines = _regions[ri].EndLine - _regions[ri].StartLine - 1;
+                    Draw(dc, $"{va.ToString("X" + _addrDigits)}  ", AddrX, y, SyntaxTheme.Address, dpi);
+                    Draw(dc, $"{_regions[ri].Name}  —  {hiddenLines:N0} lines collapsed (click [+])", DisasmX, y, SyntaxTheme.Comment, dpi);
+                    continue;
+                }
             }
 
             if (_ipVa != 0 && va == _ipVa)
@@ -440,23 +600,35 @@ public sealed class LinearDisassemblyView : Grid
 
         var (directive, value, valueBrush) = ClassifyData(va, bytes);
         double x = Draw(dc, directive, DisasmX, y, SyntaxTheme.Keyword, dpi);
-        Draw(dc, value, x, y, valueBrush, dpi);
+        x = Draw(dc, value, x, y, valueBrush, dpi);
+
+        // Inline comment (PE header field name, section banner, referenced string, …).
+        if (_result.Comments.TryGetValue(va, out var comment))
+            Draw(dc, "   ; " + comment, x + _charWidth, y, SyntaxTheme.Comment, dpi);
     }
 
-    /// <summary>Decide how a data run renders: db "string" / dd|dq pointer (named if known) / db byte row.</summary>
+    /// <summary>Decide how a data run renders: int3 padding / db "string" / a sized scalar dw|dd|dq
+    /// (pointers named if known) / a db byte row.</summary>
     private (string Directive, string Value, Brush Brush) ClassifyData(ulong va, byte[] bytes)
     {
         if (Array.TrueForAll(bytes, b => b == 0xCC))   // int3 alignment padding
             return ("int3", bytes.Length > 1 ? $"  × {bytes.Length}" : "", SyntaxTheme.Comment);
 
-        if ((bytes.Length == 4 || bytes.Length == 8) &&
-            _result!.Image.IsMappedVa(bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0)))
-        {
-            ulong v = bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
-            string? name = _result.NameFor(v);
-            return (bytes.Length == 8 ? "dq " : "dd ", name ?? $"0x{v:X}", name is not null ? SyntaxTheme.Symbol : SyntaxTheme.Number);
-        }
         if (TryFormatString(bytes, out string str)) return ("db ", str, SyntaxTheme.Symbol);
+
+        // A 1/2/4/8-byte run renders as a sized scalar; 4/8-byte values that point into the image are named.
+        switch (bytes.Length)
+        {
+            case 8 or 4:
+            {
+                ulong v = bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
+                string? name = _result!.Image.IsMappedVa(v) ? _result.NameFor(v) : null;
+                string val = name ?? "0x" + v.ToString(bytes.Length == 8 ? "X" : "X8");
+                return (bytes.Length == 8 ? "dq " : "dd ", val, name is not null ? SyntaxTheme.Symbol : SyntaxTheme.Number);
+            }
+            case 2: return ("dw ", $"0x{BitConverter.ToUInt16(bytes, 0):X4}", SyntaxTheme.Number);
+            case 1: return ("db ", $"0x{bytes[0]:X2}", SyntaxTheme.Number);
+        }
 
         var sb = new System.Text.StringBuilder();
         for (int i = 0; i < bytes.Length && i < 16; i++) { if (i > 0) sb.Append(", "); sb.Append("0x").Append(bytes[i].ToString("X2")); }
@@ -503,10 +675,12 @@ public sealed class LinearDisassemblyView : Grid
 
         for (int r = 0; r < rows; r++)
         {
-            long display = _topDisplay + r;
-            if (display >= DisplayCount) break;
-            var (isLabel, instrLine) = ContentAt(display);
+            long visible = _topDisplay + r;
+            if (visible >= VisibleCount) break;
+            var (isLabel, instrLine) = ContentAt(ToDisplay(visible));
             if (isLabel || _result.Linear.IsDataAt(instrLine)) continue;
+            int ri = RegionStartAt(instrLine);
+            if (ri >= 0 && _collapsed.Contains(_regions[ri].Va)) continue;   // collapsed header — no arrow
             ulong va = _result.Linear.VaAt(instrLine);
             if (!_dis.TryDecodeAt(va, out var instr)) continue;
             if (FlowAnalysis.DirectBranchTarget(instr) is not ulong target) continue;
@@ -514,12 +688,13 @@ public sealed class LinearDisassemblyView : Grid
 
             long targetInstr = _result.Linear.IndexOf(target);
             if (_result.Linear.VaAt(targetInstr) != target) continue;
-            long targetDisp = DisplayIndexOfInstr(targetInstr);
+            long targetVis = ToVisible(DisplayIndexOfInstr(targetInstr));
+            if (targetVis < 0) continue;   // target hidden inside a collapsed region
             long visTop = _topDisplay, visBot = _topDisplay + rows;
-            if (targetDisp < visTop || targetDisp >= visBot) continue;
+            if (targetVis < visTop || targetVis >= visBot) continue;
 
-            double y0 = (display - _topDisplay) * _rowHeight + _rowHeight / 2;
-            double y1 = (targetDisp - _topDisplay) * _rowHeight + _rowHeight / 2;
+            double y0 = (visible - _topDisplay) * _rowHeight + _rowHeight / 2;
+            double y1 = (targetVis - _topDisplay) * _rowHeight + _rowHeight / 2;
             double xElbow = Math.Max(2, midGutter - Math.Min(8, Math.Abs(r)) );
             dc.DrawLine(pen, new Point(midGutter, y0), new Point(xElbow, y0));
             dc.DrawLine(pen, new Point(xElbow, y0), new Point(xElbow, y1));
@@ -622,8 +797,8 @@ public sealed class LinearDisassemblyView : Grid
             Focus();
             // Don't collapse an existing multi-line selection when right-clicking inside it.
             var (lo, hi) = _owner.SelRange();
-            long line = _owner._topDisplay + (long)(e.GetPosition(this).Y / _owner._rowHeight);
-            var (_, instr) = _owner.ContentAt(Math.Clamp(line, 0, Math.Max(0, _owner.DisplayCount - 1)));
+            long visible = Math.Clamp(_owner._topDisplay + (long)(e.GetPosition(this).Y / _owner._rowHeight), 0, Math.Max(0, _owner.VisibleCount - 1));
+            var (_, instr) = _owner.ContentAt(_owner.ToDisplay(visible));
             if (!(lo >= 0 && instr >= lo && instr <= hi)) _owner.OnClick(e.GetPosition(this));
         }
 

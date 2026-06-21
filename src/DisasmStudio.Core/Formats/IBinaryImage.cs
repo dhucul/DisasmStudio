@@ -29,6 +29,13 @@ public interface IBinaryImage
     IReadOnlyList<NamedSymbol> Symbols { get; }
     IReadOnlyList<ImportEntry> Imports { get; }
 
+    /// <summary>The header region (PE: the MZ/PE headers up to the first section), exposed so it can be
+    /// optionally folded into the listing as data. Null for formats without a distinct header region.</summary>
+    Section? HeaderRegion { get; }
+
+    /// <summary>The parsed resource (.rsrc) directory tree, or null when the format/file has none.</summary>
+    ResourceTree? Resources { get; }
+
     /// <summary>Function start VAs from format metadata (PE x64 .pdata RUNTIME_FUNCTIONs); empty otherwise.
     /// The authoritative function list for x64 — used to seed code discovery and classification.</summary>
     IReadOnlyList<ulong> FunctionStarts { get; }

@@ -145,12 +145,26 @@ public static class CodeMap
                 // in a gap that no seed reaches and that has no prologue is left as data rather than guessed;
                 // genuinely indirect-only functions are still found via their prologue (endbr64), the
                 // code-pointer scan, or jump-table case edges.
-                if (IsPrologue(image, va))
+                if (IsPrologue(image, va) || IsThunk(image, dis, va))
                 {
                     one[0] = va;
                     Descend(image, code, one, jumpTables, token);
                     seeds.Add(va);
                     va = Math.Max(code.NextGap(va, end), va + 1);   // always make progress
+                    continue;
+                }
+
+                // Linear-sweep recovery: an indirect-only leaf function with no prologue/.pdata and no direct
+                // caller (a getter `mov rax,[rcx]; ret`, a range-check helper, …) ends in `ret`, not a jmp, so
+                // neither descent nor the prologue/thunk scans reach it — it would render as meaningless db.
+                // Recover it only when the WHOLE run between padding boundaries decodes cleanly to a terminator
+                // (the strong signal the rejected "decodes to a ret within N" heuristic lacked), and mark it as
+                // code WITHOUT seeding a function, so the listing disassembles it but the function list isn't
+                // flooded with phantom sub_*.
+                if (TryRecoverCodeRun(image, code, dis, va, end, out ulong runEnd) && runEnd > va)
+                {
+                    MarkRun(image, code, dis, va, runEnd);
+                    va = Math.Max(runEnd, va + 1);
                     continue;
                 }
                 va++;   // unknown byte — keep scanning
@@ -229,6 +243,66 @@ public static class CodeMap
         int pushes = 0;
         while (pushes < 8 && PushLen(image, cur) is int pl) { cur += (ulong)pl; pushes++; }
         return pushes >= 1 && FrameAlloc(image.ReadBytesAtVa(cur, 4));
+    }
+
+    /// <summary>Recognise a tail-call thunk: a few straight-line register-setup instructions ending in a
+    /// direct <c>jmp</c> to real (executable) code — e.g. MSVC's <c>mov rcx,[rdx+disp]; jmp func</c>
+    /// virtual/adjustor thunks, or `lea rcx,[rdx+disp]; jmp`. These are leaf, indirect-only stubs that the
+    /// recursive descent never reaches and that have no .pdata entry, so without this they'd be left as
+    /// meaningless db rows. Requiring the jmp target to be a real exec VA is the discriminator the old
+    /// "decodes to a jmp within N instructions" heuristic lacked — random data almost never forms a rel32
+    /// that lands inside .text — so false positives stay near zero. A lone <c>jmp</c> is only accepted when
+    /// 16-byte aligned (a stub-table slot), since a bare E9 byte is otherwise common in data.</summary>
+    private static bool IsThunk(IBinaryImage image, Disassembler dis, ulong va)
+    {
+        ulong cur = va;
+        for (int i = 0; i < 4; i++)
+        {
+            if (!dis.TryDecodeAt(cur, out var ins) || ins.Length == 0) return false;
+            if (ins.Mnemonic == Mnemonic.Jmp)
+                return FlowAnalysis.DirectBranchTarget(ins) is ulong t
+                    && image.IsExecutableVa(t)
+                    && (i > 0 || (va & 0xF) == 0);                   // mov/lea…; jmp, or a 16-aligned lone jmp
+            if (ins.FlowControl != FlowControl.Next) return false;   // only straight-line lead-in before the jmp
+            if (ins.Mnemonic is not (Mnemonic.Mov or Mnemonic.Lea or Mnemonic.Add or Mnemonic.Sub or Mnemonic.Xor or Mnemonic.Or))
+                return false;
+            cur += (ulong)ins.Length;
+        }
+        return false;
+    }
+
+    /// <summary>Linear-sweep recovery of an unmarked gap: from <paramref name="va"/> (just past padding),
+    /// decode straight-line and return the end of a clean run that looks like real code — every byte decoded
+    /// into a valid instruction and the run reached a control-flow terminator (ret/jmp/int) before hitting
+    /// int3/zero padding or known code. Returns false (leave as data) on the first invalid instruction, if no
+    /// terminator is seen, or if no boundary is reached within the cap. An int3 only ends the run when it
+    /// directly follows a terminator (real padding), so a mid-function trap int3 (`ja $+1; int3`) is kept.</summary>
+    private static bool TryRecoverCodeRun(IBinaryImage image, CodeBitmap code, Disassembler dis,
+        ulong va, ulong end, out ulong runEnd)
+    {
+        runEnd = va;
+        ulong cur = va;
+        bool sawTerminator = false, lastWasTerminator = false;
+        const int maxInstrs = 4096;
+        for (int n = 0; n < maxInstrs && cur < end; n++)
+        {
+            if (code.IsCode(cur)) { runEnd = cur; return sawTerminator; }                // merged into known code
+            byte b = ByteAt(image, cur);
+            if ((b == 0xCC || b == 0x00) && lastWasTerminator) { runEnd = cur; return sawTerminator; } // padding after a function
+            if (!dis.TryDecodeAt(cur, out var ins) || ins.Length == 0) return false;     // invalid → data
+            cur += (ulong)ins.Length;
+            bool term = ins.FlowControl is FlowControl.Return or FlowControl.UnconditionalBranch or FlowControl.Interrupt;
+            sawTerminator |= term;
+            lastWasTerminator = term;
+        }
+        return false;   // never reached a clean boundary within the cap
+    }
+
+    /// <summary>Mark every instruction in a validated linear run [va, runEnd) as code.</summary>
+    private static void MarkRun(IBinaryImage image, CodeBitmap code, Disassembler dis, ulong va, ulong runEnd)
+    {
+        ulong p = va;
+        while (p < runEnd && dis.TryDecodeAt(p, out var ins) && ins.Length > 0) { code.Mark(p, ins.Length); p += (ulong)ins.Length; }
     }
 
     private static bool FrameAlloc(byte[] b) =>
