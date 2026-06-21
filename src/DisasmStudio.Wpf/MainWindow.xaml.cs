@@ -44,7 +44,10 @@ public partial class MainWindow : Window
     private readonly record struct DllDebugParams(string HostExe, string CommandLine, string? WorkingDir, string DllPath, uint BreakRva, bool BreakIsEntry);
 
     private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
+    private System.Threading.Timer? _captureFlushTimer;   // flushes the capture log off the UI thread (disk I/O)
     private int _captureEdges = -1;          // last call-graph edge total (rebuild only on change)
+    private long _captureGraphBuiltAt;       // Environment.TickCount64 of the last call-graph rebuild (throttle)
+    private const int CaptureGraphIntervalMs = 1500;   // min gap between (expensive) call-graph TreeView rebuilds
     private string? _captureLogPath;         // last chosen capture-log path (Save-As default)
     private readonly HashSet<ulong> _captureCommented = [];   // entries already annotated inline
 
@@ -274,12 +277,16 @@ public partial class MainWindow : Window
         var cap = _dbg!.StartCapture(funcVa, log, once, argsOnly, annotate);
         if (cap is null) { StatusText.Text = "Capture needs the program stopped at least once first."; return; }
 
-        _captureEdges = -1; _captureCommented.Clear();
+        _captureEdges = -1; _captureGraphBuiltAt = 0; _captureCommented.Clear();
         Debug.ClearCapture(); Debug.SelectCaptureTab();
         CaptureBtn.Content = "⦿ Capturing…";
         _captureTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _captureTimer.Tick -= OnCaptureTick; _captureTimer.Tick += OnCaptureTick;
         _captureTimer.Start();
+        // Persist the buffered log from a background thread, not the UI tick — flushing is disk I/O and takes a
+        // lock the engine thread also writes under, so doing it on the UI tick can briefly stall the UI.
+        _captureFlushTimer?.Dispose();
+        _captureFlushTimer = new System.Threading.Timer(_ => { try { _dbg?.Capture?.FlushLog(); } catch { } }, null, 1000, 1000);
         string scope = funcVa == 0 ? "all functions" : cap.NameOf(funcVa);
         string freq = once ? "first call" : "every call";
         string args = argsOnly ? ", args only" : "";
@@ -290,10 +297,23 @@ public partial class MainWindow : Window
     private void StopCapture()
     {
         _captureTimer?.Stop();
-        OnCaptureTick(null, EventArgs.Empty);   // final flush of any pending records
+        _captureFlushTimer?.Dispose(); _captureFlushTimer = null;
+        OnCaptureTick(null, EventArgs.Empty);   // final drain of any pending records
+        // Build the final call graph once now: the per-tick rebuild is gated on the tab being visible and
+        // throttled, so the graph may be stale (or never built). Snapshot before StopCapture nulls Capture.
+        if (_dbg?.Capture is { } cap) RebuildCaptureGraph(cap);
         _dbg?.StopCapture();
         CaptureBtn.Content = "⦿ Capture";
         StatusText.Text = "Capture stopped.";
+    }
+
+    /// <summary>Rebuild the Call Graph tree from the current capture edge set and record when (for throttling).
+    /// Expensive — an unbounded TreeView reconstruction — so callers gate it on visibility/cadence.</summary>
+    private void RebuildCaptureGraph(DisasmStudio.Debug.FunctionCapture cap)
+    {
+        _captureEdges = cap.EdgeCount;
+        _captureGraphBuiltAt = Environment.TickCount64;
+        Debug.RebuildCallGraph(cap.EdgesSnapshot(), cap.NameOf);
     }
 
     private void OnCaptureTick(object? sender, EventArgs e)
@@ -302,7 +322,7 @@ public partial class MainWindow : Window
         if (cap is null) return;
         bool is32 = _dbg!.Engine.Is32;
 
-        cap.FlushLog();   // periodically persist the buffered log so an abnormal exit loses little
+        // (The log is flushed on a background timer, not here — disk I/O must not stall the UI tick.)
         var recs = cap.DrainPending();   // records queued since the last tick (bounded; full history is in the file)
         if (recs.Count > 0)
         {
@@ -315,8 +335,14 @@ public partial class MainWindow : Window
             if (addedComment) Linear.Refresh();   // re-render only when a NEW inline comment actually appeared
         }
 
-        // Rebuild the call graph only when its edge set actually changed (avoids copying it every tick).
-        if (cap.EdgeCount != _captureEdges) { _captureEdges = cap.EdgeCount; Debug.RebuildCallGraph(cap.EdgesSnapshot(), cap.NameOf); }
+        // Rebuild the call graph lazily. It's an unbounded TreeView reconstruction (and EdgesSnapshot deep-copies
+        // the whole edge set under the engine's lock), so doing it every tick — especially while its tab is
+        // hidden — is the main cause of UI jank in a long capture. Only rebuild when the Call Graph tab is
+        // actually visible AND at most every CaptureGraphIntervalMs; while it's hidden we leave _captureEdges
+        // stale so the first eligible tick (or StopCapture) refreshes it.
+        if (cap.EdgeCount != _captureEdges && Debug.CallGraphTabVisible
+            && Environment.TickCount64 - _captureGraphBuiltAt >= CaptureGraphIntervalMs)
+            RebuildCaptureGraph(cap);
 
         // Live progress so the user sees it working, without the panel holding the whole capture.
         if (cap.Active) StatusText.Text = $"Capturing… {cap.TotalCount:N0} events → {cap.CurrentLogPart ?? "(log unavailable)"}";
@@ -351,7 +377,9 @@ public partial class MainWindow : Window
     private void OnDbgExited(int code)
     {
         _captureTimer?.Stop();
+        _captureFlushTimer?.Dispose(); _captureFlushTimer = null;
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
+        if (_dbg?.Capture is { } cap) RebuildCaptureGraph(cap);   // final graph before capture state is dropped
         _dbg?.AbortCapture();   // process is gone: drop capture state and close the log (no live removal needed)
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false; DerefCheck.IsEnabled = false;
         RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run"; DbgRunBtn.IsEnabled = true; SetStepButtons(false);   // re-enable for a fresh Run

@@ -131,6 +131,12 @@ public sealed class DebugPanel : Grid
 
     public void SelectCaptureTab() { foreach (TabItem t in _tabs.Items) if ((string)t.Header == "Capture") { _tabs.SelectedItem = t; break; } }
 
+    /// <summary>True when the Call Graph tab is the one currently shown. The call-graph <see cref="TreeView"/>
+    /// is an unbounded reconstruction (it grows with the capture), so the capture loop only pays to rebuild it
+    /// while it is actually visible — rebuilding a hidden tree every tick is the main thing that janks the UI
+    /// during a long capture.</summary>
+    public bool CallGraphTabVisible => _tabs.SelectedItem is TabItem t && (string)t.Header == "Call Graph";
+
     /// <summary>Most recent capture rows kept in the panel — a live "it's working" view, not the whole capture
     /// (the complete log is on disk). Bounded so a huge capture can't bloat the list and slow the GUI.</summary>
     private const int MaxCaptureRows = 200;
