@@ -64,7 +64,7 @@ public sealed class Lifter
             blocks.Add(lb);
         }
 
-        var lf = new LiftedFunction { Va = fn.Va, Name = fn.Name, Blocks = blocks };
+        var lf = new LiftedFunction { Va = fn.EntryVa, Name = fn.Name, Blocks = blocks };
         foreach (var b in blocks) lf.ByStart[b.Start] = b;
         return lf;
     }

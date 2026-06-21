@@ -20,11 +20,26 @@ public static class CfgBuilder
         if (fn.BlocksBuilt) return;
 
         IInstructionDecoder dis = decoder ?? new Disassembler(image);
+
+        // Recursive descent normally begins at the function's entry. If the entry VA doesn't decode —
+        // typically because the function was recovered from a code pointer that landed in the middle of
+        // an instruction — nudge the start forward to the first decodable instruction so we still
+        // disassemble from (near) the function rather than reporting nothing. The realigned stream
+        // re-syncs to the real code within a few bytes. Bounded by the longest x86/x64 instruction.
+        // A known import (IAT) slot is data, not misaligned code (some images keep the IAT in .text, so a
+        // call-through target looks like a function), so it's left to produce no blocks rather than
+        // decoding the pointer bytes into a junk CFG.
+        ulong entry = fn.Va;
+        if (image.IsExecutableVa(entry) && !image.ImportsByIatVa.ContainsKey(entry) && !dis.TryDecodeAt(entry, out _))
+            for (int k = 1; k <= 15; k++)
+                if (image.IsExecutableVa(entry + (ulong)k) && dis.TryDecodeAt(entry + (ulong)k, out _))
+                { entry += (ulong)k; break; }
+
         var insns = new SortedDictionary<ulong, Instruction>();
-        var leaders = new HashSet<ulong> { fn.Va };
+        var leaders = new HashSet<ulong> { entry };
         var visited = new HashSet<ulong>();
         var work = new Stack<ulong>();
-        work.Push(fn.Va);
+        work.Push(entry);
 
         while (work.Count > 0 && insns.Count < MaxInstructions)
         {
@@ -67,7 +82,7 @@ public static class CfgBuilder
             }
         }
 
-        fn.SetBlocks(SplitIntoBlocks(insns, leaders, jumpTables));
+        fn.SetBlocks(SplitIntoBlocks(insns, leaders, jumpTables), entry);
     }
 
     private static List<BasicBlock> SplitIntoBlocks(SortedDictionary<ulong, Instruction> insns, HashSet<ulong> leaders,

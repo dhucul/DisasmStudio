@@ -28,9 +28,14 @@ public sealed class Function
     public required string Name { get; set; }
     private List<BasicBlock>? _blocks;
 
+    /// <summary>The VA the CFG actually begins at. Equal to <see cref="Va"/> except when the entry was
+    /// realigned forward because <see cref="Va"/> landed mid-instruction (e.g. a function recovered from
+    /// a code pointer that pointed into the middle of an instruction). Set when the CFG is built.</summary>
+    public ulong EntryVa { get; private set; }
+
     public bool BlocksBuilt => _blocks is not null;
     public IReadOnlyList<BasicBlock> Blocks => _blocks ?? [];
-    internal void SetBlocks(List<BasicBlock> b) => _blocks = b;
+    internal void SetBlocks(List<BasicBlock> b, ulong entryVa) { _blocks = b; EntryVa = entryVa; }
 
     public override string ToString() => $"{Name} @ {Va:X}";
 }

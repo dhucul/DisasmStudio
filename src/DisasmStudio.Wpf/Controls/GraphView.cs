@@ -178,7 +178,7 @@ public sealed class GraphView : FrameworkElement
         // Rank = BFS distance from the entry block.
         var rank = new Dictionary<ulong, int>();
         var queue = new Queue<ulong>();
-        ulong entry = _byStart.ContainsKey(_function.Va) ? _function.Va : _blocks[0].Start;
+        ulong entry = _byStart.ContainsKey(_function.EntryVa) ? _function.EntryVa : _blocks[0].Start;
         rank[entry] = 0;
         queue.Enqueue(entry);
         while (queue.Count > 0)

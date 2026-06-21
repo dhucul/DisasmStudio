@@ -17,6 +17,12 @@ public static class Decompiler
     {
         try
         {
+            // An IAT slot misfiled as a function — some images keep the import table inside .text, so a
+            // call-through target looks like code. It's a pointer, not an instruction stream; say so
+            // plainly instead of disassembling the pointer bytes into noise.
+            if (result.Image.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
+                return Note(fn.Va, $"// import slot -> {imp.Module}!{imp.Name} (data, not code)");
+
             CfgBuilder.Build(result.Image, fn, result.JumpTables);
             if (fn.Blocks.Count == 0) return Note(fn.Va, "// no code recovered for this function");
             if (fn.Blocks.Count > MaxBlocks) return Note(fn.Va, $"// function too large to decompile ({fn.Blocks.Count} blocks)");
@@ -62,6 +68,9 @@ public static class Decompiler
     {
         try
         {
+            if (result.Image.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
+                return NoteLines(fn.Va, $"/* import slot -> {imp.Module}!{imp.Name} (data, not code) */");
+
             CfgBuilder.Build(result.Image, fn, result.JumpTables);
             if (fn.Blocks.Count == 0) return NoteLines(fn.Va, "/* no code recovered */");
             if (fn.Blocks.Count > MaxBlocks) return NoteLines(fn.Va, $"/* function too large to decompile ({fn.Blocks.Count} blocks) */");
