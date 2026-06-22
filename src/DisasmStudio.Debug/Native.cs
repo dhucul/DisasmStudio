@@ -14,6 +14,7 @@ internal static class Native
     public const uint DEBUG_ONLY_THIS_PROCESS = 0x00000002;
     public const uint DEBUG_PROCESS = 0x00000001;
     public const uint CREATE_NEW_CONSOLE = 0x00000010;
+    public const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
 
     // ---- debug event codes ----
     public const uint EXCEPTION_DEBUG_EVENT = 1;
