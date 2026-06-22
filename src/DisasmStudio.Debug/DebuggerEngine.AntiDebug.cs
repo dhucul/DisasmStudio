@@ -19,7 +19,6 @@ public sealed partial class DebuggerEngine
 
     private bool _adApplied;
     private long _fakeClock;                                            // monotonic synthetic timer (defeats timing checks)
-    private uint _fakeParentPid;                                        // explorer.exe PID, to spoof a parent-process check
     private readonly Dictionary<ulong, InternalBp> _internalBps = [];   // hook addr -> hook state
     private readonly Dictionary<uint, ulong> _internalStep = [];        // thread -> internal hook to re-arm after a step
     private readonly Dictionary<ulong, PendingReturn> _pendingReturns = [];   // return-patch: retaddr -> output to scrub
@@ -213,15 +212,27 @@ public sealed partial class DebuggerEngine
 
         ulong sp = c.GetReg(Is32 ? "esp" : "rsp");
         // Arg N (1-based): x64 → rcx/rdx/r8/r9; x86 stdcall → [esp + 4*N].
+        // x64 stack args start at [rsp+0x28] (after the return addr + 0x20 of register-home/shadow space), so
+        // arg N (N≥5) sits at rsp + N*8; x86 stdcall puts arg N at [esp + N*4] (return addr occupies [esp]).
         ulong Arg(int n) => !Is32
-            ? n switch { 1 => c.GetReg("rcx"), 2 => c.GetReg("rdx"), 3 => c.GetReg("r8"), 4 => c.GetReg("r9"), _ => ReadPtr(sp + (ulong)(n - 1) * 8, false) }
+            ? n switch { 1 => c.GetReg("rcx"), 2 => c.GetReg("rdx"), 3 => c.GetReg("r8"), 4 => c.GetReg("r9"), _ => ReadPtr(sp + (ulong)n * 8, false) }
             : ReadU32(sp + (ulong)(n * 4));
 
         // NtGetContextThread can't be emulated (we don't have the real context). Let it run, then scrub the Dr
         // registers from its output on return — so the program never sees our hardware breakpoints.
         if (bp.Kind == AdKind.GetContextThread)
         {
-            ArmReturnBp(ReadPtr(sp, Is32), Arg(2));   // arg2 = PCONTEXT
+            ArmReturnBp(ReadPtr(sp, Is32), AdKind.GetContextThread, Arg(2), 0);   // arg2 = PCONTEXT
+            LetItRun(addr, tid, c, hThread);
+            return;
+        }
+
+        // NtQueryObject(handle, ObjectTypesInformation=2nd arg ==3, out buf, len, …): can't be emulated (we don't
+        // know the real object table), so run it, then scrub the DebugObject type's counts from its output on
+        // return — emulating a system with no live debug object. Other classes pass straight through.
+        if (bp.Kind == AdKind.QueryObject)
+        {
+            if (Arg(2) == 3) ArmReturnBp(ReadPtr(sp, Is32), AdKind.QueryObject, Arg(3), Arg(4));   // arg3 = buffer, arg4 = length
             LetItRun(addr, tid, c, hThread);
             return;
         }
@@ -362,29 +373,79 @@ public sealed partial class DebuggerEngine
     }
 
     // ---- return-patch hooks: run the real function, then scrub its output on return ----
-    private void ArmReturnBp(ulong retAddr, ulong ctxPtr)
+    private void ArmReturnBp(ulong retAddr, AdKind kind, ulong ptr, ulong len)
     {
-        if (retAddr == 0 || ctxPtr == 0) return;
+        if (retAddr == 0 || ptr == 0) return;
         lock (_lock)
             if (_pendingReturns.ContainsKey(retAddr) || _swBps.ContainsKey(retAddr)
                 || _tempBps.ContainsKey(retAddr) || _internalBps.ContainsKey(retAddr)) return;
         var o = ReadMemory(retAddr, 1);
         if (o.Length < 1) return;
-        lock (_lock) _pendingReturns[retAddr] = (ctxPtr, o[0]);
+        lock (_lock) _pendingReturns[retAddr] = new PendingReturn(kind, ptr, len, o[0]);
         WriteCode(retAddr, [0xCC]);
     }
 
-    /// <summary>At an armed return address: restore the byte, rewind, and zero the Dr0-Dr3/Dr6/Dr7 fields of
-    /// the CONTEXT the call filled in — hiding our hardware breakpoints. Handled silently (never surfaced).</summary>
+    /// <summary>At an armed return address: restore the original byte, rewind, and scrub the just-completed
+    /// call's output per its kind — the queried CONTEXT's debug registers, or an NtQueryObject result's
+    /// DebugObject counts. Handled silently (never surfaced to the UI).</summary>
     private void HandleReturnHook(ulong addr, IntPtr hThread)
     {
-        (ulong CtxPtr, byte Orig) pend;
+        PendingReturn pend;
         lock (_lock) { if (!_pendingReturns.Remove(addr, out pend)) return; }
         WriteCode(addr, [pend.Orig]);
         SetIp(hThread, addr);
+        switch (pend.Kind)
+        {
+            case AdKind.GetContextThread: ScrubDebugRegisters(pend.Ptr); break;
+            case AdKind.QueryObject: ScrubDebugObjectCounts(pend.Ptr, pend.Len); break;
+        }
+    }
+
+    /// <summary>Zero the Dr0-Dr3/Dr6/Dr7 fields of a CONTEXT a NtGetContextThread call filled in, hiding our
+    /// hardware breakpoints from a target that reads its own debug registers.</summary>
+    private void ScrubDebugRegisters(ulong ctxPtr)
+    {
+        if (ctxPtr == 0) return;
         int[] drOff = Is32 ? [0x04, 0x08, 0x0C, 0x10, 0x14, 0x18] : [0x48, 0x50, 0x58, 0x60, 0x68, 0x70];
         var zero = new byte[Is32 ? 4 : 8];
-        foreach (int off in drOff) WriteMemory(pend.CtxPtr + (ulong)off, zero);
+        foreach (int off in drOff) WriteMemory(ctxPtr + (ulong)off, zero);
+    }
+
+    /// <summary>Walk the OBJECT_TYPE_INFORMATION array an NtQueryObject(ObjectTypesInformation) call wrote into
+    /// the debuggee buffer and zero the "DebugObject" type's TotalNumberOfObjects/Handles — the values a packer
+    /// reads to spot a live debug object. A parse miss simply leaves the result unscrubbed; every access is
+    /// bounds-checked, so it can never fault the host. The buffer begins with a ULONG count, then pointer-aligned
+    /// OBJECT_TYPE_INFORMATION entries, each a UNICODE_STRING TypeName followed inline by its name and counts;
+    /// the next entry starts at align(TypeName.Buffer + MaximumLength).</summary>
+    private void ScrubDebugObjectCounts(ulong buffer, ulong len)
+    {
+        if (buffer == 0 || len < 8) return;
+        int ptr = Is32 ? 4 : 8;
+        int usSize = Is32 ? 8 : 16;                                          // UNICODE_STRING {Length; MaximumLength; Buffer}
+        uint count = ReadU32(buffer);                                        // OBJECT_TYPES_INFORMATION.NumberOfTypes
+        if (count == 0 || count > 4096) return;
+        ulong end = buffer + len;
+        ulong entry = (buffer + 4UL + (ulong)ptr - 1) & ~((ulong)ptr - 1);   // first entry: pointer-aligned past the count
+        for (uint i = 0; i < count; i++)
+        {
+            if (entry < buffer || entry + (ulong)usSize + 8 > end) break;
+            var us = ReadMemory(entry, usSize);
+            if (us.Length < usSize) break;
+            ushort nameLen = BitConverter.ToUInt16(us, 0);
+            ushort nameMax = BitConverter.ToUInt16(us, 2);
+            ulong nameBuf = Is32 ? BitConverter.ToUInt32(us, 4) : BitConverter.ToUInt64(us, 8);
+            if (nameBuf != 0 && nameLen is > 0 and <= 1024)
+            {
+                var nb = ReadMemory(nameBuf, nameLen);
+                if (nb.Length == nameLen && System.Text.Encoding.Unicode.GetString(nb) == "DebugObject")
+                {
+                    WriteU32(entry + (ulong)usSize, 0);       // TotalNumberOfObjects
+                    WriteU32(entry + (ulong)usSize + 4, 0);   // TotalNumberOfHandles
+                }
+            }
+            if (nameBuf == 0) break;
+            entry = (nameBuf + nameMax + (ulong)ptr - 1) & ~((ulong)ptr - 1);   // next entry follows this name, aligned
+        }
     }
 
     /// <summary>Emulate the function's return: pop the return address and (x86 stdcall) the arguments.</summary>

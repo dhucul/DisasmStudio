@@ -28,7 +28,19 @@ public static class PeBuilder
         uint newSecRva = imageEnd;
         byte[] importBytes = [];
         uint descriptorSize = 0;
-        bool addSection = imports is { Ok: true };
+
+        // Appending the import section needs one more 40-byte section header. If the header table is already
+        // full — its growth would reach into the first section's data — skip the rebuild and keep the original
+        // import directory rather than emit a corrupt image.
+        int secBaseHdr = view.PeOffset + PeConstants.OptHeaderFromSig + view.SizeOfOptionalHeader;
+        uint firstSecRva0 = view.NumberOfSections > 0 ? view.Sections[0].VirtualAddress : sectionAlign;
+        int grownHeaderEnd = secBaseHdr + (view.NumberOfSections + 1) * PeConstants.SectionHeaderSize;
+        bool headerHasRoom = PeConstants.Align((uint)grownHeaderEnd, sectionAlign) <= firstSecRva0;
+        if (imports is { Ok: true } && !headerHasRoom)
+            sb.Append("WARNING: section header table is full; appending the rebuilt import section would overrun " +
+                      "the first section — writing the dump with its original import directory instead.\n");
+
+        bool addSection = imports is { Ok: true } && headerHasRoom;
         if (addSection)
         {
             importBytes = ImportRebuilder.SerializeImportSection(imports!.Runs, newSecRva, is64, out descriptorSize);
@@ -80,10 +92,9 @@ public static class PeBuilder
         WriteU32(outBuf, optOff + PeConstants.Opt_FileAlignment, sectionAlign);
         WriteU32(outBuf, optOff + PeConstants.Opt_SizeOfImage, finalSize);
         WriteU32(outBuf, optOff + PeConstants.Opt_CheckSum, 0);   // stale after our edits; 0 means "skip"
-        WriteU32(outBuf, optOff + PeConstants.NumberOfRvaAndSizesOffset(is64), 16);
 
         // Headers occupy the first SectionAlignment-aligned span; verify the (grown) section table fits.
-        int headerEnd = secBase + (numSec + 1) * PeConstants.SectionHeaderSize;
+        int headerEnd = secBase + (numSec + (addSection ? 1 : 0)) * PeConstants.SectionHeaderSize;
         uint sizeOfHeaders = PeConstants.Align((uint)headerEnd, sectionAlign);
         uint firstSecRva = numSec > 0 ? view.Sections[0].VirtualAddress : sectionAlign;
         if (sizeOfHeaders > firstSecRva)
@@ -122,14 +133,26 @@ public static class PeBuilder
         }
 
         // --- data directories ---
+        // Clamp the directory count to what the optional header can physically hold (DataDir array must stay
+        // inside SizeOfOptionalHeader, before the section table) so a packer that shrank the optional header
+        // can't make us scribble directory entries over the section headers. Standard headers hold 16.
         int dirBase = optOff + PeConstants.DataDirBaseOffset(is64);
-        if (!hasReloc) WriteDir(outBuf, dirBase, PeConstants.DirBaseReloc, 0, 0);
-        WriteDir(outBuf, dirBase, PeConstants.DirBoundImport, 0, 0);  // stale
-        WriteDir(outBuf, dirBase, 4, 0, 0);                          // Certificate: the signature overlay isn't dumped
+        int dirCapacity = (sizeOfOpt - PeConstants.DataDirBaseOffset(is64)) / 8;
+        uint dirCount = (uint)Math.Min(16, Math.Max(0, dirCapacity));
+        WriteU32(outBuf, optOff + PeConstants.NumberOfRvaAndSizesOffset(is64), dirCount);
+        void WriteDirSafe(int index, uint rva, uint size) { if (index < dirCount) WriteDir(outBuf, dirBase, index, rva, size); }
+
+        if (!hasReloc) WriteDirSafe(PeConstants.DirBaseReloc, 0, 0);
+        WriteDirSafe(PeConstants.DirBoundImport, 0, 0);  // stale
+        WriteDirSafe(4, 0, 0);                           // Certificate: the signature overlay isn't dumped
         if (addSection)
         {
-            WriteDir(outBuf, dirBase, PeConstants.DirImport, newSecRva, descriptorSize);
-            WriteDir(outBuf, dirBase, PeConstants.DirIat, imports!.IatStartRva, imports.IatSize);
+            if (PeConstants.DirIat < dirCount)
+            {
+                WriteDirSafe(PeConstants.DirImport, newSecRva, descriptorSize);
+                WriteDirSafe(PeConstants.DirIat, imports!.IatStartRva, imports.IatSize);
+            }
+            else sb.Append($"WARNING: optional header holds only {dirCount} data directories; the rebuilt import table is present but not registered in the header.\n");
         }
 
         // --- append the new section header ---

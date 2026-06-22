@@ -273,7 +273,7 @@ public static class ImportRebuilder
     private static (ulong Va, uint Size) GrowRun(MemReader mem, IApiResolver resolver, ulong start, int ptr)
     {
         const int MaxSlots = 8192;
-        int count = 0, trailingNulls = 0;
+        int count = 0, trailingNulls = 0, pointerOnly = 0;
         for (int i = 0; i < MaxSlots; i++)
         {
             var b = mem(start + (ulong)(i * ptr), ptr);
@@ -286,7 +286,11 @@ public static class ImportRebuilder
                 continue;
             }
             trailingNulls = 0;
-            if (resolver.Resolve(v) is not null || resolver.IsInModule(v) || LooksLikePointer(v)) count = i + 1;
+            // A slot that resolves (or points into a module) is a confirmed IAT entry; a merely pointer-shaped
+            // value is tolerated only in short bursts, so an unindexed import doesn't truncate the table but a
+            // run of non-pointer data past the IAT can't drag the table on into arbitrary memory.
+            if (resolver.Resolve(v) is not null || resolver.IsInModule(v)) { count = i + 1; pointerOnly = 0; }
+            else if (LooksLikePointer(v) && ++pointerOnly <= 2) count = i + 1;
             else break;
         }
         return (start, (uint)(count * ptr));

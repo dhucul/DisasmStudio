@@ -65,7 +65,7 @@ public static class PackerDetector
         (".enigma1", PackerKind.Protector, "Enigma"),
         (".enigma2", PackerKind.Protector, "Enigma"),
         (".vprotect", PackerKind.Protector, "VProtect"),
-        (".yP", PackerKind.Compressor, "Y0da Protector"),
+        (".yP", PackerKind.Protector, "Y0da Protector"),
         (".y0da", PackerKind.Protector, "Y0da Protector"),
     ];
 
