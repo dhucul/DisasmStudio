@@ -161,6 +161,119 @@
         </Setter>
     </Style>
 
+    <!-- ComboBox + item. WPF's default ComboBox is a light system control, so the inherited light
+         theme text rendered near-white-on-white (the OEP-strategy / raw-arch / debug-DLL dialogs were
+         unreadable). Re-templated dark to match the TextBox/list styling; supports editable mode
+         (PART_EditableTextBox sits above the toggle so the arrow still opens the drop-down). -->
+    <Style TargetType="ComboBox">
+        <Setter Property="Background" Value="{StaticResource Surface2}" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+        <Setter Property="BorderBrush" Value="{StaticResource Outline}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="6,4" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto" />
+        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBox">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="22" />
+                        </Grid.ColumnDefinitions>
+                        <Border x:Name="bd" Grid.ColumnSpan="2"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4" SnapsToDevicePixels="True" />
+                        <ToggleButton Grid.ColumnSpan="2" Focusable="False" ClickMode="Press"
+                                      IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                            <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                    <Border Background="Transparent" />
+                                </ControlTemplate>
+                            </ToggleButton.Template>
+                        </ToggleButton>
+                        <ContentPresenter x:Name="contentPresenter" Grid.Column="0"
+                                          Content="{TemplateBinding SelectionBoxItem}"
+                                          ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                          ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                          Margin="{TemplateBinding Padding}"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          IsHitTestVisible="False"
+                                          TextElement.Foreground="{TemplateBinding Foreground}" />
+                        <TextBox x:Name="PART_EditableTextBox" Grid.Column="0"
+                                 Margin="{TemplateBinding Padding}" Visibility="Hidden"
+                                 Style="{x:Null}" Background="Transparent"
+                                 Foreground="{TemplateBinding Foreground}"
+                                 CaretBrush="{StaticResource TextPrimary}"
+                                 SelectionBrush="{StaticResource Accent}"
+                                 BorderThickness="0" Padding="0" VerticalContentAlignment="Center" />
+                        <Path x:Name="arrow" Grid.Column="1" IsHitTestVisible="False"
+                              HorizontalAlignment="Center" VerticalAlignment="Center"
+                              Fill="{StaticResource TextSecondary}" Data="M 0,0 L 8,0 L 4,5 Z" />
+                        <Popup x:Name="PART_Popup" Placement="Bottom" AllowsTransparency="True"
+                               Focusable="False" PopupAnimation="Slide"
+                               IsOpen="{TemplateBinding IsDropDownOpen}">
+                            <Border Background="{StaticResource Surface2}"
+                                    BorderBrush="{StaticResource OutlineStrong}" BorderThickness="1"
+                                    CornerRadius="4" Margin="0,2,0,0" SnapsToDevicePixels="True"
+                                    MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                                    MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                <ScrollViewer>
+                                    <ItemsPresenter />
+                                </ScrollViewer>
+                            </Border>
+                        </Popup>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEditable" Value="True">
+                            <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="contentPresenter" Property="Visibility" Value="Hidden" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource OutlineStrong}" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Accent}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="bd" Property="Opacity" Value="0.5" />
+                            <Setter TargetName="contentPresenter" Property="Opacity" Value="0.5" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+        <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Padding" Value="8,5" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBoxItem">
+                    <Border x:Name="b" Background="{TemplateBinding Background}"
+                            Padding="{TemplateBinding Padding}" CornerRadius="3" SnapsToDevicePixels="True">
+                        <ContentPresenter />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="b" Property="Background" Value="{StaticResource Selection}" />
+                        </Trigger>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="b" Property="Background" Value="{StaticResource AccentSoft}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- TabControl / TabItem -->
     <Style TargetType="TabControl">
         <Setter Property="Background" Value="{StaticResource Surface}" />
