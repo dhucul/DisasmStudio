@@ -102,6 +102,35 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   maps into the host the debugger retargets to it — `ImageBase`/disassembly rebased to the DLL's real
   load address — and breaks at the chosen export (or, by default, the DLL's DllMain), from where everything above (stepping,
   breakpoints, registers, stack) works on the DLL itself.
+- **Generic unpacker (run-to-OEP → dump → rebuild imports):** for packed/compressed executables, the
+  **Unpack…** toolbar button runs the target under the debugger, automatically stops at the **Original
+  Entry Point** (an *Auto* strategy: the x86 ESP-trick, then guard-page section breakpoints; or a manual
+  OEP), then **dumps the unpacked image from memory**, **reconstructs the Import Address Table**
+  (ImpRec/Scylla-style — resolving each IAT slot against the live modules' export tables and following
+  simple redirection stubs), fixes the entry point, and writes a clean, re-analyzable PE you can reopen in
+  place. The rebuilt executable also **runs** — the writer resets the `/GS` security cookie, neutralizes the
+  Control-Flow-Guard indirect-call pointers, and chooses the right base/relocation strategy (keep ASLR when a
+  full relocation table is present, otherwise pin the original base) so a dumped image launches as a fresh
+  process (verified end-to-end on UPX-packed and live x86/x64 targets). A packer detector (entropy + section signatures for UPX, ASPack, FSG, PECompact, MPRESS, …) flags
+  packed files on open and warns when a code-virtualizing protector (VMProtect/Themida) is detected, since
+  those can't be recovered by dumping. An optional **job-object sandbox** blocks the untrusted target from
+  spawning child processes and kills it on close (process-level containment only — use a VM for truly
+  untrusted samples). Handles both x86 and x64 targets.
+- **Anti-anti-debug ("Hide debugger"):** a ScyllaHide-style layer (toolbar checkbox; always on during
+  *Unpack*) that hides the debugger from a target's detection checks. Applied at the loader breakpoint —
+  before the program's own code runs — it normalizes the PEB (`BeingDebugged`, the `NtGlobalFlag` heap-debug
+  bits, and the process heap's `Flags`/`ForceFlags`) and installs silent hooks on the ntdll routines
+  protectors query — `NtQueryInformationProcess` (`ProcessDebugPort`/`DebugObjectHandle`/`DebugFlags`),
+  `NtSetInformationThread` (`ThreadHideFromDebugger`), and `NtQuerySystemInformation`
+  (`SystemKernelDebuggerInformation`) — emulating a clean "not debugged" result, and defeats the
+  close-invalid-handle trick. It also masks the debug registers from `NtGetContextThread` (so hardware
+  breakpoints are invisible to self-inspection) and preserves them across `NtSetContextThread` (so the target
+  can't clear them), and feeds a slow synthetic clock to the timing functions
+  (`GetTickCount`/`GetTickCount64`/`QueryPerformanceCounter`/`GetSystemTimeAsFileTime` and the `Nt*`
+  equivalents) so single-step/breakpoint slowdowns don't show up as a time delta. It even intercepts the
+  `rdtsc`/`rdtscp` instructions themselves — found by disassembling the target's code (skipping packed/
+  high-entropy sections so it never corrupts compressed data) and emulated from the same synthetic clock.
+  Works for x86 and x64 targets.
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
 - **Help:** a *Help ▾* toolbar menu with a grouped keyboard-shortcut reference (also opened with **F1**) —

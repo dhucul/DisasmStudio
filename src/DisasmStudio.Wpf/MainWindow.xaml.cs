@@ -11,6 +11,7 @@ using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug;
 using Iced.Intel;
 using DisasmStudio.Wpf.Services;
@@ -153,6 +154,20 @@ public partial class MainWindow : Window
         if (Dialogs.AskPid(this) is uint pid) BeginDebug(d => d.Attach(pid));
     }
 
+    private async void OnUnpack(object sender, RoutedEventArgs e)
+    {
+        if (_image is null) { MessageBox.Show(this, "Open a packed binary first.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE executables can be unpacked.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_image.IsDll) { MessageBox.Show(this, "The unpacker targets EXEs; packed DLLs aren't supported yet.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_dbg is not null) { MessageBox.Show(this, "Stop the current debug session before unpacking.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+
+        var verdict = PackerDetector.Detect(_image);
+        var dlg = new UnpackerDialog(this, _image.FilePath, _image.Bitness, _image.ImageBase, verdict);
+        dlg.ShowDialog();
+        if (dlg.OpenPath is { } p && File.Exists(p))
+            await LoadFile(p);   // reopen the rebuilt PE through the normal load + analysis pipeline
+    }
+
     private void BeginDebug(Action<DebugSession> start)
     {
         _savedResult = _result;
@@ -168,6 +183,7 @@ public partial class MainWindow : Window
         Linear.IsBreakpointAt = va => _dbg?.HasBreakpoint(va) ?? false;
         _dbg.Engine.ExceptionFilter = _exceptionFilter;   // apply the persisted exception policy to this session
         _dbg.Engine.StopAtLoaderBreakpoint = LoaderBreakCheck.IsChecked == true;   // break before the entry point
+        _dbg.Engine.HideFromDebugger = HideDebuggerCheck.IsChecked == true;        // anti-anti-debug layer
         StatusText.Text = "Starting debugger…";
         start(_dbg);
     }
@@ -851,6 +867,13 @@ public partial class MainWindow : Window
         if (opts is null) { (image as IDisposable)?.Dispose(); return; }   // cancelled
         _loadOptions = opts;
         await StartAnalysis(image);
+
+        // Nudge toward the unpacker when the freshly-loaded PE looks packed.
+        if (image.Format == BinaryFormat.Pe)
+        {
+            try { var v = PackerDetector.Detect(image); if (v.IsPacked) StatusText.Text = $"{v.Notes}  Use Unpack… to recover it."; }
+            catch { /* detection is best-effort */ }
+        }
     }
 
     private enum AnalyzeOutcome { Applied, Cancelled, Failed }

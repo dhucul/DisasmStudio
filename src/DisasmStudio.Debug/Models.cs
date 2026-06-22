@@ -1,7 +1,7 @@
 namespace DisasmStudio.Debug;
 
 /// <summary>Why the debuggee stopped.</summary>
-public enum StopReason { EntryPoint, Attached, Breakpoint, Step, Watchpoint, Paused, Exception, ProcessExited }
+public enum StopReason { EntryPoint, Attached, Breakpoint, Step, Watchpoint, Paused, Exception, ProcessExited, GuardExec }
 
 /// <summary>Kind of a hardware breakpoint / watchpoint.</summary>
 public enum HwKind { Execute, Write, ReadWrite }

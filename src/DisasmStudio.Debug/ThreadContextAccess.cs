@@ -101,6 +101,14 @@ internal sealed unsafe class Ctx : IDisposable
         return false;
     }
 
+    /// <summary>Read a named register (0 if unknown). Used by the anti-anti-debug hooks to inspect call args.</summary>
+    public ulong GetReg(string name)
+    {
+        foreach (var (n, off, bytes) in Is32 ? Regs32 : Regs64)
+            if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) return ReadField(off, bytes);
+        return 0;
+    }
+
     public ulong Ip
     {
         get => ReadField(Is32 ? 0xB8 : 0xF8, Is32 ? 4 : 8);

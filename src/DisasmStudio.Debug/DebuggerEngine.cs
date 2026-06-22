@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using DisasmStudio.Core.Unpacking;
 using Iced.Intel;
 
 namespace DisasmStudio.Debug;
@@ -11,7 +12,7 @@ namespace DisasmStudio.Debug;
 /// software breakpoints, hardware breakpoints/watchpoints (Dr0–3/Dr7), single-step, step over/out,
 /// run-to-cursor, and both x64 and x86 (WOW64) targets.
 /// </summary>
-public sealed class DebuggerEngine
+public sealed partial class DebuggerEngine
 {
     public event Action<StopInfo>? Stopped;
     public event Action? Running;
@@ -41,6 +42,8 @@ public sealed class DebuggerEngine
 
     private IntPtr _proc;
     private uint _pid;
+    private bool _useJob;
+    private IntPtr _job;
     public bool Is32 { get; private set; }
     public ulong ImageBase { get; private set; }
     public ulong EntryPoint { get; private set; }
@@ -78,6 +81,8 @@ public sealed class DebuggerEngine
     // un-rearmed (lost) or a stray 0xCC / misclassified stop.
     private readonly Dictionary<uint, StepState> _stepping = [];   // thread -> in-flight single-step
     private readonly HashSet<ulong> _reArmOnNextStop = [];         // bps disarmed for step-over/out/run-to, re-armed on the next stop
+    private readonly Dictionary<ulong, uint> _guarded = [];        // PAGE_GUARD page -> original protect (unpacker OEP catch)
+    private readonly Dictionary<uint, ulong> _reGuard = [];        // thread -> guarded page to re-arm after its next single step
     private bool _seenSystemBp;
     private volatile bool _pauseRequested;   // set by the UI thread (Pause), read by the debug loop
     private volatile bool _stopping;         // set by the UI thread (Stop), read by the debug loop
@@ -86,6 +91,11 @@ public sealed class DebuggerEngine
     public IReadOnlyList<ModuleInfo> Modules { get { lock (_lock) return _modules.Values.OrderBy(m => m.Base).ToList(); } }
     public IReadOnlyList<ThreadInfo> Threads { get { lock (_lock) return _threads.Keys.Select(id => new ThreadInfo(id, 0)).ToList(); } }
     public IReadOnlyList<Breakpoint> BreakpointList { get { lock (_lock) return _swBps.Values.Concat(_hwBps).ToList(); } }
+
+    /// <summary>Before launching, request that the debuggee be placed in a Win32 job object with kill-on-close
+    /// and a one-process limit (blocks child-process spawning). This is process-level containment only — it does
+    /// NOT isolate network or filesystem access; use a VM for truly untrusted samples.</summary>
+    public void EnableJobContainment() => _useJob = true;
 
     // ---- start ----
     public void Launch(string path)
@@ -185,6 +195,7 @@ public sealed class DebuggerEngine
             {
                 var info = ev.CreateProcess;
                 _proc = info.hProcess;
+                if (_useJob) TrySetupJob();
                 Native.IsWow64Process(_proc, out bool wow);
                 Is32 = wow;   // host bitness == DLL bitness (rundll32 is bitness-matched), so this is correct
                 lock (_lock) _threads[ev.dwThreadId] = info.hThread;
@@ -271,6 +282,10 @@ public sealed class DebuggerEngine
 
         if (code is Native.EXCEPTION_BREAKPOINT or Native.STATUS_WX86_BREAKPOINT)
         {
+            // anti-anti-debug return-patch landing (scrub Dr regs from a NtGetContextThread result) — silent
+            if (_pendingReturns.ContainsKey(addr)) { HandleReturnHook(addr, hThread); return false; }
+            // internal anti-anti-debug hook (ntdll query emulation) — handled silently, never surfaced
+            if (_internalBps.ContainsKey(addr)) { HandleAntiDebugHook(addr, ev.dwThreadId, hThread); return false; }
             // temp / one-shot breakpoint
             if (RemoveTempBpIfPresent(addr))
             {
@@ -296,6 +311,10 @@ public sealed class DebuggerEngine
             if ((isWx86 && !_seenWx86Bp) || (!isWx86 && !_seenSystemBp))
             {
                 if (isWx86) _seenWx86Bp = true; else _seenSystemBp = true;
+                // Install anti-anti-debug at the loader breakpoint of the target's bitness — early enough to
+                // beat the program's own anti-debug (TLS callbacks / entry run after this), and late enough
+                // that the PEB and the matching-bitness ntdll are mapped.
+                if (HideFromDebugger && !_adApplied && isWx86 == Is32) { ApplyAntiAntiDebug(); _adApplied = true; }
                 if (_attached) { Stopped?.Invoke(new StopInfo(StopReason.Attached, ev.dwThreadId, addr, code)); return true; }
                 // Optionally stop at the loader breakpoint of the target's bitness (the matching loader has
                 // mapped the modules) instead of skipping to the entry point, so capture can begin earlier.
@@ -318,7 +337,16 @@ public sealed class DebuggerEngine
             // silently, or resuming would execute mid-instruction and fault (0xC0000005). A byte that is still
             // 0xCC is a genuine int3 in the program (e.g. __debugbreak / anti-debug), so leave it to surface.
             var live = ReadMemory(addr, 1);   // active bps were handled above, so this is the true byte
-            if (live.Length == 1 && live[0] != 0xCC) { SetIp(hThread, addr); return false; }
+            if (live.Length == 1 && live[0] != 0xCC)
+            {
+                // Anti-debug instruction (int 2Dh / 2-byte int3) whose exception we'd otherwise swallow: when
+                // hiding, deliver it to the program's own handler so it behaves as if undebugged.
+                if (HideFromDebugger && IsProgramDebugInstruction(addr, step: false)) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
+                SetIp(hThread, addr); return false;   // stale phantom: rewind over the absent 0xCC and continue
+            }
+            // A genuine int3 in the program (__debugbreak / anti-debug). When hiding, pass it to the program's
+            // SEH (no-debugger behaviour) instead of surfacing it.
+            if (HideFromDebugger) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
             if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }
             Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
             return true;
@@ -326,6 +354,19 @@ public sealed class DebuggerEngine
 
         if (code is Native.EXCEPTION_SINGLE_STEP or Native.STATUS_WX86_SINGLE_STEP)
         {
+            // A step we armed only so a guarded data page's access could complete: re-arm the guard now that
+            // the faulting instruction has run, then (unless this thread is also mid user-step) keep running.
+            if (_reGuard.Remove(ev.dwThreadId, out ulong rgPage))
+            {
+                ApplyGuard(rgPage);
+                if (!_stepping.ContainsKey(ev.dwThreadId)) return false;
+            }
+            // A step armed only to run one instruction off an internal anti-debug hook, then re-arm it.
+            if (_internalStep.Remove(ev.dwThreadId, out ulong isAddr))
+            {
+                ArmInternal(isAddr);
+                if (!_stepping.ContainsKey(ev.dwThreadId)) return false;
+            }
             bool stepping = _stepping.TryGetValue(ev.dwThreadId, out var st);
             // Hardware watchpoint? Dr6 low bits identify the slot — but only when THIS thread isn't the one we
             // armed a software single-step on (its trap #DB is indistinguishable from a watchpoint otherwise).
@@ -338,12 +379,53 @@ public sealed class DebuggerEngine
                     return true;
                 }
             }
-            if (!stepping) return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
+            if (!stepping)
+            {
+                // ICEBP/int1 (or a debuggee-set trap flag) anti-debug: when hiding, deliver to the program's
+                // handler instead of swallowing, so its single-step SEH fires as if undebugged.
+                if (HideFromDebugger && IsProgramDebugInstruction(addr, step: true)) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
+                return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
+            }
             _stepping.Remove(ev.dwThreadId);
             if (st.ReArm != 0) ArmAddr(st.ReArm);   // re-arm the breakpoint this thread stepped off
             if (st.StopAfter) { Stopped?.Invoke(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
             return false;   // step-off of a breakpoint during a Go — keep running
         }
+
+        // Guard-page fault while the unpacker has guards armed: either execution entered a guarded section
+        // (OEP) or the stub touched a guarded data page (let it complete and re-arm).
+        if (code == Native.STATUS_GUARD_PAGE_VIOLATION)
+        {
+            bool armed; lock (_lock) armed = _guarded.Count > 0;
+            if (armed)
+            {
+                ulong ipPage = er.ExceptionAddress & ~0xFFFUL;
+                bool ipGuarded; lock (_lock) ipGuarded = _guarded.ContainsKey(ipPage);
+                if (ipGuarded)
+                {
+                    ClearGuards();   // execution reached a guarded (originally non-stub) page → OEP candidate
+                    Stopped?.Invoke(new StopInfo(StopReason.GuardExec, ev.dwThreadId, er.ExceptionAddress, code));
+                    return true;
+                }
+                ulong accPage = er.Info0 == 8 ? er.ExceptionAddress & ~0xFFFUL : er.Info1 & ~0xFFFUL; // [1] = accessed VA
+                bool accGuarded; lock (_lock) accGuarded = _guarded.ContainsKey(accPage);
+                if (accGuarded)
+                {
+                    lock (_lock) _reGuard[ev.dwThreadId] = accPage;
+                    using var c = new Ctx(Is32);
+                    if (c.Get(hThread)) { c.TrapFlag = true; c.Set(hThread); }
+                    cont = Native.DBG_CONTINUE;
+                    return false;
+                }
+            }
+            cont = Native.DBG_EXCEPTION_NOT_HANDLED;   // not ours (e.g. stack auto-grow) — hand to the program
+            return false;
+        }
+
+        // Anti-anti-debug: the "close an invalid handle" trick raises STATUS_INVALID_HANDLE only under a
+        // debugger. Swallow it (continue as handled) so the program's __except never fires — exactly the
+        // no-debugger behaviour, where closing a bad handle is silent.
+        if (HideFromDebugger && code == 0xC0000008) { cont = Native.DBG_CONTINUE; return false; }
 
         // Any other exception (AV, C++ EH, etc.). The filter decides whether to break and whether to pass it
         // to the debuggee's own handler (DBG_EXCEPTION_NOT_HANDLED) or swallow it (DBG_CONTINUE) on resume.
@@ -440,6 +522,26 @@ public sealed class DebuggerEngine
         // delivered EXIT_THREAD because the process was terminated) and the process handle itself.
         lock (_lock) { foreach (var h in _threads.Values) Native.CloseHandle(h); _threads.Clear(); }
         if (_proc != IntPtr.Zero) { Native.CloseHandle(_proc); _proc = IntPtr.Zero; }
+        // Closing the job kills any survivors (kill-on-close), so the contained sample can't outlive the session.
+        if (_job != IntPtr.Zero) { Native.CloseHandle(_job); _job = IntPtr.Zero; }
+    }
+
+    /// <summary>Create a job object (kill-on-close + one active process) and assign the debuggee to it.
+    /// Best-effort: failures are reported but do not abort the launch.</summary>
+    private void TrySetupJob()
+    {
+        _job = Native.CreateJobObjectW(IntPtr.Zero, null);
+        if (_job == IntPtr.Zero) { Output?.Invoke("Job containment: CreateJobObject failed; running uncontained."); return; }
+        var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        info.BasicLimitInformation.LimitFlags = Native.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | Native.JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        info.BasicLimitInformation.ActiveProcessLimit = 1;   // block child-process spawning
+        uint sz = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
+        if (!Native.SetInformationJobObject(_job, Native.JobObjectExtendedLimitInformation, ref info, sz))
+            Output?.Invoke("Job containment: SetInformationJobObject failed.");
+        if (Native.AssignProcessToJobObject(_job, _proc))
+            Output?.Invoke("Job containment active (child processes blocked, kill-on-close).");
+        else
+            Output?.Invoke("Job containment: AssignProcessToJobObject failed.");
     }
 
     // ---- breakpoints ----
@@ -612,6 +714,10 @@ public sealed class DebuggerEngine
                 if (bp.Armed && bp.Address >= addr && bp.Address < end) buf[bp.Address - addr] = bp.Original;
             foreach (var kv in _tempBps)
                 if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value;
+            foreach (var kv in _internalBps)
+                if (kv.Value.Armed && kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value.Original;
+            foreach (var kv in _pendingReturns)
+                if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value.Orig;
         }
     }
 
@@ -648,6 +754,102 @@ public sealed class DebuggerEngine
         if (_proc == IntPtr.Zero) return false;
         if (Native.VirtualQueryEx(_proc, addr, out var mbi, (nuint)System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>()) == 0) return false;
         return mbi.State == Native.MEM_COMMIT && (mbi.Protect & 0xF0) != 0;   // any PAGE_EXECUTE_*
+    }
+
+    // ---- guard-page memory breakpoints (generic unpacker OEP catch) ----
+    /// <summary>Mark every committed page in [<paramref name="va"/>, va+<paramref name="size"/>) PAGE_GUARD so
+    /// the first access faults. The section-execute OEP strategy guards the original (non-stub) sections, then
+    /// breaks (<see cref="StopReason.GuardExec"/>) when execution lands in one. Data accesses by the still-running
+    /// stub are transparently let through and re-armed. Call while the debuggee is frozen at a stop.</summary>
+    public void GuardRegion(ulong va, ulong size)
+    {
+        if (_proc == IntPtr.Zero || size == 0) return;
+        ulong start = va & ~0xFFFUL;
+        ulong end = (va + size + 0xFFF) & ~0xFFFUL;
+        int mbiSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
+        for (ulong p = start; p < end; p += 0x1000)
+        {
+            if (Native.VirtualQueryEx(_proc, p, out var mbi, (nuint)mbiSize) == 0) continue;
+            if (mbi.State != Native.MEM_COMMIT) continue;
+            uint prot = mbi.Protect;
+            if ((prot & Native.PAGE_GUARD) != 0 || (prot & 0xFF) == Native.PAGE_NOACCESS) continue;
+            if (Native.VirtualProtectEx(_proc, p, 0x1000, prot | Native.PAGE_GUARD, out _))
+                lock (_lock) _guarded[p] = prot;
+        }
+    }
+
+    /// <summary>Remove every guard page we set, restoring original protections. Idempotent.</summary>
+    public void ClearGuards()
+    {
+        if (_proc == IntPtr.Zero) return;
+        lock (_lock)
+        {
+            foreach (var (page, prot) in _guarded) Native.VirtualProtectEx(_proc, page, 0x1000, prot, out _);
+            _guarded.Clear();
+            _reGuard.Clear();
+        }
+    }
+
+    public bool HasGuards { get { lock (_lock) return _guarded.Count > 0; } }
+
+    private void ApplyGuard(ulong page)
+    {
+        uint prot; lock (_lock) { if (!_guarded.TryGetValue(page, out prot)) return; }
+        Native.VirtualProtectEx(_proc, page, 0x1000, prot | Native.PAGE_GUARD, out _);
+    }
+
+    /// <summary>Capture the full in-memory image at <paramref name="imageBase"/> as a virtual-address-indexed
+    /// buffer (buffer offset == RVA) by reading every committed region across SizeOfImage. Breakpoints are
+    /// masked by <see cref="ReadMemory"/>, so the dump is clean. Returns [] if the PE headers can't be parsed.</summary>
+    public byte[] DumpImage(ulong imageBase, out uint sizeOfImage)
+    {
+        sizeOfImage = 0;
+        if (_proc == IntPtr.Zero) return [];
+        var hdr = ReadMemory(imageBase, 0x1000);
+        if (hdr.Length < 0x200 || !PeView.TryParse(hdr, out var view)) return [];
+        uint size = view.SizeOfImage;
+        if (size < 0x1000 || size > 1024u * 1024 * 1024) return [];
+        sizeOfImage = size;
+        var buf = new byte[size];
+        ulong endVa = imageBase + size, addr = imageBase;
+        int mbiSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
+        while (addr < endVa)
+        {
+            if (Native.VirtualQueryEx(_proc, addr, out var mbi, (nuint)mbiSize) == 0) break;
+            ulong regionBase = mbi.BaseAddress, regionSize = mbi.RegionSize;
+            if (regionSize == 0) break;
+            ulong next = regionBase + regionSize;
+            bool readable = mbi.State == Native.MEM_COMMIT
+                && (mbi.Protect & 0xFF) != Native.PAGE_NOACCESS && (mbi.Protect & Native.PAGE_GUARD) == 0;
+            if (readable)
+            {
+                ulong copyStart = Math.Max(regionBase, imageBase);
+                ulong copyEnd = Math.Min(next, endVa);
+                if (copyEnd > copyStart)
+                {
+                    var chunk = ReadMemory(copyStart, (int)(copyEnd - copyStart));
+                    if (chunk.Length > 0) Array.Copy(chunk, 0, buf, (int)(copyStart - imageBase), chunk.Length);
+                }
+            }
+            if (next <= addr) break;
+            addr = next;
+        }
+        return buf;
+    }
+
+    /// <summary>True if the bytes around a (foreign) breakpoint/single-step exception are a program anti-debug
+    /// instruction — int 2Dh (CD 2D), 2-byte int3 (CD 03), int3 (CC), or ICEBP/int1 (F1) — so it should be
+    /// delivered to the program rather than swallowed. Tolerates the differing exception-address conventions.</summary>
+    private bool IsProgramDebugInstruction(ulong addr, bool step)
+    {
+        if (addr < 2) return false;
+        var b = ReadMemory(addr - 2, 4);   // b[0]=addr-2, b[1]=addr-1, b[2]=addr, b[3]=addr+1
+        if (b.Length < 4) return false;
+        if (step) return b[1] == 0xF1;     // ICEBP/int1 (exception address = icebp+1)
+        return b[1] == 0xCC                                   // int3, addr = int3+1
+            || b[2] == 0xCC                                   // int3, addr = int3
+            || (b[0] == 0xCD && (b[1] == 0x03 || b[1] == 0x2D))   // CD 03 / CD 2D, addr = instr+2
+            || (b[2] == 0xCD && b[3] == 0x2D);                // CD 2D, addr = instr
     }
 
     // ---- helpers ----
