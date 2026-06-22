@@ -8,7 +8,10 @@ namespace DisasmStudio.Core.Unpacking;
 /// VirtualAddress</c> — so the file's raw bytes mirror the image and no RVA→offset translation is needed.
 /// The entry point is corrected to the OEP, a fresh import directory (built by <see cref="ImportRebuilder"/>)
 /// is appended as a new section, and base relocations are stripped (the dump is captured at the real load
-/// base, so relocating it again would corrupt it).
+/// base, so relocating it again would corrupt it). The packer's sections are also tidied so the result reads
+/// like an ordinary executable: the section holding the OEP becomes <c>.text</c>, the resource section
+/// <c>.rsrc</c>, the rebuilt imports <c>.idata</c>, and the now-dead unpack stub section (executable, held the
+/// original entry point, but not the OEP/IAT/any directory) is dropped and its bytes zeroed.
 /// </summary>
 public static class PeBuilder
 {
@@ -46,8 +49,20 @@ public static class PeBuilder
             importBytes = ImportRebuilder.SerializeImportSection(imports!.Runs, newSecRva, is64, out descriptorSize);
             sb.Append($"Rebuilt import section: {imports.Runs.Count} descriptor(s), {imports.Resolved} imports, {importBytes.Length} bytes.\n");
         }
-        uint newSecRaw = addSection ? PeConstants.Align((uint)importBytes.Length, sectionAlign) : 0;
+
+        // Load Config relocation: a UPX stub keeps the Load Config inside its (otherwise dead) stub section,
+        // and the loader reads it at load time, so that one directory would pin the stub. Copy it into the
+        // rebuilt .idata section and repoint the directory, freeing the stub to be dropped. .idata is laid out
+        // as [import data | CFG stubs | relocated Load Config]; reserve the space here so the section fits all.
+        var (lcRva0, lcSize0) = view.DataDir(PeConstants.DirLoadConfig);
+        bool relocLc = addSection && lcRva0 != 0 && lcSize0 >= 0x40 && lcSize0 <= 0x400
+                       && (ulong)lcRva0 + lcSize0 <= (ulong)dumpImage.Length;
+        uint cfgStubOff = PeConstants.Align((uint)importBytes.Length, 16);   // CFG ret/jmp stubs (≤ 8 bytes)
+        uint lcCopyOff = PeConstants.Align(cfgStubOff + 8, 16);              // relocated Load Config
+        uint idataLen = !addSection ? 0 : relocLc ? lcCopyOff + lcSize0 : cfgStubOff + 8;
+        uint newSecRaw = addSection ? PeConstants.Align(idataLen, sectionAlign) : 0;
         uint finalSize = addSection ? newSecRva + newSecRaw : imageEnd;
+        uint lcRva = relocLc ? newSecRva + lcCopyOff : lcRva0;   // where the Load Config lives in the output
 
         var outBuf = new byte[finalSize];
         Array.Copy(dumpImage, 0, outBuf, 0, Math.Min(dumpImage.Length, (int)Math.Min(finalSize, (uint)int.MaxValue)));
@@ -85,6 +100,65 @@ public static class PeBuilder
         }
         else if (hasReloc) finalBase = preferredBase;   // not moved; preferred == runtime
 
+        // Relocate the Load Config into .idata now the dump bytes are final (post un-relocation). Its internal
+        // fields are absolute VAs into other sections, so a byte copy stays valid; only the directory moves.
+        if (relocLc)
+        {
+            Array.Copy(outBuf, (int)lcRva0, outBuf, (int)(newSecRva + lcCopyOff), (int)lcSize0);
+            sb.Append($"Relocated Load Config ({lcSize0:X} bytes) {lcRva0:X} → {lcRva:X} (.idata).\n");
+        }
+
+        // --- section cleanup plan: rename the packer's sections to conventional roles and drop the dead
+        // unpack stub, so the rebuilt image reads like an ordinary executable instead of UPX0/UPX1/… ---
+        uint iatRva = imports?.IatStartRva ?? 0;
+        uint origEpRva = view.EntryRva;                 // the packer stub's entry (≠ the recovered OEP)
+        uint resDirRva = view.DataDir(PeConstants.DirResource).Rva;
+        // RVAs that must stay inside a mapped section — a section holding any of these is never dropped.
+        var protectedRvas = new List<uint>();
+        void Protect(int dir) { var (r, _) = view.DataDir(dir); if (r != 0) protectedRvas.Add(r); }
+        Protect(PeConstants.DirExport); Protect(PeConstants.DirResource); Protect(PeConstants.DirException);
+        Protect(PeConstants.DirTls); Protect(PeConstants.DirDelayImport);
+        if (!relocLc) Protect(PeConstants.DirLoadConfig);   // kept in place ⇒ its section must survive
+        if (hasReloc) Protect(PeConstants.DirBaseReloc);
+        // The import directory: when we rebuild it (addSection) the header is repointed to the new .idata and
+        // the in-place IAT, so the packer's own original import dir/IAT (which a UPX stub keeps inside its stub
+        // section) no longer matters and must NOT pin that section. When not rebuilding, keep them protected.
+        if (addSection) { if (iatRva != 0) protectedRvas.Add(iatRva); }
+        else { Protect(PeConstants.DirImport); Protect(PeConstants.DirIat); Protect(PeConstants.DirBoundImport); }
+
+        var plan = new List<(SectionHeader Src, string Name, uint Chars)>();
+        var dropped = new List<(uint Va, uint Size)>();
+        for (int i = 0; i < numSec; i++)
+        {
+            var s = view.Sections[i];
+            bool hasOep = SecHas(s, oepRva);
+            // The unpack stub: an executable section that held the original entry point but neither the
+            // recovered OEP, the IAT, nor any needed directory — dead once unpacking is done. Drop it only
+            // when imports were rebuilt (so the IAT location is known and protected) to stay conservative.
+            // Never drop the first (lowest-VA) section: contiguity is restored by growing the *preceding*
+            // section over the gap, and there is none before section 0 — dropping it would leave a gap between
+            // the headers and the first section, which the loader rejects. (UPX's stub is never section 0.)
+            bool isStub = addSection && i != 0 && s.IsExecutable && SecHas(s, origEpRva) && !hasOep
+                          && !protectedRvas.Any(r => SecHas(s, r));
+            if (isStub) { dropped.Add((s.VirtualAddress, Math.Max(s.VirtualSize, s.SizeOfRawData))); continue; }
+
+            string name = hasOep ? ".text"
+                        : SecHas(s, resDirRva) ? ".rsrc"
+                        : s.Name.StartsWith('.') ? s.Name : ".data";
+            uint secChars = s.Characteristics;
+            if (hasOep)   // present the unpacked section as code, not the packer's uninitialized-data RWX blob
+                secChars = PeConstants.SCN_CNT_CODE | PeConstants.SCN_MEM_EXECUTE | PeConstants.SCN_MEM_READ
+                        | (secChars & PeConstants.SCN_MEM_WRITE);
+            if (iatRva != 0 && SecHas(s, iatRva)) secChars |= PeConstants.SCN_MEM_WRITE;   // in-place IAT is written
+            plan.Add((s, name, secChars));
+        }
+        int keptCount = plan.Count;
+        foreach (var (va, size) in dropped)                 // erase the stub bytes so no packer code remains
+        {
+            ulong end = Math.Min((ulong)va + size, finalSize);
+            for (int z = (int)va; (ulong)z < end && z < outBuf.Length; z++) outBuf[z] = 0;
+        }
+
         // --- optional header fixups ---
         WriteU32(outBuf, optOff + PeConstants.Opt_AddressOfEntryPoint, oepRva);
         if (is64) BitConverter.GetBytes(finalBase).CopyTo(outBuf, optOff + PeConstants.Opt_ImageBase64);
@@ -94,15 +168,15 @@ public static class PeBuilder
         WriteU32(outBuf, optOff + PeConstants.Opt_CheckSum, 0);   // stale after our edits; 0 means "skip"
 
         // Headers occupy the first SectionAlignment-aligned span; verify the (grown) section table fits.
-        int headerEnd = secBase + (numSec + (addSection ? 1 : 0)) * PeConstants.SectionHeaderSize;
+        int headerEnd = secBase + (keptCount + (addSection ? 1 : 0)) * PeConstants.SectionHeaderSize;
         uint sizeOfHeaders = PeConstants.Align((uint)headerEnd, sectionAlign);
-        uint firstSecRva = numSec > 0 ? view.Sections[0].VirtualAddress : sectionAlign;
+        uint firstSecRva = keptCount > 0 ? plan[0].Src.VirtualAddress : sectionAlign;
         if (sizeOfHeaders > firstSecRva)
             sb.Append($"WARNING: header table ({headerEnd:X}) grows past first section RVA ({firstSecRva:X}); output may be malformed.\n");
         WriteU32(outBuf, optOff + PeConstants.Opt_SizeOfHeaders, sizeOfHeaders);
 
         // --- COFF header: one more section; strip relocations only if there are none to keep ---
-        WriteU16(outBuf, fileHdr + PeConstants.Coff_NumberOfSections, (ushort)(numSec + (addSection ? 1 : 0)));
+        WriteU16(outBuf, fileHdr + PeConstants.Coff_NumberOfSections, (ushort)(keptCount + (addSection ? 1 : 0)));
         ushort chars = (ushort)(view.Characteristics | PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
         if (!hasReloc) chars |= PeConstants.IMAGE_FILE_RELOCS_STRIPPED;
         WriteU16(outBuf, fileHdr + PeConstants.Coff_Characteristics, chars);
@@ -118,18 +192,32 @@ public static class PeBuilder
         WriteU16(outBuf, optOff + PeConstants.Opt_DllCharacteristics, cleared);
         sb.Append($"Relocations {(hasReloc ? "kept" : "stripped")}; DllCharacteristics {dllc:X4} → {cleared:X4}.\n");
 
-        // --- existing section headers: virtual == raw layout, IAT section made writable ---
-        uint iatRva = imports?.IatStartRva ?? 0;
-        for (int i = 0; i < numSec; i++)
+        // --- section headers: re-emitted from the cleanup plan (renamed, stub dropped), virtual == raw
+        // layout, IAT section made writable. Headers are rewritten fresh so dropped sections compact away. ---
+        for (int oi = 0; oi < keptCount; oi++)
         {
-            int h = secBase + i * PeConstants.SectionHeaderSize;
-            var s = view.Sections[i];
-            uint rawSize = PeConstants.Align(Math.Max(s.VirtualSize, s.SizeOfRawData), sectionAlign);
+            var (s, name, secChars) = plan[oi];
+            int h = secBase + oi * PeConstants.SectionHeaderSize;
+            // Grow each kept section's virtual extent up to the next section in the final layout, so dropping
+            // the stub leaves the section table contiguous (the loader rejects an image with an RVA gap between
+            // sections). The absorbed range is the zeroed former-stub bytes — dead, never referenced.
+            uint nextVa = oi + 1 < keptCount ? plan[oi + 1].Src.VirtualAddress : (addSection ? newSecRva : finalSize);
+            uint vsize = nextVa > s.VirtualAddress ? nextVa - s.VirtualAddress : Math.Max(s.VirtualSize, s.SizeOfRawData);
+            uint rawSize = PeConstants.Align(vsize, sectionAlign);
             if (s.VirtualAddress + rawSize > finalSize) rawSize = finalSize > s.VirtualAddress ? finalSize - s.VirtualAddress : 0;
+            WriteName(outBuf, h + PeConstants.Sec_Name, name);
+            WriteU32(outBuf, h + PeConstants.Sec_VirtualSize, vsize);
+            WriteU32(outBuf, h + PeConstants.Sec_VirtualAddress, s.VirtualAddress);
             WriteU32(outBuf, h + PeConstants.Sec_SizeOfRawData, rawSize);
             WriteU32(outBuf, h + PeConstants.Sec_PointerToRawData, s.VirtualAddress);
-            if (iatRva != 0 && iatRva >= s.VirtualAddress && iatRva < s.VirtualAddress + Math.Max(s.VirtualSize, s.SizeOfRawData))
-                WriteU32(outBuf, h + PeConstants.Sec_Characteristics, s.Characteristics | PeConstants.SCN_MEM_WRITE);
+            for (int z = 24; z < 36; z++) outBuf[h + z] = 0;   // clear stale PointerToReloc/Linenumbers/counts
+            WriteU32(outBuf, h + PeConstants.Sec_Characteristics, secChars);
+        }
+        // Clear any header slots the (now-shorter) table no longer uses, leaving the appended import slot.
+        for (int oi = keptCount + (addSection ? 1 : 0); oi < numSec; oi++)
+        {
+            int h = secBase + oi * PeConstants.SectionHeaderSize;
+            for (int z = 0; z < PeConstants.SectionHeaderSize; z++) outBuf[h + z] = 0;
         }
 
         // --- data directories ---
@@ -154,13 +242,14 @@ public static class PeBuilder
             }
             else sb.Append($"WARNING: optional header holds only {dirCount} data directories; the rebuilt import table is present but not registered in the header.\n");
         }
+        if (relocLc) WriteDirSafe(PeConstants.DirLoadConfig, lcRva, lcSize0);   // point at the relocated copy
 
         // --- append the new section header ---
         if (addSection)
         {
-            int h = secBase + numSec * PeConstants.SectionHeaderSize;
-            WriteName(outBuf, h + PeConstants.Sec_Name, ".idata2");
-            WriteU32(outBuf, h + PeConstants.Sec_VirtualSize, (uint)importBytes.Length);
+            int h = secBase + keptCount * PeConstants.SectionHeaderSize;
+            WriteName(outBuf, h + PeConstants.Sec_Name, ".idata");
+            WriteU32(outBuf, h + PeConstants.Sec_VirtualSize, idataLen);
             WriteU32(outBuf, h + PeConstants.Sec_VirtualAddress, newSecRva);
             WriteU32(outBuf, h + PeConstants.Sec_SizeOfRawData, newSecRaw);
             WriteU32(outBuf, h + PeConstants.Sec_PointerToRawData, newSecRva);
@@ -172,11 +261,10 @@ public static class PeBuilder
         // the running CRT; a freshly-loaded image must hold the default so the loader/CRT re-initializes it —
         // otherwise process creation rejects the image (STATUS_INVALID_IMAGE_FORMAT). Cookie VA is in the Load
         // Config directory (SecurityCookie field), relative to the base we wrote (finalBase).
-        var (lcRva, lcSize) = view.DataDir(PeConstants.DirLoadConfig);
         if (lcRva != 0)
         {
             int scOff = is64 ? 0x58 : 0x3C, psz = is64 ? 8 : 4;
-            if (scOff + psz <= lcSize && lcRva + scOff + psz <= finalSize)
+            if (scOff + psz <= lcSize0 && lcRva + scOff + psz <= finalSize)
             {
                 ulong scVa = is64 ? BitConverter.ToUInt64(outBuf, (int)lcRva + scOff) : BitConverter.ToUInt32(outBuf, (int)lcRva + scOff);
                 if (scVa > finalBase && scVa - finalBase + (ulong)psz <= finalSize)
@@ -199,9 +287,8 @@ public static class PeBuilder
         if (addSection && lcRva != 0)
         {
             int chkOff = is64 ? 0x70 : 0x48, dspOff = is64 ? 0x78 : 0x4C, psz = is64 ? 8 : 4;
-            uint stubBase = newSecRva + (uint)((importBytes.Length + 3) & ~3);
-            uint retStub = stubBase, jmpStub = stubBase + 4;
-            if (Math.Max(chkOff, dspOff) + psz <= lcSize && jmpStub + 2 <= newSecRva + newSecRaw)
+            uint retStub = newSecRva + cfgStubOff, jmpStub = retStub + 4;   // reserved CFG-stub slot in .idata
+            if (Math.Max(chkOff, dspOff) + psz <= lcSize0 && jmpStub + 2 <= newSecRva + newSecRaw)
             {
                 outBuf[retStub] = 0xC3;                                   // ret
                 outBuf[jmpStub] = 0xFF; outBuf[jmpStub + 1] = 0xE0;      // jmp rax / jmp eax
@@ -220,9 +307,8 @@ public static class PeBuilder
                 SetFptr(dspOff, jmpStub);
                 if (set > 0)
                 {
-                    // Extend the import section over the stubs and make it executable.
-                    int hIdata = secBase + numSec * PeConstants.SectionHeaderSize;
-                    WriteU32(outBuf, hIdata + PeConstants.Sec_VirtualSize, jmpStub + 2 - newSecRva);
+                    // Make the import section executable so the CFG stubs can run (VirtualSize already covers them).
+                    int hIdata = secBase + keptCount * PeConstants.SectionHeaderSize;
                     WriteU32(outBuf, hIdata + PeConstants.Sec_Characteristics,
                         PeConstants.SCN_CNT_INITIALIZED_DATA | PeConstants.SCN_MEM_READ | PeConstants.SCN_MEM_WRITE | PeConstants.SCN_MEM_EXECUTE);
                     sb.Append($"Neutralized {set} CFG guard pointer(s).\n");
@@ -231,7 +317,8 @@ public static class PeBuilder
         }
 
         WriteU32(outBuf, optOff + PeConstants.Opt_AddressOfEntryPoint, oepRva);   // re-assert after any overlap
-        sb.Append($"Output: {finalSize:X} bytes, entry RVA {oepRva:X}, {numSec + (addSection ? 1 : 0)} sections.\n");
+        if (dropped.Count > 0) sb.Append($"Removed {dropped.Count} packer stub section(s); renamed sections to .text/.rsrc/.idata.\n");
+        sb.Append($"Output: {finalSize:X} bytes, entry RVA {oepRva:X}, {keptCount + (addSection ? 1 : 0)} sections.\n");
         log = sb.ToString();
         return outBuf;
     }
@@ -280,6 +367,14 @@ public static class PeBuilder
             p += (int)blockSize;
         }
         return applied;
+    }
+
+    /// <summary>True if RVA <paramref name="rva"/> (non-zero) falls within section <paramref name="s"/>.</summary>
+    private static bool SecHas(SectionHeader s, uint rva)
+    {
+        if (rva == 0) return false;
+        uint size = Math.Max(s.VirtualSize, s.SizeOfRawData);
+        return rva >= s.VirtualAddress && rva < s.VirtualAddress + size;
     }
 
     private static uint LastSectionEnd(PeView view)

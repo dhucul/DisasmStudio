@@ -165,6 +165,8 @@ internal static class Native
 
     public const uint MEM_COMMIT = 0x1000;
     public const uint PAGE_NOACCESS = 0x01, PAGE_GUARD = 0x100;
+    public const uint PAGE_READONLY = 0x02, PAGE_READWRITE = 0x04, PAGE_WRITECOPY = 0x08;
+    public const uint PAGE_EXECUTE = 0x10, PAGE_EXECUTE_READ = 0x20, PAGE_EXECUTE_WRITECOPY = 0x80;
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool CreateProcessW(string? lpApplicationName, string? lpCommandLine,

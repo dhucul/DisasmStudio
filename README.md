@@ -104,11 +104,18 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   breakpoints, registers, stack) works on the DLL itself.
 - **Generic unpacker (run-to-OEP → dump → rebuild imports):** for packed/compressed executables, the
   **Unpack…** toolbar button runs the target under the debugger, automatically stops at the **Original
-  Entry Point** (an *Auto* strategy: the x86 ESP-trick, then guard-page section breakpoints; or a manual
-  OEP), then **dumps the unpacked image from memory**, **reconstructs the Import Address Table**
+  Entry Point** (an *Auto* strategy: the x86 ESP-trick, then NX/execute section breakpoints — the original
+  sections are made non-executable so only the OEP code fetch faults, never the stub's decompression writes;
+  or a manual OEP), then **dumps the unpacked image from memory**, **reconstructs the Import Address Table**
   (ImpRec/Scylla-style — resolving each IAT slot against the live modules' export tables and following
   simple redirection stubs), fixes the entry point, and writes a clean, re-analyzable PE you can reopen in
-  place. The rebuilt executable also **runs** — the writer resets the `/GS` security cookie, neutralizes the
+  place. The **section layout is tidied** so the result reads like an ordinary executable rather than
+  `UPX0`/`UPX1`/…: the section holding the OEP becomes `.text`, the resource section `.rsrc`, the rebuilt
+  imports `.idata`, and the now-dead unpack stub section is **dropped** (its bytes zeroed and the preceding
+  section grown over the gap so the layout stays contiguous). A UPX stub usually keeps the **Load Config** the
+  loader needs (security cookie / CFG tables) inside itself; that one directory is **relocated** into the
+  rebuilt `.idata` and its data-directory repointed, so the stub can still be removed. The rebuilt executable
+  also **runs** — the writer resets the `/GS` security cookie, neutralizes the
   Control-Flow-Guard indirect-call pointers, and chooses the right base/relocation strategy (keep ASLR when a
   full relocation table is present, otherwise pin the original base) so a dumped image launches as a fresh
   process (verified end-to-end on UPX-packed and live x86/x64 targets). A packer detector (entropy + section signatures for UPX, ASPack, FSG, PECompact, MPRESS, …) flags

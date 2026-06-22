@@ -81,8 +81,7 @@ public sealed partial class DebuggerEngine
     // un-rearmed (lost) or a stray 0xCC / misclassified stop.
     private readonly Dictionary<uint, StepState> _stepping = [];   // thread -> in-flight single-step
     private readonly HashSet<ulong> _reArmOnNextStop = [];         // bps disarmed for step-over/out/run-to, re-armed on the next stop
-    private readonly Dictionary<ulong, uint> _guarded = [];        // PAGE_GUARD page -> original protect (unpacker OEP catch)
-    private readonly Dictionary<uint, ulong> _reGuard = [];        // thread -> guarded page to re-arm after its next single step
+    private readonly Dictionary<ulong, uint> _guarded = [];        // execute-stripped page -> original protect (unpacker OEP catch)
     private bool _seenSystemBp;
     private volatile bool _pauseRequested;   // set by the UI thread (Pause), read by the debug loop
     private volatile bool _stopping;         // set by the UI thread (Stop), read by the debug loop
@@ -370,13 +369,6 @@ public sealed partial class DebuggerEngine
 
         if (code is Native.EXCEPTION_SINGLE_STEP or Native.STATUS_WX86_SINGLE_STEP)
         {
-            // A step we armed only so a guarded data page's access could complete: re-arm the guard now that
-            // the faulting instruction has run, then (unless this thread is also mid user-step) keep running.
-            if (_reGuard.Remove(ev.dwThreadId, out ulong rgPage))
-            {
-                ApplyGuard(rgPage);
-                if (!_stepping.ContainsKey(ev.dwThreadId)) return false;
-            }
             // A step armed only to run one instruction off an internal anti-debug hook, then re-arm it.
             if (_internalStep.Remove(ev.dwThreadId, out ulong isAddr))
             {
@@ -408,34 +400,31 @@ public sealed partial class DebuggerEngine
             return false;   // step-off of a breakpoint during a Go — keep running
         }
 
-        // Guard-page fault while the unpacker has guards armed: either execution entered a guarded section
-        // (OEP) or the stub touched a guarded data page (let it complete and re-arm).
+        // A guard-page violation we didn't cause (the section-execute OEP catch uses NX, not PAGE_GUARD):
+        // e.g. stack auto-grow, or a program that uses PAGE_GUARD itself. Hand it to the program silently
+        // rather than surfacing it as a fault.
         if (code == Native.STATUS_GUARD_PAGE_VIOLATION)
         {
-            bool armed; lock (_lock) armed = _guarded.Count > 0;
-            if (armed)
-            {
-                ulong ipPage = er.ExceptionAddress & ~0xFFFUL;
-                bool ipGuarded; lock (_lock) ipGuarded = _guarded.ContainsKey(ipPage);
-                if (ipGuarded)
-                {
-                    ClearGuards();   // execution reached a guarded (originally non-stub) page → OEP candidate
-                    Stopped?.Invoke(new StopInfo(StopReason.GuardExec, ev.dwThreadId, er.ExceptionAddress, code));
-                    return true;
-                }
-                ulong accPage = er.Info0 == 8 ? er.ExceptionAddress & ~0xFFFUL : er.Info1 & ~0xFFFUL; // [1] = accessed VA
-                bool accGuarded; lock (_lock) accGuarded = _guarded.ContainsKey(accPage);
-                if (accGuarded)
-                {
-                    lock (_lock) _reGuard[ev.dwThreadId] = accPage;
-                    using var c = new Ctx(Is32);
-                    if (c.Get(hThread)) { c.TrapFlag = true; c.Set(hThread); }
-                    cont = Native.DBG_CONTINUE;
-                    return false;
-                }
-            }
-            cont = Native.DBG_EXCEPTION_NOT_HANDLED;   // not ours (e.g. stack auto-grow) — hand to the program
+            cont = Native.DBG_EXCEPTION_NOT_HANDLED;
             return false;
+        }
+
+        // NX/DEP execute fault while section guards are armed: a code fetch landed in a guarded (originally
+        // non-stub) section we made non-executable → the OEP. Info0 == 8 marks an execute access; Info1 is the
+        // faulting VA, which equals the IP (== ExceptionAddress) for an execute fault. GuardRegion strips
+        // execute (rather than PAGE_GUARDing) so the stub decompresses freely and only the OEP code fetch
+        // faults — no per-write fault storm. Checked before the generic filter so PassFirstChanceExceptions
+        // doesn't swallow it.
+        if (code == Native.EXCEPTION_ACCESS_VIOLATION && er.Info0 == 8)
+        {
+            ulong ipPage = er.ExceptionAddress & ~0xFFFUL;
+            bool ipGuarded; lock (_lock) ipGuarded = _guarded.Count > 0 && _guarded.ContainsKey(ipPage);
+            if (ipGuarded)
+            {
+                ClearGuards();   // execution reached a guarded (originally non-stub) page → OEP candidate
+                Stopped?.Invoke(new StopInfo(StopReason.GuardExec, ev.dwThreadId, er.ExceptionAddress, code));
+                return true;
+            }
         }
 
         // Anti-anti-debug: the "close an invalid handle" trick raises STATUS_INVALID_HANDLE only under a
@@ -774,11 +763,15 @@ public sealed partial class DebuggerEngine
         return mbi.State == Native.MEM_COMMIT && (mbi.Protect & 0xF0) != 0;   // any PAGE_EXECUTE_*
     }
 
-    // ---- guard-page memory breakpoints (generic unpacker OEP catch) ----
-    /// <summary>Mark every committed page in [<paramref name="va"/>, va+<paramref name="size"/>) PAGE_GUARD so
-    /// the first access faults. The section-execute OEP strategy guards the original (non-stub) sections, then
-    /// breaks (<see cref="StopReason.GuardExec"/>) when execution lands in one. Data accesses by the still-running
-    /// stub are transparently let through and re-armed. Call while the debuggee is frozen at a stop.</summary>
+    // ---- execute (NX/DEP) memory breakpoints (generic unpacker OEP catch) ----
+    /// <summary>Trap execution into [<paramref name="va"/>, va+<paramref name="size"/>) by stripping execute
+    /// permission from every committed page (keeping read/write), so a code fetch there raises an execute
+    /// access violation (DEP). The section-execute OEP strategy guards the original (non-stub) sections, then
+    /// breaks (<see cref="StopReason.GuardExec"/>) when execution first lands in one. Unlike PAGE_GUARD, this
+    /// does <i>not</i> fault on data reads/writes, so the still-running stub can freely decompress into the
+    /// target section without a per-write fault storm (which made multi-MB sections like UPX0 appear to hang).
+    /// Pages that are already non-executable are tracked but left untouched — they DEP-fault on execution on
+    /// their own. Original protections are restored by <see cref="ClearGuards"/>. Call while frozen at a stop.</summary>
     public void GuardRegion(ulong va, ulong size)
     {
         if (_proc == IntPtr.Zero || size == 0) return;
@@ -791,9 +784,32 @@ public sealed partial class DebuggerEngine
             if (mbi.State != Native.MEM_COMMIT) continue;
             uint prot = mbi.Protect;
             if ((prot & Native.PAGE_GUARD) != 0 || (prot & 0xFF) == Native.PAGE_NOACCESS) continue;
-            if (Native.VirtualProtectEx(_proc, p, 0x1000, prot | Native.PAGE_GUARD, out _))
-                lock (_lock) _guarded[p] = prot;
+            uint nx = StripExecute(prot);
+            // Executable page: strip execute (record it only if the reprotect takes). Already non-executable:
+            // track it without touching protection — execution into it still DEP-faults, and changing nothing
+            // means no data faults.
+            if (nx != prot)
+            {
+                if (Native.VirtualProtectEx(_proc, p, 0x1000, nx, out _))
+                    lock (_lock) _guarded[p] = prot;
+            }
+            else lock (_lock) _guarded[p] = prot;
         }
+    }
+
+    /// <summary>Map an executable page protection to its non-executable equivalent, preserving read/write
+    /// access and any modifier bits (PAGE_GUARD/NOCACHE/…). Non-executable protections are returned unchanged.</summary>
+    private static uint StripExecute(uint prot)
+    {
+        uint stripped = (prot & 0xFF) switch
+        {
+            Native.PAGE_EXECUTE          => Native.PAGE_READONLY,
+            Native.PAGE_EXECUTE_READ     => Native.PAGE_READONLY,
+            Native.PAGE_EXECUTE_READWRITE => Native.PAGE_READWRITE,
+            Native.PAGE_EXECUTE_WRITECOPY => Native.PAGE_WRITECOPY,
+            uint other                   => other,
+        };
+        return (prot & ~0xFFu) | stripped;
     }
 
     /// <summary>Remove every guard page we set, restoring original protections. Idempotent.</summary>
@@ -804,17 +820,10 @@ public sealed partial class DebuggerEngine
         {
             foreach (var (page, prot) in _guarded) Native.VirtualProtectEx(_proc, page, 0x1000, prot, out _);
             _guarded.Clear();
-            _reGuard.Clear();
         }
     }
 
     public bool HasGuards { get { lock (_lock) return _guarded.Count > 0; } }
-
-    private void ApplyGuard(ulong page)
-    {
-        uint prot; lock (_lock) { if (!_guarded.TryGetValue(page, out prot)) return; }
-        Native.VirtualProtectEx(_proc, page, 0x1000, prot | Native.PAGE_GUARD, out _);
-    }
 
     /// <summary>Capture the full in-memory image at <paramref name="imageBase"/> as a virtual-address-indexed
     /// buffer (buffer offset == RVA) by reading every committed region across SizeOfImage. Breakpoints are
