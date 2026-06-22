@@ -17,7 +17,20 @@ public sealed partial class DebuggerEngine
     /// <summary>Enable the anti-anti-debug layer. Set before <see cref="Launch"/>.</summary>
     public bool HideFromDebugger { get; set; }
 
+    /// <summary>When hiding, spoof the debuggee's parent PID (the value a packer compares against explorer.exe)
+    /// so it doesn't see the debugger as its parent. Auto-resolved to this session's explorer.exe at the loader
+    /// breakpoint; disable to leave the real parent in place. <see cref="SpoofParentProcessId"/> reports what
+    /// was used. Covers the NtQueryInformationProcess(ProcessBasicInformation) parent check (the common one);
+    /// a CreateToolhelp32Snapshot parent walk is not spoofed (its result is an opaque kernel handle).</summary>
+    public bool SpoofParentProcess { get; set; } = true;
+
+    /// <summary>The parent PID injected into NtQueryInformationProcess(ProcessBasicInformation) results, or 0 if
+    /// parent spoofing is off or no explorer.exe was found. Resolved at the loader breakpoint.</summary>
+    public uint SpoofParentProcessId => _spoofParentPid;
+
     private bool _adApplied;
+    private uint _spoofParentPid;          // parent PID to report to the debuggee (0 = spoof disabled)
+    private bool _windowHooksInstalled;    // FindWindow* hooks armed (once user32 is mapped)
     private long _fakeClock;                                            // monotonic synthetic timer (defeats timing checks)
     private readonly Dictionary<ulong, InternalBp> _internalBps = [];   // hook addr -> hook state
     private readonly Dictionary<uint, ulong> _internalStep = [];        // thread -> internal hook to re-arm after a step
@@ -33,7 +46,8 @@ public sealed partial class DebuggerEngine
         GetContextThread,                                              // return-patch: scrub Dr0-7 from the CONTEXT
         SetContextThread,                                             // edit-input: drop the debug-register group
         QueryObject,                                                 // return-patch: scrub the DebugObject type counts
-        FindWindow,                                                  // emulate: hide known debugger window classes
+        QueryInfoProcessParent,                                      // return-patch: spoof PROCESS_BASIC_INFORMATION.InheritedFromUniqueProcessId
+        FindWindowW, FindWindowA, FindWindowExW, FindWindowExA,      // emulate: hide known debugger windows (return NULL)
         TickCount, TickCount64, Qpc, NtQpc, SysTimeAsFileTime, NtSystemTime,   // timing: emulate a slow synthetic clock
         Rdtsc, Rdtscp,                                               // instruction hooks: emulate the synthetic TSC
     }
@@ -56,6 +70,7 @@ public sealed partial class DebuggerEngine
     private void ApplyAntiAntiDebug()
     {
         try { PatchPeb(); } catch { /* best-effort */ }
+        try { ResolveSpoofParent(); } catch { }
         try { InstallNtdllHooks(); } catch { }
         try { InterceptRdtsc(); } catch { }
     }
@@ -131,12 +146,15 @@ public sealed partial class DebuggerEngine
             TryHook(kbase, "GetSystemTimeAsFileTime", AdKind.SysTimeAsFileTime, 1);
         }
         Output?.Invoke($"Anti-debug: {_internalBps.Count} hook(s) armed ({(Is32 ? "32-bit" : "64-bit")}; ntdll @ {ntdll:X}).");
+
+        TryInstallWindowHooks();   // user32 is usually already mapped; LOAD_DLL re-tries any later load
     }
 
     private void TryHook(ulong moduleBase, string export, AdKind kind, int x86Args)
     {
         ulong va = ResolveExport(moduleBase, export);
         if (va == 0) return;
+        lock (_lock) if (_internalBps.ContainsKey(va)) return;   // already hooked — idempotent across re-install
         var raw = new byte[1];
         Native.ReadProcessMemory(_proc, va, raw, 1, out var read);
         if ((int)read != 1) return;
@@ -253,6 +271,16 @@ public sealed partial class DebuggerEngine
             return;
         }
 
+        // NtQueryInformationProcess(ProcessBasicInformation): can't emulate (the caller needs the real PEB
+        // pointer, etc.), so run it and overwrite only InheritedFromUniqueProcessId on return — the parent PID
+        // a packer compares against explorer.exe. arg2 = class (0 == ProcessBasicInformation), arg3 = buffer.
+        if (bp.Kind == AdKind.QueryInfoProcess && _spoofParentPid != 0 && Arg(2) == 0)
+        {
+            ArmReturnBp(ReadPtr(sp, Is32), AdKind.QueryInfoProcessParent, Arg(3), 0);
+            LetItRun(addr, tid, c, hThread);
+            return;
+        }
+
         // rdtsc / rdtscp instruction hook: emulate it from the synthetic clock and skip over it. EDX:EAX get the
         // 64-bit TSC (rdtscp also zeroes ECX = processor id); RIP advances past the instruction (the int3 stays
         // armed for the next execution). Per-call deltas stay tiny so cycle-timing checks can't see the debugger.
@@ -278,6 +306,10 @@ public sealed partial class DebuggerEngine
             AdKind.NtQpc => HookQpc(c, Arg, ntStatus: true),
             AdKind.SysTimeAsFileTime => HookSystemTime(c, Arg, ntStatus: false),
             AdKind.NtSystemTime => HookSystemTime(c, Arg, ntStatus: true),
+            AdKind.FindWindowW => HookFindWindow(c, Arg, ex: false, wide: true),
+            AdKind.FindWindowA => HookFindWindow(c, Arg, ex: false, wide: false),
+            AdKind.FindWindowExW => HookFindWindow(c, Arg, ex: true, wide: true),
+            AdKind.FindWindowExA => HookFindWindow(c, Arg, ex: true, wide: false),
             _ => false,
         };
 
@@ -398,6 +430,7 @@ public sealed partial class DebuggerEngine
         {
             case AdKind.GetContextThread: ScrubDebugRegisters(pend.Ptr); break;
             case AdKind.QueryObject: ScrubDebugObjectCounts(pend.Ptr, pend.Len); break;
+            case AdKind.QueryInfoProcessParent: ScrubParentProcessId(pend.Ptr); break;
         }
     }
 
@@ -446,6 +479,113 @@ public sealed partial class DebuggerEngine
             if (nameBuf == 0) break;
             entry = (nameBuf + nameMax + (ulong)ptr - 1) & ~((ulong)ptr - 1);   // next entry follows this name, aligned
         }
+    }
+
+    // ---- parent-process spoof ----
+    /// <summary>Resolve the PID to report as the debuggee's parent: the explorer.exe in this session (so an
+    /// "is my parent explorer?" check passes), else any explorer.exe. Leaves <see cref="_spoofParentPid"/> 0
+    /// when spoofing is off or none is found, which disables the patch.</summary>
+    private void ResolveSpoofParent()
+    {
+        _spoofParentPid = 0;
+        if (!SpoofParentProcess) return;
+        var explorers = System.Diagnostics.Process.GetProcessesByName("explorer");
+        try
+        {
+            int session = System.Diagnostics.Process.GetCurrentProcess().SessionId;
+            System.Diagnostics.Process? pick = null;
+            foreach (var p in explorers)
+            {
+                try { if (p.SessionId == session) { pick = p; break; } } catch { /* exited between calls */ }
+                pick ??= p;
+            }
+            if (pick is not null)
+            {
+                _spoofParentPid = (uint)pick.Id;
+                Output?.Invoke($"Anti-debug: parent PID will be spoofed to explorer.exe (PID {_spoofParentPid}).");
+            }
+        }
+        catch { }
+        finally { foreach (var p in explorers) p.Dispose(); }
+    }
+
+    /// <summary>Overwrite PROCESS_BASIC_INFORMATION.InheritedFromUniqueProcessId in the buffer a just-completed
+    /// NtQueryInformationProcess(ProcessBasicInformation) filled in, so the debuggee reads explorer.exe as its
+    /// parent rather than the debugger. (PebBaseAddress and the other fields are left intact.)</summary>
+    private void ScrubParentProcessId(ulong pbi)
+    {
+        if (pbi == 0 || _spoofParentPid == 0) return;
+        int off = Is32 ? 0x14 : 0x28;   // InheritedFromUniqueProcessId
+        WritePtr(pbi + (ulong)off, _spoofParentPid, Is32);
+    }
+
+    // ---- window-enumeration defense: FindWindow[Ex][A/W] ----
+    /// <summary>Install the FindWindow* hooks once user32 is mapped (idempotent). Called at the loader
+    /// breakpoint and again on each LOAD_DLL, so a user32 mapped later (e.g. a packer's runtime LoadLibrary)
+    /// is still covered.</summary>
+    private void TryInstallWindowHooks()
+    {
+        if (_windowHooksInstalled) return;
+        ulong user32 = ModuleBaseByName("user32.dll", Is32);
+        if (user32 == 0) return;
+        int before = _internalBps.Count;
+        TryHook(user32, "FindWindowW", AdKind.FindWindowW, 2);
+        TryHook(user32, "FindWindowA", AdKind.FindWindowA, 2);
+        TryHook(user32, "FindWindowExW", AdKind.FindWindowExW, 4);
+        TryHook(user32, "FindWindowExA", AdKind.FindWindowExA, 4);
+        if (_internalBps.Count > before)
+        {
+            _windowHooksInstalled = true;
+            Output?.Invoke($"Anti-debug: {_internalBps.Count - before} window-enumeration hook(s) armed (user32 @ {user32:X}).");
+        }
+    }
+
+    /// <summary>Emulate a "not found" (NULL) result when a FindWindow* call looks up a known debugger window
+    /// class or title; otherwise pass the call through unchanged. Defeats the common
+    /// FindWindow("OLLYDBG"/"x64dbg"/…) detection without disturbing the program's other window lookups.
+    /// EnumWindows-style callback enumeration is not filtered (it can't be without trampolining the callback).</summary>
+    private bool HookFindWindow(Ctx c, Func<int, ulong> arg, bool ex, bool wide)
+    {
+        ulong clsPtr = arg(ex ? 3 : 1), namePtr = arg(ex ? 4 : 2);
+        if (IsDebuggerWindow(ReadGuestStr(clsPtr, wide)) || IsDebuggerWindow(ReadGuestStr(namePtr, wide)))
+        {
+            SetRet(c, 0);   // NULL handle: no such window
+            return true;
+        }
+        return false;       // not a debugger window — let the real lookup run
+    }
+
+    // Curated debugger/analysis-tool window identities. Classes match exactly (case-insensitive); titles match
+    // as a substring (their product name appears in the caption). Extend as needed.
+    private static readonly string[] DebuggerWindowClasses =
+        ["ollydbg", "windbgframeclass", "id", "zeta debugger", "rock debugger", "obsidiangui", "immunitydebugger"];
+    private static readonly string[] DebuggerWindowTitles =
+        ["ollydbg", "x64dbg", "x32dbg", "immunity debugger", "windbg", "ida pro", "interactive disassembler", "cheat engine", "process hacker"];
+
+    /// <summary>True if a window class or title names a known debugger / analysis tool.</summary>
+    private static bool IsDebuggerWindow(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return false;
+        string t = s.Trim().ToLowerInvariant();
+        foreach (var cls in DebuggerWindowClasses) if (t == cls) return true;
+        foreach (var p in DebuggerWindowTitles) if (t.Contains(p, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// <summary>Read a class/title argument from the debuggee as a C-string. A NULL pointer or a class atom
+    /// (a small integer from MAKEINTATOM, not a pointer) reads as empty, so the call passes through.</summary>
+    private string ReadGuestStr(ulong ptr, bool wide)
+    {
+        if (ptr <= 0xFFFF) return "";   // NULL or an ATOM — not a string pointer
+        return wide ? ReadWString(ptr) : ReadCString(ptr);
+    }
+
+    private string ReadWString(ulong va, int maxChars = 256)
+    {
+        var b = ReadMemory(va, maxChars * 2);
+        int n = 0;
+        while (n + 1 < b.Length && (b[n] | b[n + 1]) != 0) n += 2;
+        return System.Text.Encoding.Unicode.GetString(b, 0, n);
     }
 
     /// <summary>Emulate the function's return: pop the return address and (x86 stdcall) the arguments.</summary>

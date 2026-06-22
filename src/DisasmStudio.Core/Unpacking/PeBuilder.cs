@@ -16,11 +16,13 @@ namespace DisasmStudio.Core.Unpacking;
 public static class PeBuilder
 {
     /// <summary>Build the rebuilt PE bytes. <paramref name="imageBase"/> is the image's <b>actual</b> load base
-    /// (the dump is captured there and its addresses are relocated to it), which is written into the optional
-    /// header so the relocation-stripped output reloads consistently even when ASLR moved the image.
-    /// <paramref name="imports"/> may be null/empty, in which case the original import directory is preserved
-    /// and only the entry point + raw layout are fixed.</summary>
-    public static byte[] Build(byte[] dumpImage, PeView view, uint oepRva, IatRebuildResult? imports, ulong imageBase, out string log)
+    /// (the dump is captured there and its addresses are relocated to it). <paramref name="preferredImageBase"/>
+    /// is the <b>on-disk</b> (preferred) base from the original file: when it is known and differs from the load
+    /// base, the dump is un-relocated back to it and relocations/ASLR are preserved, producing an image
+    /// byte-equivalent to the original; pass 0 when unknown (the dumped header base is used, and a moved dump is
+    /// pinned rather than re-ASLR'd). <paramref name="imports"/> may be null/empty, in which case the original
+    /// import directory is preserved and only the entry point + raw layout are fixed.</summary>
+    public static byte[] Build(byte[] dumpImage, PeView view, uint oepRva, IatRebuildResult? imports, ulong imageBase, ulong preferredImageBase, out string log)
     {
         var sb = new StringBuilder();
         bool is64 = view.Is64;
@@ -50,12 +52,32 @@ public static class PeBuilder
             sb.Append($"Rebuilt import section: {imports.Runs.Count} descriptor(s), {imports.Resolved} imports, {importBytes.Length} bytes.\n");
         }
 
-        // Load Config relocation: a UPX stub keeps the Load Config inside its (otherwise dead) stub section,
-        // and the loader reads it at load time, so that one directory would pin the stub. Copy it into the
-        // rebuilt .idata section and repoint the directory, freeing the stub to be dropped. .idata is laid out
-        // as [import data | CFG stubs | relocated Load Config]; reserve the space here so the section fits all.
+        // --- relocation policy (decided up-front so the Load Config handling below can depend on it) ---
+        // Keep the relocation table (and leave ASLR on) only when the table genuinely fixes up DATA pointers (a
+        // real table; a UPX-style packer strips the originals and leaves only a stub-covering remnant) AND we can
+        // place the dump at its true preferred base. The dumped header's ImageBase is unreliable — the loader
+        // overwrites it with the runtime (ASLR) base — so the preferred base comes from the caller
+        // (preferredImageBase, the on-disk image base): when it differs from the load base we un-relocate the
+        // dump's bytes back to it, yielding an image byte-equivalent to the original that the OS can re-ASLR
+        // safely. Without a trustworthy preferred base, a dump captured at an ASLR base must be PINNED (relocations
+        // stripped): re-ASLR would move only reloc-covered fields and leave every runtime-computed absolute pointer
+        // (resolved IAT, CFG/guard pointers, fixed-up vtables) stale, which the loader rejects (0xC000007B).
+        var (relRva, relSize) = view.DataDir(PeConstants.DirBaseReloc);
+        bool hasReloc = relRva != 0 && relSize != 0 && view.SectionContainingRva(relRva) is not null
+            && RelocCoversData(dumpImage, view, relRva, relSize);
+        bool havePreferred = preferredImageBase != 0;
+        ulong preferredBase = havePreferred ? preferredImageBase : view.ImageBase;
+        long delta = (long)preferredBase - (long)imageBase;
+        bool keepReloc = hasReloc && (havePreferred || delta != 0);
+
+        // Load Config relocation: a UPX stub keeps the Load Config inside its (otherwise dead) stub section, so
+        // copying it into the rebuilt .idata section and repointing the directory frees the stub to be dropped.
+        // .idata is laid out as [import data | CFG stubs | relocated Load Config]; reserve the space here so the
+        // section fits all. Skip this when we keep relocations (preserving ASLR): the moved copy would not be
+        // covered by the reloc table, so leave the Load Config where the table can fix it up. (A genuine,
+        // reloc-bearing image has no droppable UPX stub holding its Load Config, so nothing is lost.)
         var (lcRva0, lcSize0) = view.DataDir(PeConstants.DirLoadConfig);
-        bool relocLc = addSection && lcRva0 != 0 && lcSize0 >= 0x40 && lcSize0 <= 0x400
+        bool relocLc = addSection && !keepReloc && lcRva0 != 0 && lcSize0 >= 0x40 && lcSize0 <= 0x400
                        && (ulong)lcRva0 + lcSize0 <= (ulong)dumpImage.Length;
         uint cfgStubOff = PeConstants.Align((uint)importBytes.Length, 16);   // CFG ret/jmp stubs (≤ 8 bytes)
         uint lcCopyOff = PeConstants.Align(cfgStubOff + 8, 16);              // relocated Load Config
@@ -75,30 +97,16 @@ public static class PeBuilder
         int secBase = optOff + sizeOfOpt;
         int numSec = view.NumberOfSections;
 
-        // Keep relocations only if the table fixes up a DATA section. A genuine table relocates data pointers
-        // in .data/.rdata/.pdata; a packer (UPX) strips the original relocations and leaves only a tiny stub
-        // table covering its executable unpack stub. Keeping that + ASLR would relocate the stub but corrupt
-        // the real code it doesn't cover. (Size alone can't tell them apart — x64 is RIP-relative so a real
-        // table is small and never touches the code section.) With no usable table we strip relocations and
-        // pin the image to the dump load base, where its absolute addresses are already correct.
-        var (relRva, relSize) = view.DataDir(PeConstants.DirBaseReloc);
-        bool hasReloc = relRva != 0 && relSize != 0 && view.SectionContainingRva(relRva) is not null
-            && RelocCoversData(dumpImage, view, relRva, relSize);
-
-        // The dump's bytes were relocated by the loader to the runtime base (imageBase), but the dumped header
-        // still records the preferred base (view.ImageBase). When ASLR moved the image, un-relocate the bytes
-        // back to the preferred base and keep that base — producing an image byte-equivalent to the original,
-        // which the OS can then ASLR-relocate normally. (No reloc table ⇒ the image never moved ⇒ nothing to do.)
-        ulong preferredBase = view.ImageBase;
-        long delta = (long)preferredBase - (long)imageBase;
-        ulong finalBase = imageBase;
-        if (hasReloc && delta != 0)
+        // Apply the relocation policy decided above. When keeping relocations, un-relocate the dump's bytes from
+        // the load base to the preferred base (a no-op when it already sits there, delta == 0) and pin the header
+        // to that base; otherwise leave the bytes at the dump base. (relRva/relSize/hasReloc/preferredBase/delta/
+        // keepReloc were computed before the Load Config layout, which depends on keepReloc.)
+        ulong finalBase = keepReloc ? preferredBase : imageBase;
+        if (keepReloc && delta != 0)
         {
             int applied = ApplyRelocations(outBuf, relRva, relSize, delta, is64);
-            finalBase = preferredBase;
             sb.Append($"Un-relocated dump to preferred base {preferredBase:X} (delta {delta:X}, {applied} fixups).\n");
         }
-        else if (hasReloc) finalBase = preferredBase;   // not moved; preferred == runtime
 
         // Relocate the Load Config into .idata now the dump bytes are final (post un-relocation). Its internal
         // fields are absolute VAs into other sections, so a byte copy stays valid; only the directory moves.
@@ -119,7 +127,7 @@ public static class PeBuilder
         Protect(PeConstants.DirExport); Protect(PeConstants.DirResource); Protect(PeConstants.DirException);
         Protect(PeConstants.DirTls); Protect(PeConstants.DirDelayImport);
         if (!relocLc) Protect(PeConstants.DirLoadConfig);   // kept in place ⇒ its section must survive
-        if (hasReloc) Protect(PeConstants.DirBaseReloc);
+        if (keepReloc) Protect(PeConstants.DirBaseReloc);
         // The import directory: when we rebuild it (addSection) the header is repointed to the new .idata and
         // the in-place IAT, so the packer's own original import dir/IAT (which a UPX stub keeps inside its stub
         // section) no longer matters and must NOT pin that section. When not rebuilding, keep them protected.
@@ -178,7 +186,7 @@ public static class PeBuilder
         // --- COFF header: one more section; strip relocations only if there are none to keep ---
         WriteU16(outBuf, fileHdr + PeConstants.Coff_NumberOfSections, (ushort)(keptCount + (addSection ? 1 : 0)));
         ushort chars = (ushort)(view.Characteristics | PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
-        if (!hasReloc) chars |= PeConstants.IMAGE_FILE_RELOCS_STRIPPED;
+        if (!keepReloc) chars |= PeConstants.IMAGE_FILE_RELOCS_STRIPPED;
         WriteU16(outBuf, fileHdr + PeConstants.Coff_Characteristics, chars);
 
         // --- DllCharacteristics: keep Control-Flow-Guard ON so the loader re-initialises the guard function
@@ -187,10 +195,10 @@ public static class PeBuilder
         // only when relocations are gone (then a fixed base), and high-entropy ASLR for safety. ---
         ushort dllc = view.U16(optOff + PeConstants.Opt_DllCharacteristics);
         ushort mask = PeConstants.IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA;
-        if (!hasReloc) mask |= PeConstants.IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
+        if (!keepReloc) mask |= PeConstants.IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
         ushort cleared = (ushort)(dllc & ~mask);
         WriteU16(outBuf, optOff + PeConstants.Opt_DllCharacteristics, cleared);
-        sb.Append($"Relocations {(hasReloc ? "kept" : "stripped")}; DllCharacteristics {dllc:X4} → {cleared:X4}.\n");
+        sb.Append($"Relocations {(keepReloc ? "kept" : "stripped")}; DllCharacteristics {dllc:X4} → {cleared:X4}.\n");
 
         // --- section headers: re-emitted from the cleanup plan (renamed, stub dropped), virtual == raw
         // layout, IAT section made writable. Headers are rewritten fresh so dropped sections compact away. ---
@@ -230,7 +238,7 @@ public static class PeBuilder
         WriteU32(outBuf, optOff + PeConstants.NumberOfRvaAndSizesOffset(is64), dirCount);
         void WriteDirSafe(int index, uint rva, uint size) { if (index < dirCount) WriteDir(outBuf, dirBase, index, rva, size); }
 
-        if (!hasReloc) WriteDirSafe(PeConstants.DirBaseReloc, 0, 0);
+        if (!keepReloc) WriteDirSafe(PeConstants.DirBaseReloc, 0, 0);
         WriteDirSafe(PeConstants.DirBoundImport, 0, 0);  // stale
         WriteDirSafe(4, 0, 0);                           // Certificate: the signature overlay isn't dumped
         if (addSection)

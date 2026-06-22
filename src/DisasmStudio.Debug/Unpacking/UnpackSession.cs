@@ -99,7 +99,7 @@ public sealed class UnpackSession
         var iat = ImportRebuilder.Rebuild(mem, resolver, view, _eng.ImageBase, oepVa);
         foreach (var line in iat.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Report(line);
 
-        var outBytes = PeBuilder.Build(image, view, oepRva, iat.Ok ? iat : null, _eng.ImageBase, out var buildLog);
+        var outBytes = PeBuilder.Build(image, view, oepRva, iat.Ok ? iat : null, _eng.ImageBase, _opt.StaticImageBase, out var buildLog);
         foreach (var line in buildLog.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Report(line);
 
         try { File.WriteAllBytes(_opt.OutputPath, outBytes); }

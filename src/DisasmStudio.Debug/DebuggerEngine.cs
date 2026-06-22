@@ -251,6 +251,10 @@ public sealed partial class DebuggerEngine
                 lock (_lock) _modules[b] = new ModuleInfo(b, path ?? $"module_{b:X}");
                 ModulesChanged?.Invoke();
 
+                // Anti-anti-debug: if user32 maps after the loader breakpoint (e.g. a packer's runtime
+                // LoadLibrary), arm the FindWindow* hooks now that it's present.
+                if (HideFromDebugger && _adApplied) TryInstallWindowHooks();
+
                 // Hosting a DLL: when the target maps, treat it as the debugged module — set ImageBase/EntryPoint
                 // to the DLL (so the live view rebases by the DLL's real ASLR slide) and break at DllMain.
                 bool matched = _hostingDll && !_targetLoaded && IsTargetModule(ev.LoadDll.hFile, path);
