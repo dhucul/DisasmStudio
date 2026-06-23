@@ -21,6 +21,12 @@ public sealed partial class DebuggerEngine
     public event Action? ModulesChanged;
     public event Action? ThreadsChanged;
 
+    /// <summary>Raised on the debug-loop thread for every real exception (AV / illegal / etc.; not our own
+    /// breakpoints or single-steps), before the break/pass decision — so a caller can localize a fault even
+    /// when first-chance exceptions are being passed straight to the program (capture/unpack mode). Args:
+    /// exception code, faulting address, first-chance flag, thread id.</summary>
+    public event Action<uint, ulong, bool, uint>? ExceptionObserved;
+
     /// <summary>Raised on the debug-loop thread when the target DLL (hosted in an EXE) is mapped — i.e. when
     /// <see cref="ImageBase"/> becomes the DLL's real base. Lets the UI build the rebased live analysis with
     /// the correct slide, since for a hosted DLL the launched process is the host, not the debugged module.</summary>
@@ -439,6 +445,7 @@ public sealed partial class DebuggerEngine
         // Any other exception (AV, C++ EH, etc.). The filter decides whether to break and whether to pass it
         // to the debuggee's own handler (DBG_EXCEPTION_NOT_HANDLED) or swallow it (DBG_CONTINUE) on resume.
         bool firstChance = ev.Exception.dwFirstChance != 0;
+        ExceptionObserved?.Invoke(code, addr, firstChance, ev.dwThreadId);
         var (brk, pass) = ExceptionFilter.Decide(code, firstChance);
         cont = pass ? Native.DBG_EXCEPTION_NOT_HANDLED : Native.DBG_CONTINUE;
         if (_pauseRequested || _stopping) return false;
@@ -758,6 +765,40 @@ public sealed partial class DebuggerEngine
         if (h == IntPtr.Zero) return;
         using var c = new Ctx(Is32);
         if (c.Get(h) && c.TrySetByName(name, value)) c.Set(h);
+    }
+
+    /// <summary>The loaded module whose base is the greatest at or below <paramref name="va"/> (best-effort
+    /// containment; module sizes aren't tracked). Used to attribute a fault to the target vs. ntdll/etc.</summary>
+    public ModuleInfo? ModuleContaining(ulong va)
+    {
+        lock (_lock)
+        {
+            ModuleInfo? best = null;
+            foreach (var m in _modules.Values)
+                if (m.Base <= va && (best is null || m.Base > best.Base)) best = m;
+            return best;
+        }
+    }
+
+    /// <summary>Snapshot a fault for diagnostics: which module faulted (and the offset into it), the faulting
+    /// instruction disassembled from live memory, and the thread's registers. Call while frozen at the
+    /// exception (e.g. from <see cref="ExceptionObserved"/>).</summary>
+    public FaultSnapshot CaptureFault(uint code, ulong addr, bool firstChance, uint threadId)
+    {
+        var mod = ModuleContaining(addr);
+        string instr = "";
+        try { if (new LiveDisassembler(this).TryDecodeAt(addr, out var ins)) instr = new Core.Disasm.AsmFormatter().FormatText(ins); }
+        catch { /* unreadable code page at the fault — leave blank */ }
+        string regs = GetRegisters(threadId) is { } r ? FormatRegisters(r) : "";
+        return new FaultSnapshot(code, addr, firstChance, mod?.Name ?? "?", mod is null ? 0 : addr - mod.Base, instr, regs);
+    }
+
+    private static string FormatRegisters(RegisterSet r)
+    {
+        string[] keys = r.Is32
+            ? ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "eip"]
+            : ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "rip"];
+        return string.Join(" ", keys.Select(k => $"{k}={r[k]:X}"));
     }
 
     public bool IsExecutable(ulong addr)

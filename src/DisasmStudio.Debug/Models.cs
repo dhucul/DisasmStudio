@@ -18,6 +18,26 @@ public sealed record ModuleInfo(ulong Base, string Path)
     public string Name => System.IO.Path.GetFileName(Path);
 }
 
+/// <summary>A captured fault: the exception, where it happened (module + offset), the faulting instruction,
+/// and a register snapshot. Used to localize an anti-debug self-crash (which module faulted, and on what)
+/// instead of reporting only the final process exit code.</summary>
+public sealed record FaultSnapshot(uint Code, ulong Address, bool FirstChance,
+    string Module, ulong ModuleOffset, string Instruction, string Registers)
+{
+    public string CodeName => Code switch
+    {
+        0xC0000005 => "ACCESS_VIOLATION",
+        0xC000001D => "ILLEGAL_INSTRUCTION",
+        0xC0000096 => "PRIVILEGED_INSTRUCTION",
+        0x80000003 => "BREAKPOINT",
+        0xC0000094 => "INTEGER_DIVIDE_BY_ZERO",
+        0xC0000409 => "STACK_BUFFER_OVERRUN",
+        0xC0000025 => "NONCONTINUABLE_EXCEPTION",
+        0xC0000420 => "ASSERTION_FAILURE",
+        _ => $"0x{Code:X8}",
+    };
+}
+
 /// <summary>A thread in the debuggee.</summary>
 public sealed record ThreadInfo(uint Id, ulong StartAddress);
 

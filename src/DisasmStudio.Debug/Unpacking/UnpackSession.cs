@@ -30,6 +30,7 @@ public sealed class UnpackSession
     private readonly StringBuilder _log = new();
     private bool _done;
     private bool _first = true;
+    private FaultSnapshot? _lastFault;
 
     /// <summary>Progress lines as the run proceeds (also accumulated into <see cref="UnpackResult.Log"/>).</summary>
     public event Action<string>? Progress;
@@ -48,6 +49,7 @@ public sealed class UnpackSession
         _eng.Output += Report;
         _eng.Stopped += OnStopped;
         _eng.Exited += OnExited;
+        _eng.ExceptionObserved += OnException;
         if (_opt.Sandbox) _eng.EnableJobContainment();
         Report($"Launching {Path.GetFileName(_target)} under the debugger{(_opt.Sandbox ? " (job-contained)" : "")}…");
         try { _eng.Launch(_target); }
@@ -119,9 +121,31 @@ public sealed class UnpackSession
         _done = true;
         uint uc = (uint)code;
         Report($"Target exited with code 0x{uc:X8}.");
+        if (_lastFault is { } f) ReportFault(f);
+        string faultHint = _lastFault is { } ff ? $" Last fault: {ff.CodeName} at {ff.Address:X} in {ff.Module}+{ff.ModuleOffset:X}." : "";
         _tcs.TrySetResult(new UnpackResult(false, 0, _finder.ActiveMethod, false, 0, 0, null,
-            $"The target exited (code 0x{uc:X8}) before an OEP was reached. {DescribeExit(uc)}",
+            $"The target exited (code 0x{uc:X8}) before an OEP was reached. {DescribeExit(uc)}{faultHint}",
             _log.ToString()));
+    }
+
+    // Keep the most recent error-severity (0xCxxxxxxx) or any second-chance exception — the likely crash site.
+    // Captured here (not as a stop) because the unpack run passes first-chance exceptions straight to the
+    // target, so a protector's anti-debug self-crash would otherwise be lost behind the bare exit code.
+    private void OnException(uint code, ulong addr, bool firstChance, uint threadId)
+    {
+        if ((code & 0xF0000000) == 0xC0000000 || !firstChance)
+            _lastFault = _eng.CaptureFault(code, addr, firstChance, threadId);
+    }
+
+    private void ReportFault(FaultSnapshot f)
+    {
+        Report($"Fault site: {f.CodeName} at {f.Address:X} in {f.Module}+{f.ModuleOffset:X} ({(f.FirstChance ? "first-chance" : "second-chance")}).");
+        if (f.Instruction.Length > 0) Report($"  faulting instruction: {f.Instruction}");
+        if (f.Registers.Length > 0) Report($"  registers: {f.Registers}");
+        bool inTarget = f.Module.Equals(Path.GetFileName(_target), StringComparison.OrdinalIgnoreCase);
+        Report(inTarget
+            ? "  -> the fault is inside the target's own code — the protector's anti-tamper/anti-debug self-crash on detecting the debugger."
+            : $"  -> the fault is inside {f.Module} — possibly an API or anti-debug-hook detection path.");
     }
 
     /// <summary>Interpret a process exit code for the failure message. When a process is killed by an
@@ -157,6 +181,7 @@ public sealed class UnpackSession
         if (_done) return;
         _done = true;
         Report("FAILED: " + error);
+        if (_lastFault is { } f) ReportFault(f);
         try { _eng.Stop(); } catch { }
         _tcs.TrySetResult(new UnpackResult(false, 0, _finder.ActiveMethod, false, 0, 0, null, error, _log.ToString()));
     }
