@@ -30,6 +30,7 @@ internal sealed class UnpackerDialog : Window
     private readonly TextBox _manualOep;
     private readonly CheckBox _sandbox;
     private readonly CheckBox _apiHooks;
+    private readonly CheckBox _rdtsc;
     private readonly TextBox _output;
     private readonly TextBox _log;
     private readonly Button _start;
@@ -101,12 +102,20 @@ internal sealed class UnpackerDialog : Window
         opt.Children.Add(_sandbox);
         _apiHooks = new CheckBox
         {
-            Content = "Anti-debug API/code hooks (uncheck to test hook detection by self-CRC protectors)",
+            Content = "Anti-debug API hooks (ntdll/user32 — uncheck to test ntdll-prologue hook detection)",
             Foreground = Fg,
             IsChecked = true,
             Margin = new Thickness(0, 0, 0, 2),
         };
         opt.Children.Add(_apiHooks);
+        _rdtsc = new CheckBox
+        {
+            Content = "Patch rdtsc in target (uncheck to leave the target unmodified — test self-CRC detection)",
+            Foreground = Fg,
+            IsChecked = true,
+            Margin = new Thickness(0, 0, 0, 2),
+        };
+        opt.Children.Add(_rdtsc);
         opt.Children.Add(new TextBlock
         {
             Text = "Note: this is process-level containment only — it does NOT block network or filesystem access. " +
@@ -195,7 +204,7 @@ internal sealed class UnpackerDialog : Window
         _log.Clear();
 
         var options = new UnpackOptions(method, manualOep, _sandbox.IsChecked == true, outPath, _imageBase,
-            UseApiHooks: _apiHooks.IsChecked == true);
+            UseApiHooks: _apiHooks.IsChecked == true, InterceptRdtsc: _rdtsc.IsChecked == true);
         var session = new UnpackSession(_target, options);
         session.Progress += line => Dispatcher.BeginInvoke(() => Append(line));
 

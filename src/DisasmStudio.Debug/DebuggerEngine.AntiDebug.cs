@@ -17,11 +17,16 @@ public sealed partial class DebuggerEngine
     /// <summary>Enable the anti-anti-debug layer. Set before <see cref="Launch"/>.</summary>
     public bool HideFromDebugger { get; set; }
 
-    /// <summary>When hiding, whether to install the code-patching hooks — the int3 hooks on ntdll/kernelbase/
-    /// user32 API entries and the rdtsc patches in the target. These modify code, which a self-CRC / anti-hook
-    /// protector (e.g. VMProtect) can detect. Set false to keep only the non-code edits (PEB normalization,
-    /// parent spoof) — used to test whether the hooks themselves are what a protector is detecting.</summary>
+    /// <summary>When hiding, install the int3 hooks on ntdll/kernelbase/user32 API entries (the debug-query
+    /// and timing emulation). These live in system modules, not the target, so a target's self-CRC won't see
+    /// them — but a protector that scans ntdll prologues for hooks might. Set false to test that.</summary>
     public bool HideUseApiHooks { get; set; } = true;
+
+    /// <summary>When hiding, patch the target's own <c>rdtsc</c>/<c>rdtscp</c> instructions to feed a synthetic
+    /// clock. This modifies the TARGET's code, so a self-CRC protector (e.g. VMProtect) can detect it. Set
+    /// false to leave the target's bytes untouched — separated from <see cref="HideUseApiHooks"/> so API
+    /// emulation can stay on while the target is not modified.</summary>
+    public bool HideInterceptRdtsc { get; set; } = true;
 
     /// <summary>When hiding, spoof the debuggee's parent PID (the value a packer compares against explorer.exe)
     /// so it doesn't see the debugger as its parent. Auto-resolved to this session's explorer.exe at the loader
@@ -77,12 +82,10 @@ public sealed partial class DebuggerEngine
     {
         try { PatchPeb(); } catch { /* best-effort */ }
         try { ResolveSpoofParent(); } catch { }
-        if (HideUseApiHooks)
-        {
-            try { InstallNtdllHooks(); } catch { }
-            try { InterceptRdtsc(); } catch { }
-        }
-        else Output?.Invoke("Anti-debug: API/code hooks DISABLED (PEB normalized only) — testing whether the hooks are being detected.");
+        if (HideUseApiHooks) { try { InstallNtdllHooks(); } catch { } }
+        else Output?.Invoke("Anti-debug: ntdll/user32 API hooks DISABLED.");
+        if (HideInterceptRdtsc) { try { InterceptRdtsc(); } catch { } }
+        else Output?.Invoke("Anti-debug: rdtsc patching DISABLED — the target's own code is left unmodified (testing self-CRC detection).");
     }
 
     // ---- PEB / heap normalization ----

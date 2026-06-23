@@ -6,7 +6,7 @@ namespace DisasmStudio.Debug.Unpacking;
 /// <summary>Options for an unpack run. <see cref="StaticImageBase"/> is the file's preferred image base, used
 /// to rebase a manual (static-VA) OEP to the runtime load base under ASLR.</summary>
 public sealed record UnpackOptions(OepMethod Strategy, ulong? ManualOep, bool Sandbox, string OutputPath,
-    ulong StaticImageBase = 0, bool UseApiHooks = true);
+    ulong StaticImageBase = 0, bool UseApiHooks = true, bool InterceptRdtsc = true);
 
 /// <summary>The outcome of an unpack run.</summary>
 public sealed record UnpackResult(
@@ -50,7 +50,8 @@ public sealed class UnpackSession
     {
         _eng.PassFirstChanceExceptions = true;   // let the stub's own SEH tricks run; only OEP/guard stops matter
         _eng.HideFromDebugger = true;            // packers commonly check for a debugger — hide from them
-        _eng.HideUseApiHooks = _opt.UseApiHooks; // off = test whether our code hooks are being detected
+        _eng.HideUseApiHooks = _opt.UseApiHooks;       // off = test ntdll-prologue hook detection
+        _eng.HideInterceptRdtsc = _opt.InterceptRdtsc; // off = don't modify the target's code (test self-CRC)
         _eng.Output += Report;
         _eng.Stopped += OnStopped;
         _eng.Exited += OnExited;
