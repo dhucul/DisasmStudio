@@ -133,7 +133,14 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   is **localized**: the fault site is reported with its module + offset, the faulting instruction
   disassembled from live memory, the registers, and — for an access violation — exactly what address it
   tried to read/write/execute and that page's state, and the (partially) decrypted image is **dumped at the
-  fault** for offline inspection.
+  fault** for offline inspection. Run-free also takes an entry snapshot and a few short timed memory snapshots
+  before the final settle dump so you can compare section entropy over time and see whether a VM body ever becomes less opaque
+  before an anti-debug self-crash; when probes exist the unpack dialog surfaces the lowest-entropy one through
+  **Devirt best probe**.
+  If no snapshot exposes a static dispatcher, the **Trace VM loop/handlers** strategy single-steps a bounded
+  execution window and writes a `.vmtrace.txt` report with hot indirect dispatch sites, concrete runtime
+  handler targets, and short handler-body samples. This is trace-based recovery evidence, not a restored
+  native-code unpack.
 - **Anti-anti-debug ("Hide debugger"):** a ScyllaHide-style layer (toolbar checkbox; always on during
   *Unpack*) that hides the debugger from a target's detection checks. Applied at the loader breakpoint —
   before the program's own code runs — it normalizes the PEB (`BeingDebugged`, the `NtGlobalFlag` heap-debug
@@ -241,11 +248,13 @@ yet), and symbols come from the app's own analysis + demangler rather than a sym
 **decrypted** image it discovers the VM entry/dispatcher/handler table, classifies each handler's stack-VM
 semantics, decodes the bytecode the VIP walks, and lifts it back into the shared IR so the existing
 `Structurer` + Pseudo-C emitter render readable C — no separate renderer. It is honest about its limits,
-returning `NoVmFound` / `ImageEncrypted` / `PartialRecovery` rather than guessing. This is a *foundation*,
+returning `NoVmFound` / `ImageEncrypted` / `UnsupportedVm` / `PartialRecovery` rather than guessing. This is a *foundation*,
 proven end-to-end on a synthetic stack VM (the engine and a built-in `Synthetic/SyntheticVm` are exercised
-by the `.smoke_devirt` harness); it is **not** a complete devirtualizer. Deferred: real VMProtect/Themida
+by the `.smoke_devirt` harness); it is **not** a complete devirtualizer. The toolbar's **Devirt...** action
+runs the experimental engine on the current image, and unpacker failures with a fault snapshot enable
+**Devirt snapshot** so the RVA-indexed memory dump is analysed at the runtime image base. Deferred: real VMProtect/Themida
 version-specific handler signatures and deobfuscation, VIP decryption schedules, multi-entry whole-program
-recovery, UI wiring, and — the gating prerequisite for real samples — obtaining a decrypted dump past a
+recovery, and — the gating prerequisite for real samples — obtaining a decrypted dump past a
 protector's anti-debug (virtualized code is only present, decrypted, at runtime).
 
 The decrypt-dump prerequisite is the hard part: a well-hardened VMProtect build can detect even a *clean*

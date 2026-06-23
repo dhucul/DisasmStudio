@@ -12,6 +12,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.Core.Devirt;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
@@ -268,6 +269,36 @@ public partial class MainWindow : Window
         dlg.ShowDialog();
         if (dlg.OpenPath is { } p && File.Exists(p))
             await LoadFile(p);   // reopen the rebuilt PE through the normal load + analysis pipeline
+    }
+
+    private async void OnDevirt(object sender, RoutedEventArgs e)
+    {
+        if (_image is null)
+        {
+            MessageBox.Show(this, "Open a decrypted PE or memory dump first.", "Devirtualizer", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        Progress.Visibility = Visibility.Visible;
+        Progress.IsIndeterminate = true;
+        StatusText.Text = "Devirtualizer: analyzing VM...";
+        try
+        {
+            var image = _image;
+            var result = await Task.Run(() => DevirtEngine.Run(image));
+            StatusText.Text = $"Devirtualizer: {result.Status} - {result.Message}";
+            new DevirtReportDialog(this, image, result).ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = "Devirtualizer failed.";
+            MessageBox.Show(this, ex.Message, "Devirtualizer failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            Progress.Visibility = Visibility.Collapsed;
+            Progress.IsIndeterminate = false;
+        }
     }
 
     private void BeginDebug(Action<DebugSession> start)
@@ -874,6 +905,8 @@ public partial class MainWindow : Window
         {
             image = proj.Format == "Raw"
                 ? RawImage.Load(proj.BinaryPath, proj.RawBaseVa, proj.RawBitness)
+                : proj.Format == "PE memory"
+                ? PeMemoryImage.Load(proj.BinaryPath, proj.RawBaseVa)
                 : BinaryLoader.Load(proj.BinaryPath);
         }
         catch (Exception ex)
@@ -918,7 +951,7 @@ public partial class MainWindow : Window
         {
             BinaryPath = _image.FilePath,
             Format = _image.FormatName,
-            RawBaseVa = _image.Format == BinaryFormat.Raw ? _image.ImageBase : 0,
+            RawBaseVa = _image.Format == BinaryFormat.Raw || _image.FormatName == "PE memory" ? _image.ImageBase : 0,
             RawBitness = _image.Format == BinaryFormat.Raw ? _image.Bitness : 0,
             CurrentVa = _nav.Current ?? _image.EntryVa,
             CenterTab = CenterTabs.SelectedIndex,
@@ -1042,6 +1075,10 @@ public partial class MainWindow : Window
                 if (opt is null) return;
                 image = RawImage.Load(path, opt.Value.BaseVa, opt.Value.Bitness);
             }
+            else if (fmt == BinaryFormat.Pe && LooksLikeMemoryDumpPath(path) && PeMemoryImage.TryLoad(path, out var mem))
+            {
+                image = mem;
+            }
             else image = BinaryLoader.Load(path);
         }
         catch (Exception ex)
@@ -1062,6 +1099,17 @@ public partial class MainWindow : Window
             try { var v = PackerDetector.Detect(image); if (v.IsPacked) StatusText.Text = $"{v.Notes}  Use Unpack… to recover it."; }
             catch { /* detection is best-effort */ }
         }
+    }
+
+    private static bool LooksLikeMemoryDumpPath(string path)
+    {
+        string name = Path.GetFileName(path);
+        string ext = Path.GetExtension(path);
+        return name.Contains("_fault_dump", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("_memdump", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".dmp", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".mem", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".bin", StringComparison.OrdinalIgnoreCase);
     }
 
     private enum AnalyzeOutcome { Applied, Cancelled, Failed }

@@ -86,6 +86,9 @@ public enum DevirtStatus
     /// <summary>A virtualizer fingerprint is present but the handlers/bytecode are not readable on disk —
     /// the image is still encrypted; a decrypted dump is required first.</summary>
     ImageEncrypted,
+    /// <summary>A virtualizer fingerprint is present, but no supported dispatcher/handler-table shape was
+    /// found. This is common for real VMProtect/Themida VMs whose dispatchers are obfuscated or mutated.</summary>
+    UnsupportedVm,
     /// <summary>A VM was found but some handlers/branches could not be recovered (left as Unknown).</summary>
     PartialRecovery,
     Error,
@@ -101,4 +104,5 @@ public sealed record DevirtResult
     public IReadOnlyList<VInsn> Program { get; init; } = [];
     public LiftedFunction? Lifted { get; init; }              // feed to Structurer + StructEmitter
     public IReadOnlyList<DecompLine> PseudoC { get; init; } = [];   // rendered, ready to display
+    public VmTriageResult? Triage { get; init; }
 }

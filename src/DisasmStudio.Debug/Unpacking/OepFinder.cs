@@ -19,6 +19,9 @@ public enum OepMethod
     /// when it faults (anti-tamper self-crash) or after it settles. For VM protectors, where there is no OEP
     /// to find and the intrusive strategies are the very thing that gets detected.</summary>
     RunFree,
+    /// <summary>Intrusive VM diagnostics: single-step a bounded window and recover runtime dispatch sites,
+    /// concrete handler targets and short handler-body samples. Produces a trace report, not an unpacked PE.</summary>
+    TraceVm,
 }
 
 /// <summary>

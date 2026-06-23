@@ -16,6 +16,10 @@ public sealed partial class DebuggerEngine
 {
     public event Action<StopInfo>? Stopped;
     public event Action? Running;
+    /// <summary>Raised immediately after <c>ContinueDebugEvent</c> resumes the target.</summary>
+    public event Action? Resumed;
+    /// <summary>Raised on EXIT_PROCESS_DEBUG_EVENT before the debug event is continued.</summary>
+    public event Action<int>? ProcessExiting;
     public event Action<int>? Exited;
     public event Action<string>? Output;
     public event Action? ModulesChanged;
@@ -79,6 +83,7 @@ public sealed partial class DebuggerEngine
     private readonly Dictionary<ulong, byte> _tempBps = [];
 
     private readonly BlockingCollection<(ResumeMode Mode, ulong Target)> _resume = new();
+    private readonly Queue<ulong[]> _runToAnyTargets = new();
 
     // Step state (loop-thread only) — keyed by debuggee thread id. A multi-threaded debuggee can have several
     // threads each mid single-step at once (e.g. each stepping off a breakpoint during a Go), so this must not
@@ -287,6 +292,7 @@ public sealed partial class DebuggerEngine
             case Native.EXIT_PROCESS_DEBUG_EVENT:
                 if (_hostingDll && !_targetLoaded)
                     Output?.Invoke("Target DLL was never loaded by the host (wrong-bitness rundll32, bad path, or the host didn't load it).");
+                ProcessExiting?.Invoke((int)ev.ExitProcess.dwExitCode);
                 _ended = true;
                 Exited?.Invoke((int)ev.ExitProcess.dwExitCode);
                 return false;
@@ -313,6 +319,7 @@ public sealed partial class DebuggerEngine
             // temp / one-shot breakpoint
             if (RemoveTempBpIfPresent(addr))
             {
+                RemoveAllTempBps();
                 SetIp(hThread, addr);   // _reArmOnNextStop is handled centrally in the loop's stop branch
                 // EntryPoint reason for a launched EXE's entry or a hosted DLL's DllMain; a hosted break planted
                 // at a chosen export (breakIsEntry == false) is a normal Breakpoint.
@@ -472,9 +479,30 @@ public sealed partial class DebuggerEngine
     {
         IntPtr hThread = ThreadHandle(ev.dwThreadId);
         using var c = new Ctx(Is32);
-        if (!c.Get(hThread)) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont); return; }
+        if (!c.Get(hThread))
+        {
+            Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+            Resumed?.Invoke();
+            return;
+        }
         ulong ip = c.Ip;
+        uint tid = ev.dwThreadId;
         bool onBp = false; lock (_lock) onBp = _swBps.TryGetValue(ip, out var b) && b.Armed;
+
+        void SingleStepFallback()
+        {
+            if (onBp)
+            {
+                DisarmAddr(ip);
+                _stepping[tid] = new StepState(ip, true);
+            }
+            else
+            {
+                _stepping[tid] = new StepState(0, true);
+            }
+            c.TrapFlag = true;
+            c.Set(hThread);
+        }
 
         // Skip an execute hardware breakpoint at the current IP for one instruction so it doesn't re-fire.
         bool atExecHw; lock (_lock) atExecHw = _hwBps.Any(b => b.Kind == HwKind.Execute && b.Enabled && b.Address == ip);
@@ -483,20 +511,43 @@ public sealed partial class DebuggerEngine
         switch (mode)
         {
             case ResumeMode.StepOver when IsCallAt(ip, out int len):
-                AddTempBp(ip + (ulong)len);
-                if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
+                if (AddTempBp(ip + (ulong)len))
+                {
+                    if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
+                }
+                else SingleStepFallback();
                 break;
             case ResumeMode.StepOut:
             {
                 ulong ret = FindReturnAddress(c.Sp);
-                if (ret != 0) AddTempBp(ret);
-                if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
+                if (ret != 0 && AddTempBp(ret))
+                {
+                    if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
+                }
+                else SingleStepFallback();
                 break;
             }
             case ResumeMode.RunToCursor:
-                AddTempBp(target);
-                if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
+                if (AddTempBp(target))
+                {
+                    if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
+                }
+                else SingleStepFallback();
                 break;
+            case ResumeMode.RunToAny:
+            {
+                ulong[] targets;
+                lock (_lock) targets = _runToAnyTargets.Count > 0 ? _runToAnyTargets.Dequeue() : [];
+                bool armed = false;
+                foreach (ulong t in targets.Where(t => t != 0).Distinct())
+                    armed |= AddTempBp(t);
+                if (armed)
+                {
+                    if (onBp) { DisarmAddr(ip); _reArmOnNextStop.Add(ip); }
+                }
+                else SingleStepFallback();
+                break;
+            }
             default: // Go, StepInto, StepOver-of-noncall
             {
                 bool single = mode is ResumeMode.StepInto || mode == ResumeMode.StepOver;
@@ -507,6 +558,7 @@ public sealed partial class DebuggerEngine
             }
         }
         Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+        Resumed?.Invoke();
     }
 
     // ---- public commands (UI thread) ----
@@ -515,6 +567,12 @@ public sealed partial class DebuggerEngine
     public void StepOver() => _resume.Add((ResumeMode.StepOver, 0));
     public void StepOut() => _resume.Add((ResumeMode.StepOut, 0));
     public void RunToCursor(ulong va) => _resume.Add((ResumeMode.RunToCursor, va));
+    public void RunToAny(IEnumerable<ulong> targets)
+    {
+        ulong[] copy = targets.Where(t => t != 0).Distinct().ToArray();
+        lock (_lock) _runToAnyTargets.Enqueue(copy);
+        _resume.Add((ResumeMode.RunToAny, 0));
+    }
     public void Pause() { _pauseRequested = true; if (_proc != IntPtr.Zero) Native.DebugBreakProcess(_proc); }
 
     public void Stop()
@@ -692,23 +750,38 @@ public sealed partial class DebuggerEngine
         if (bp is { Armed: true }) { WriteCode(va, [bp.Original]); bp.Armed = false; }
     }
 
-    private void AddTempBp(ulong va)
+    private bool AddTempBp(ulong va)
     {
         lock (_lock)
         {
-            if (_tempBps.ContainsKey(va) || _swBps.ContainsKey(va)) return;
+            if (_tempBps.ContainsKey(va) || _swBps.ContainsKey(va)) return false;
             var o = ReadMemory(va, 1);
-            if (o.Length < 1) return;
+            if (o.Length < 1) return false;
             _tempBps[va] = o[0];
         }
-        WriteCode(va, [0xCC]);
+        return WriteCode(va, [0xCC]);
     }
+
+    public bool SetTemporaryBreakpoint(ulong va) => AddTempBp(va);
 
     private bool RemoveTempBpIfPresent(ulong va)
     {
         byte orig; lock (_lock) { if (!_tempBps.Remove(va, out orig)) return false; }
         WriteCode(va, [orig]);
         return true;
+    }
+
+    private void RemoveAllTempBps()
+    {
+        KeyValuePair<ulong, byte>[] bps;
+        lock (_lock)
+        {
+            if (_tempBps.Count == 0) return;
+            bps = _tempBps.ToArray();
+            _tempBps.Clear();
+        }
+        foreach (var (va, orig) in bps)
+            WriteCode(va, [orig]);
     }
 
     private void ProgramHwAllThreads() { lock (_lock) foreach (var h in _threads.Values) ProgramHwForThread(h); }
@@ -936,6 +1009,7 @@ public sealed partial class DebuggerEngine
         if (size < 0x1000 || size > 1024u * 1024 * 1024) return [];
         sizeOfImage = size;
         var buf = new byte[size];
+        Array.Copy(hdr, 0, buf, 0, Math.Min(hdr.Length, buf.Length));
         ulong endVa = imageBase + size, addr = imageBase;
         int mbiSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
         while (addr < endVa)

@@ -7,7 +7,7 @@ public enum StopReason { EntryPoint, Attached, Breakpoint, Step, Watchpoint, Pau
 public enum HwKind { Execute, Write, ReadWrite }
 
 /// <summary>What to do when resuming the debuggee.</summary>
-public enum ResumeMode { Go, StepInto, StepOver, StepOut, RunToCursor, Stop }
+public enum ResumeMode { Go, StepInto, StepOver, StepOut, RunToCursor, RunToAny, Stop }
 
 /// <summary>Details of a stop event, raised to the UI.</summary>
 public readonly record struct StopInfo(StopReason Reason, uint ThreadId, ulong Address, uint ExceptionCode);

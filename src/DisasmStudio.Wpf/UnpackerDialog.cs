@@ -3,6 +3,8 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using DisasmStudio.Core.Devirt;
+using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug.Unpacking;
 
@@ -35,6 +37,9 @@ internal sealed class UnpackerDialog : Window
     private readonly TextBox _log;
     private readonly Button _start;
     private readonly Button _open;
+    private readonly Button _devirt;
+    private readonly Button _devirtProbe;
+    private UnpackResult? _lastResult;
     private bool _running;
 
     /// <summary>Set to the rebuilt file's path when the user chooses to reopen it; null otherwise.</summary>
@@ -84,6 +89,7 @@ internal sealed class UnpackerDialog : Window
         _strategy.Items.Add("Section guard");
         _strategy.Items.Add("Manual OEP");
         _strategy.Items.Add("Run free — no trace (VM protectors); dump on settle/fault");
+        _strategy.Items.Add("Trace VM loop/handlers (single-step diagnostic)");
         _strategy.SelectedIndex = 0;
         opt.Children.Add(_strategy);
 
@@ -153,9 +159,15 @@ internal sealed class UnpackerDialog : Window
         _start.Click += OnStart;
         _open = new Button { Content = "Open unpacked", MinWidth = 110, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
         _open.Click += (_, _) => { OpenPath = _output.Text.Trim(); DialogResult = true; };
+        _devirt = new Button { Content = "Devirt snapshot", MinWidth = 112, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
+        _devirt.Click += OnDevirtSnapshot;
+        _devirtProbe = new Button { Content = "Devirt best probe", MinWidth = 120, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
+        _devirtProbe.Click += OnDevirtBestProbe;
         var close = new Button { Content = "Close", IsCancel = true, MinWidth = 80 };
         buttons.Children.Add(_start);
         buttons.Children.Add(_open);
+        buttons.Children.Add(_devirt);
+        buttons.Children.Add(_devirtProbe);
         buttons.Children.Add(close);
         root.Children.Add(buttons);
 
@@ -191,6 +203,7 @@ internal sealed class UnpackerDialog : Window
             2 => OepMethod.SectionGuard,
             3 => OepMethod.Manual,
             4 => OepMethod.RunFree,
+            5 => OepMethod.TraceVm,
             _ => OepMethod.Auto,
         };
         if (method == OepMethod.Manual)
@@ -202,6 +215,9 @@ internal sealed class UnpackerDialog : Window
         _running = true;
         SetInputsEnabled(false);
         _log.Clear();
+        _lastResult = null;
+        _devirt.IsEnabled = false;
+        _devirtProbe.IsEnabled = false;
 
         var options = new UnpackOptions(method, manualOep, _sandbox.IsChecked == true, outPath, _imageBase,
             UseApiHooks: _apiHooks.IsChecked == true, InterceptRdtsc: _rdtsc.IsChecked == true);
@@ -215,11 +231,22 @@ internal sealed class UnpackerDialog : Window
         if (result.Ok)
         {
             Append("");
+            if (result.Method == OepMethod.TraceVm)
+            {
+                Append("TRACE COMPLETE - VM loop/handler trace finished.");
+                if (!string.IsNullOrWhiteSpace(result.TraceReportPath))
+                    Append($"Report: {result.TraceReportPath}");
+            }
+            else
+            {
             Append($"SUCCESS — OEP {result.Oep:X} via {result.Method}" +
                    $"{(result.OepConfirmed ? " (prologue confirmed)" : " (prologue unconfirmed)")}.");
             Append($"Imports: {result.ImportsResolved} resolved, {result.ImportsUnresolved} unresolved.");
             Append($"Wrote: {result.OutputPath}");
             _open.IsEnabled = true;
+            }
+            _lastResult = result;
+            EnableProbeButton(result);
         }
         else
         {
@@ -230,16 +257,176 @@ internal sealed class UnpackerDialog : Window
                 Append("");
                 Append("This file was identified as a code-virtualizing protector (VMProtect/Themida-class). The OEP " +
                        "strategies here are built for compressors that decompress the original code and jump to it — a " +
-                       "moment that does not exist when the code is virtualized to bytecode. No run-to-OEP dump can " +
-                       "recover the original; that needs a VMProtect/Themida devirtualizer, which is out of scope.");
+                       "moment that does not exist when the code is virtualized to bytecode.");
                 Append("If the goal is only to strip an outer compression layer (e.g. VMProtect's \"Pack the output " +
                        "file\"), try the Manual strategy with the post-stub OEP, or extract any embedded PE from the " +
                        "Resources tab. Even then, the recovered code stays virtualized.");
             }
+            _lastResult = result;
+            if (!string.IsNullOrWhiteSpace(result.FaultDumpPath) && File.Exists(result.FaultDumpPath))
+            {
+                Append($"Devirtualizer: snapshot available at {result.FaultDumpPath}. Use 'Devirt snapshot' to analyze it.");
+                _devirt.IsEnabled = true;
+            }
+            EnableProbeButton(result);
             SetInputsEnabled(true);   // let the user adjust strategy and retry
         }
         _running = false;
         _start.IsEnabled = !result.Ok;
+    }
+
+    private void EnableProbeButton(UnpackResult result)
+    {
+        var probes = ExistingProbes(result).ToList();
+        if (probes.Count == 0)
+        {
+            _devirtProbe.IsEnabled = false;
+            if (result.Method == OepMethod.RunFree)
+            {
+                string dirs = string.Join(", ", ProbeSearchDirs(result));
+                Append("Run-free probes: none found. 'Devirt best probe' needs files matching " +
+                       $"'{ProbeFilePattern()}' in {dirs}. Run Unpack with the Run-free strategy again to generate them.");
+            }
+            return;
+        }
+
+        var best = BestProbe(probes);
+        Append($"Run-free probes: {probes.Count} captured. Best candidate: {best.Label} " +
+               $"{best.HottestExecSection ?? "exec"} entropy {best.HottestExecEntropy:F2}, " +
+               $"nonzero {best.HottestExecNonZeroPercent:F1}% -> {best.Path}");
+        if (best.HottestExecEntropy >= 7.0)
+            Append("Run-free probes: all candidates are still high-entropy; Devirt best probe is available for inspection, but recovery is unlikely.");
+        _devirtProbe.IsEnabled = true;
+    }
+
+    private IEnumerable<RunFreeProbeSnapshot> ExistingProbes(UnpackResult result)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (result.ProbeSnapshots is not null)
+        {
+            foreach (var probe in result.ProbeSnapshots)
+            {
+                string path = SafeFullPath(probe.Path);
+                if (File.Exists(path) && seen.Add(path))
+                    yield return probe with { Path = path };
+            }
+        }
+
+        ulong imageBase = ProbeImageBase(result);
+        foreach (var path in DiscoverProbeFiles(result))
+        {
+            if (!seen.Add(path)) continue;
+            var probe = ScoreProbe(path, imageBase);
+            if (probe is not null) yield return probe;
+        }
+    }
+
+    private IEnumerable<string> DiscoverProbeFiles(UnpackResult result)
+    {
+        string stemPattern = ProbeFilePattern();
+        foreach (string dir in ProbeSearchDirs(result))
+        {
+            foreach (string pattern in new[] { stemPattern, "*_runfree_*.bin" }.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                IEnumerable<string> files;
+                try { files = Directory.EnumerateFiles(dir, pattern).OrderBy(p => p).ToArray(); }
+                catch { continue; }
+                foreach (string file in files)
+                    yield return SafeFullPath(file);
+            }
+        }
+    }
+
+    private IEnumerable<string> ProbeSearchDirs(UnpackResult result)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string? path in new[] { _output.Text.Trim(), result.OutputPath, result.FaultDumpPath, _target })
+        {
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            string dir;
+            try { dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ""; }
+            catch { continue; }
+            if (dir.Length > 0 && Directory.Exists(dir) && seen.Add(dir))
+                yield return dir;
+        }
+    }
+
+    private string ProbeFilePattern()
+    {
+        string stem = Path.GetFileNameWithoutExtension(_target);
+        return string.IsNullOrWhiteSpace(stem) ? "*_runfree_*.bin" : $"{stem}_runfree_*.bin";
+    }
+
+    private static RunFreeProbeSnapshot? ScoreProbe(string path, ulong imageBase)
+    {
+        try
+        {
+            var image = PeMemoryImage.Load(path, imageBase);
+            var hot = image.Sections
+                .Where(s => s.IsExecutable && s.FileSize > 0)
+                .Select(s =>
+                {
+                    int len = Math.Min(s.FileSize, 1 << 20);
+                    var bytes = image.ReadBytesAtVa(s.StartVa, len);
+                    double entropy = bytes.Length > 0 ? Entropy.Shannon(bytes) : 0;
+                    double nonZero = bytes.Length > 0 ? 100.0 * bytes.Count(b => b != 0) / bytes.Length : 0;
+                    return (s.Name, Entropy: entropy, NonZero: nonZero);
+                })
+                .OrderByDescending(s => s.Entropy)
+                .FirstOrDefault();
+            if (hot.Name is null) return null;
+            return new RunFreeProbeSnapshot(ProbeLabelFromPath(path), path, hot.Name, hot.Entropy, hot.NonZero);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static RunFreeProbeSnapshot BestProbe(IEnumerable<RunFreeProbeSnapshot> probes) =>
+        probes.OrderBy(p => p.HottestExecEntropy).ThenByDescending(p => p.HottestExecNonZeroPercent).First();
+
+    private async void OnDevirtBestProbe(object sender, RoutedEventArgs e)
+    {
+        if (_lastResult is null) return;
+        var probes = ExistingProbes(_lastResult).ToList();
+        if (probes.Count == 0) { _devirtProbe.IsEnabled = false; return; }
+        var probe = BestProbe(probes);
+        await DevirtImagePath(probe.Path, ProbeImageBase(_lastResult),
+            $"Devirtualizer: loading best run-free probe {probe.Label}...");
+    }
+
+    private async void OnDevirtSnapshot(object sender, RoutedEventArgs e)
+    {
+        if (_lastResult?.FaultDumpPath is not { Length: > 0 } path || !File.Exists(path)) return;
+        await DevirtImagePath(path, _lastResult.FaultDumpBase, "Devirtualizer: loading fault snapshot...");
+    }
+
+    private async Task DevirtImagePath(string path, ulong imageBase, string startMessage)
+    {
+        _devirt.IsEnabled = false;
+        _devirtProbe.IsEnabled = false;
+        Append("");
+        Append(startMessage);
+        try
+        {
+            var image = PeMemoryImage.Load(path, imageBase);
+            var result = await Task.Run(() => DevirtEngine.Run(image));
+            Append($"Devirtualizer: {result.Status} - {result.Message}");
+            new DevirtReportDialog(this, image, result).ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            Append("Devirtualizer failed: " + ex.Message);
+        }
+        finally
+        {
+            if (_lastResult?.FaultDumpPath is { Length: > 0 } p && File.Exists(p))
+                _devirt.IsEnabled = true;
+            if (_lastResult is not null && ExistingProbes(_lastResult).Any())
+                _devirtProbe.IsEnabled = true;
+        }
     }
 
     private void SetInputsEnabled(bool on)
@@ -281,5 +468,20 @@ internal sealed class UnpackerDialog : Window
         s = s.Trim();
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
         return ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var v) ? v : null;
+    }
+
+    private ulong ProbeImageBase(UnpackResult result) => result.FaultDumpBase != 0 ? result.FaultDumpBase : _imageBase;
+
+    private static string ProbeLabelFromPath(string path)
+    {
+        string stem = Path.GetFileNameWithoutExtension(path);
+        int idx = stem.IndexOf("_runfree_", StringComparison.OrdinalIgnoreCase);
+        return idx >= 0 ? stem[(idx + "_runfree_".Length)..] : stem;
+    }
+
+    private static string SafeFullPath(string path)
+    {
+        try { return Path.GetFullPath(path); }
+        catch { return path; }
     }
 }

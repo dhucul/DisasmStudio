@@ -9,7 +9,7 @@ namespace DisasmStudio.Core.Devirt;
 /// classifies each handler (<see cref="HandlerClassifier"/>), decodes the bytecode stream that the VIP walks
 /// into virtual instructions, lifts them to the project IR (<see cref="VmLifter"/>), and renders Pseudo-C by
 /// reusing the existing <see cref="Structurer"/> + Pseudo-C emitter. Honest about its limits: it returns a
-/// non-Ok <see cref="DevirtStatus"/> (NoVmFound / ImageEncrypted / PartialRecovery) rather than guessing.
+/// non-Ok <see cref="DevirtStatus"/> (NoVmFound / ImageEncrypted / UnsupportedVm / PartialRecovery) rather than guessing.
 ///
 /// Phase 1 foundation: proven on a synthetic stack VM. Real VMProtect/Themida handler semantics, VIP
 /// decryption schedules, and obtaining a decrypted dump of an anti-debug-protected sample are later phases.
@@ -20,7 +20,7 @@ public static class DevirtEngine
     {
         var found = VmFinder.Find(image);
         if (found.Status != DevirtStatus.Ok || found.Entry is null)
-            return new DevirtResult { Status = found.Status, Message = found.Note };
+            return new DevirtResult { Status = found.Status, Message = found.Note, Triage = VmTriage.Run(image) };
 
         var entry = found.Entry;
         var dis = new Disassembler(image);
@@ -36,6 +36,7 @@ public static class DevirtEngine
             {
                 Status = DevirtStatus.PartialRecovery, Entry = entry, Handlers = handlers,
                 Message = "VM located but the bytecode start (VIP) could not be resolved.",
+                Triage = VmTriage.Run(image),
             };
 
         // Decode the VIP byte stream into virtual instructions, following branch targets + fall-through.
@@ -85,6 +86,7 @@ public static class DevirtEngine
             {
                 Status = DevirtStatus.PartialRecovery, Entry = entry, Handlers = handlers,
                 Message = "VM located but no bytecode could be decoded.",
+                Triage = VmTriage.Run(image),
             };
 
         var lifted = VmLifter.Lift(entry, program);
@@ -99,6 +101,7 @@ public static class DevirtEngine
             Program = program,
             Lifted = lifted,
             PseudoC = pseudoC,
+            Triage = partial ? VmTriage.Run(image) : null,
             Message = partial
                 ? $"Recovered {program.Count} virtual instruction(s); some handlers/branches were not resolved."
                 : $"Devirtualized {program.Count} virtual instruction(s) across {lifted.Blocks.Count} block(s).",
