@@ -226,3 +226,16 @@ user-mode debugger (Windows PE; x86/x64). Out of scope (for now): signatures/FLI
 debugging, time-travel, scripting/plugins, other architectures, .NET managed debugging, and PDB symbol
 servers — the call stack uses a best-effort frame/return-address heuristic (no full `.pdata` unwind
 yet), and symbols come from the app's own analysis + demangler rather than a symbol server.
+
+### Devirtualization (experimental foundation)
+
+`DisasmStudio.Core/Devirt/` is the start of a VM-protector devirtualizer (VMProtect/Themida-class). Given a
+**decrypted** image it discovers the VM entry/dispatcher/handler table, classifies each handler's stack-VM
+semantics, decodes the bytecode the VIP walks, and lifts it back into the shared IR so the existing
+`Structurer` + Pseudo-C emitter render readable C — no separate renderer. It is honest about its limits,
+returning `NoVmFound` / `ImageEncrypted` / `PartialRecovery` rather than guessing. This is a *foundation*,
+proven end-to-end on a synthetic stack VM (the engine and a built-in `Synthetic/SyntheticVm` are exercised
+by the `.smoke_devirt` harness); it is **not** a complete devirtualizer. Deferred: real VMProtect/Themida
+version-specific handler signatures and deobfuscation, VIP decryption schedules, multi-entry whole-program
+recovery, UI wiring, and — the gating prerequisite for real samples — obtaining a decrypted dump past a
+protector's anti-debug (virtualized code is only present, decrypted, at runtime).
