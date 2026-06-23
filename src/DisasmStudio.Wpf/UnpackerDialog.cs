@@ -29,6 +29,7 @@ internal sealed class UnpackerDialog : Window
     private readonly ComboBox _strategy;
     private readonly TextBox _manualOep;
     private readonly CheckBox _sandbox;
+    private readonly CheckBox _apiHooks;
     private readonly TextBox _output;
     private readonly TextBox _log;
     private readonly Button _start;
@@ -98,6 +99,14 @@ internal sealed class UnpackerDialog : Window
             Margin = new Thickness(0, 0, 0, 2),
         };
         opt.Children.Add(_sandbox);
+        _apiHooks = new CheckBox
+        {
+            Content = "Anti-debug API/code hooks (uncheck to test hook detection by self-CRC protectors)",
+            Foreground = Fg,
+            IsChecked = true,
+            Margin = new Thickness(0, 0, 0, 2),
+        };
+        opt.Children.Add(_apiHooks);
         opt.Children.Add(new TextBlock
         {
             Text = "Note: this is process-level containment only — it does NOT block network or filesystem access. " +
@@ -185,7 +194,8 @@ internal sealed class UnpackerDialog : Window
         SetInputsEnabled(false);
         _log.Clear();
 
-        var options = new UnpackOptions(method, manualOep, _sandbox.IsChecked == true, outPath, _imageBase);
+        var options = new UnpackOptions(method, manualOep, _sandbox.IsChecked == true, outPath, _imageBase,
+            UseApiHooks: _apiHooks.IsChecked == true);
         var session = new UnpackSession(_target, options);
         session.Progress += line => Dispatcher.BeginInvoke(() => Append(line));
 

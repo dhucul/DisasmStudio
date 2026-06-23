@@ -17,6 +17,12 @@ public sealed partial class DebuggerEngine
     /// <summary>Enable the anti-anti-debug layer. Set before <see cref="Launch"/>.</summary>
     public bool HideFromDebugger { get; set; }
 
+    /// <summary>When hiding, whether to install the code-patching hooks — the int3 hooks on ntdll/kernelbase/
+    /// user32 API entries and the rdtsc patches in the target. These modify code, which a self-CRC / anti-hook
+    /// protector (e.g. VMProtect) can detect. Set false to keep only the non-code edits (PEB normalization,
+    /// parent spoof) — used to test whether the hooks themselves are what a protector is detecting.</summary>
+    public bool HideUseApiHooks { get; set; } = true;
+
     /// <summary>When hiding, spoof the debuggee's parent PID (the value a packer compares against explorer.exe)
     /// so it doesn't see the debugger as its parent. Auto-resolved to this session's explorer.exe at the loader
     /// breakpoint; disable to leave the real parent in place. <see cref="SpoofParentProcessId"/> reports what
@@ -71,8 +77,12 @@ public sealed partial class DebuggerEngine
     {
         try { PatchPeb(); } catch { /* best-effort */ }
         try { ResolveSpoofParent(); } catch { }
-        try { InstallNtdllHooks(); } catch { }
-        try { InterceptRdtsc(); } catch { }
+        if (HideUseApiHooks)
+        {
+            try { InstallNtdllHooks(); } catch { }
+            try { InterceptRdtsc(); } catch { }
+        }
+        else Output?.Invoke("Anti-debug: API/code hooks DISABLED (PEB normalized only) — testing whether the hooks are being detected.");
     }
 
     // ---- PEB / heap normalization ----
