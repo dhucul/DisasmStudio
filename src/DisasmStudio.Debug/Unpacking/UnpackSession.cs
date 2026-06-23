@@ -117,9 +117,39 @@ public sealed class UnpackSession
     {
         if (_done) return;
         _done = true;
+        uint uc = (uint)code;
+        Report($"Target exited with code 0x{uc:X8}.");
         _tcs.TrySetResult(new UnpackResult(false, 0, _finder.ActiveMethod, false, 0, 0, null,
-            "The target exited before an OEP was reached (possible anti-debug, or the OEP strategy didn't trigger).",
+            $"The target exited (code 0x{uc:X8}) before an OEP was reached. {DescribeExit(uc)}",
             _log.ToString()));
+    }
+
+    /// <summary>Interpret a process exit code for the failure message. When a process is killed by an
+    /// unhandled exception Windows sets its exit code to the NTSTATUS, so an exception-shaped code points at a
+    /// crash or an anti-debug self-terminate; a clean 0 means it simply ran to completion (expected for a pure
+    /// virtualizer, which never transfers control to a separate original-code section to break an OEP on).</summary>
+    private static string DescribeExit(uint code)
+    {
+        string? status = code switch
+        {
+            0xC0000005 => "STATUS_ACCESS_VIOLATION — a crash, or the protector faulted after detecting the debugger",
+            0xC0000409 => "STATUS_STACK_BUFFER_OVERRUN — a /GS or anti-tamper self-terminate (a common protector anti-debug response)",
+            0xC000001D => "STATUS_ILLEGAL_INSTRUCTION — execution ran into non-code (a failed unpack/guard) or an anti-debug trap",
+            0xC0000025 => "STATUS_NONCONTINUABLE_EXCEPTION",
+            0xC0000096 => "STATUS_PRIVILEGED_INSTRUCTION — a guarded/anti-debug instruction faulted",
+            0x80000003 => "STATUS_BREAKPOINT — an int3 reached the process (anti-debug, or a planted breakpoint leaked)",
+            0xC0000420 => "STATUS_ASSERTION_FAILURE",
+            _ => null,
+        };
+        if (status is not null)
+            return $"That exit code is an NTSTATUS exception ({status}) — i.e. anti-debug or a crash, not a normal run. " +
+                   "Try the 'Hide debugger' layer (already on for Unpack) and, for a virtualizing protector, expect this.";
+        if (code == 0)
+            return "Exit code 0 means it ran to completion and exited normally. For a code-virtualizing protector that is " +
+                   "expected — the program runs entirely inside its VM and never jumps to a separate original-code " +
+                   "section, so there is no classic OEP to break on. Dumping cannot recover virtualized code.";
+        return $"That is a normal-looking exit code ({(int)code}); the target most likely ran its course in-VM without " +
+               "ever exposing an OEP, or bailed out early via an anti-debug check the hide layer doesn't cover.";
     }
 
     private void Fail(string error)

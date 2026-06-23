@@ -25,6 +25,7 @@ internal sealed class UnpackerDialog : Window
     private readonly string _target;
     private readonly int _bitness;
     private readonly ulong _imageBase;
+    private readonly PackerVerdict _verdict;
     private readonly ComboBox _strategy;
     private readonly TextBox _manualOep;
     private readonly CheckBox _sandbox;
@@ -42,6 +43,7 @@ internal sealed class UnpackerDialog : Window
         _target = targetPath;
         _bitness = bitness;
         _imageBase = imageBase;
+        _verdict = verdict;
 
         Owner = owner;
         Title = "Unpack";
@@ -202,6 +204,17 @@ internal sealed class UnpackerDialog : Window
         {
             Append("");
             Append("FAILED: " + (result.Error ?? "unknown error"));
+            if (_verdict.Kind == PackerKind.Virtualizer)
+            {
+                Append("");
+                Append("This file was identified as a code-virtualizing protector (VMProtect/Themida-class). The OEP " +
+                       "strategies here are built for compressors that decompress the original code and jump to it — a " +
+                       "moment that does not exist when the code is virtualized to bytecode. No run-to-OEP dump can " +
+                       "recover the original; that needs a VMProtect/Themida devirtualizer, which is out of scope.");
+                Append("If the goal is only to strip an outer compression layer (e.g. VMProtect's \"Pack the output " +
+                       "file\"), try the Manual strategy with the post-stub OEP, or extract any embedded PE from the " +
+                       "Resources tab. Even then, the recovered code stays virtualized.");
+            }
             SetInputsEnabled(true);   // let the user adjust strategy and retry
         }
         _running = false;

@@ -120,7 +120,10 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   full relocation table is present, otherwise pin the original base) so a dumped image launches as a fresh
   process (verified end-to-end on UPX-packed and live x86/x64 targets). A packer detector (entropy + section signatures for UPX, ASPack, FSG, PECompact, MPRESS, …) flags
   packed files on open and warns when a code-virtualizing protector (VMProtect/Themida) is detected, since
-  those can't be recovered by dumping. An optional **job-object sandbox** blocks the untrusted target from
+  those can't be recovered by dumping. Virtualizers are caught structurally too — an RWX high-entropy entry
+  stub, a stripped import directory, and odd/duplicated section names — so a build whose `.vmpN` section
+  names have been renamed or stripped is still classified as an un-dumpable virtualizer rather than a
+  generic "unknown packer." An optional **job-object sandbox** blocks the untrusted target from
   spawning child processes and kills it on close (process-level containment only — use a VM for truly
   untrusted samples). Handles both x86 and x64 targets.
 - **Anti-anti-debug ("Hide debugger"):** a ScyllaHide-style layer (toolbar checkbox; always on during
