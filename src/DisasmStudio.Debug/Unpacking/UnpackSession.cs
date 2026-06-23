@@ -63,14 +63,29 @@ public sealed class UnpackSession
     private void OnStopped(StopInfo stop)
     {
         if (_done) return;
+        bool runFree = _opt.Strategy == OepMethod.RunFree;
         try
         {
             if (_first)
             {
                 _first = false;
+                if (runFree)
+                {
+                    Report($"Entry point at {stop.Address:X}; running free (no OEP trace — no single-step, hardware watchpoint or section guard). Will dump on a fault or after it settles.");
+                    StartSettleTimer();
+                    _eng.Go();
+                    return;
+                }
                 Report($"Entry point at {stop.Address:X}; locating OEP (strategy: {_opt.Strategy}).");
                 var immediate = _finder.Begin(_eng);
                 if (immediate is { } v) CompleteAtOep(v);
+                return;
+            }
+            if (runFree)
+            {
+                if (stop.Reason == StopReason.Paused) DumpAndComplete("settled");
+                else if (stop.Reason == StopReason.Exception) DumpAndComplete($"faulted (0x{stop.ExceptionCode:X8} at {stop.Address:X})");
+                else _eng.Go();   // any other stop while running free: keep going
                 return;
             }
             if (stop.Reason == StopReason.Exception)
@@ -82,6 +97,49 @@ public sealed class UnpackSession
             if (oep is { } oepVa) CompleteAtOep(oepVa);
         }
         catch (Exception ex) { Fail("Unpack error: " + ex.Message); }
+    }
+
+    /// <summary>Run-free: after a short window for the stub to clear anti-debug and self-decrypt, pause so we
+    /// can dump. If it faults first, the exception path dumps instead.</summary>
+    private void StartSettleTimer() => System.Threading.Tasks.Task.Run(async () =>
+    {
+        await System.Threading.Tasks.Task.Delay(4000);
+        if (!_done) { Report("Run-free: settle window elapsed; pausing to dump."); try { _eng.Pause(); } catch { } }
+    });
+
+    /// <summary>Run-free completion: dump the live image, report the largest section's entropy (a decryption
+    /// indicator), rebuild it into an openable PE rooted at the entry, and finish. Not a clean unpack — a raw
+    /// memory image for inspection/devirtualization.</summary>
+    private void DumpAndComplete(string reason)
+    {
+        if (_done) return;
+        Report($"Run-free dump: {reason}.");
+        if (_lastFault is { } f) ReportFault(f);
+        var image = _eng.DumpImage(_eng.ImageBase, out uint sizeOfImage);
+        if (image.Length == 0 || !PeView.TryParse(image, out var view))
+        {
+            _done = true;
+            try { _eng.Stop(); } catch { }
+            _tcs.TrySetResult(new UnpackResult(false, 0, OepMethod.RunFree, false, 0, 0, null,
+                "Run-free: could not dump/parse the image (" + reason + ").", _log.ToString()));
+            return;
+        }
+        var big = view.Sections.OrderByDescending(s => Math.Max(s.VirtualSize, s.SizeOfRawData)).FirstOrDefault();
+        if (big is not null)
+        {
+            int len = (int)Math.Min(Math.Max(big.VirtualSize, big.SizeOfRawData), 1u << 20);
+            double ent = len > 0 ? Entropy.Shannon(_eng.ReadMemory(_eng.ImageBase + big.VirtualAddress, len)) : 0;
+            Report($"Largest section '{big.Name}' entropy {ent:F2} — {(ent > 7.0 ? "still packed/encrypted (decryption did not complete)" : "looks decrypted")}.");
+        }
+        var outBytes = PeBuilder.Build(image, view, view.EntryRva, null, _eng.ImageBase, _opt.StaticImageBase, out var buildLog);
+        foreach (var line in buildLog.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Report(line);
+        try { File.WriteAllBytes(_opt.OutputPath, outBytes); }
+        catch (Exception ex) { Fail("Failed to write output file: " + ex.Message); return; }
+        Report($"Wrote memory image to {_opt.OutputPath} (entry-rooted raw dump, not a clean unpack — open it to inspect the decrypted state).");
+        _done = true;
+        try { _eng.Stop(); } catch { }
+        _tcs.TrySetResult(new UnpackResult(true, _eng.EntryPoint, OepMethod.RunFree, false, 0, 0, _opt.OutputPath,
+            null, _log.ToString()));
     }
 
     private void CompleteAtOep(ulong oepVa)

@@ -81,6 +81,7 @@ internal sealed class UnpackerDialog : Window
         _strategy.Items.Add("ESP-trick (x86 compressors)");
         _strategy.Items.Add("Section guard");
         _strategy.Items.Add("Manual OEP");
+        _strategy.Items.Add("Run free — no trace (VM protectors); dump on settle/fault");
         _strategy.SelectedIndex = 0;
         opt.Children.Add(_strategy);
 
@@ -171,6 +172,7 @@ internal sealed class UnpackerDialog : Window
             1 => OepMethod.EspTrick,
             2 => OepMethod.SectionGuard,
             3 => OepMethod.Manual,
+            4 => OepMethod.RunFree,
             _ => OepMethod.Auto,
         };
         if (method == OepMethod.Manual)

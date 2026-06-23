@@ -14,6 +14,11 @@ public enum OepMethod
     SectionGuard,
     /// <summary>Break at a user-supplied OEP address.</summary>
     Manual,
+    /// <summary>No OEP trace at all: run the target freely (no single-step, no hardware watchpoint, no
+    /// section guard) so an aggressive protector isn't tripped by trap-flag / Dr-register detection. Dump
+    /// when it faults (anti-tamper self-crash) or after it settles. For VM protectors, where there is no OEP
+    /// to find and the intrusive strategies are the very thing that gets detected.</summary>
+    RunFree,
 }
 
 /// <summary>
