@@ -125,7 +125,15 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   names have been renamed or stripped is still classified as an un-dumpable virtualizer rather than a
   generic "unknown packer." An optional **job-object sandbox** blocks the untrusted target from
   spawning child processes and kills it on close (process-level containment only — use a VM for truly
-  untrusted samples). Handles both x86 and x64 targets.
+  untrusted samples). Handles both x86 and x64 targets. For aggressively protected targets there is also a
+  **Run-free** strategy (no OEP trace — no single-step, hardware watchpoint or section guard) that just runs
+  the target and dumps when it settles or faults, plus per-run toggles for the code-modifying parts of the
+  hide layer (the ntdll/user32 API hooks, and the rdtsc patch of the target's own code) so you can tell
+  whether the *debugger* is what a self-CRC / anti-hook protector is detecting. When a run dies, the failure
+  is **localized**: the fault site is reported with its module + offset, the faulting instruction
+  disassembled from live memory, the registers, and — for an access violation — exactly what address it
+  tried to read/write/execute and that page's state, and the (partially) decrypted image is **dumped at the
+  fault** for offline inspection.
 - **Anti-anti-debug ("Hide debugger"):** a ScyllaHide-style layer (toolbar checkbox; always on during
   *Unpack*) that hides the debugger from a target's detection checks. Applied at the loader breakpoint —
   before the program's own code runs — it normalizes the PEB (`BeingDebugged`, the `NtGlobalFlag` heap-debug
@@ -239,3 +247,10 @@ by the `.smoke_devirt` harness); it is **not** a complete devirtualizer. Deferre
 version-specific handler signatures and deobfuscation, VIP decryption schedules, multi-entry whole-program
 recovery, UI wiring, and — the gating prerequisite for real samples — obtaining a decrypted dump past a
 protector's anti-debug (virtualized code is only present, decrypted, at runtime).
+
+The decrypt-dump prerequisite is the hard part: a well-hardened VMProtect build can detect even a *clean*
+user-mode debugger (one with no breakpoints, single-stepping, hardware watchpoints, code patches or
+detectable hooks) and quietly sabotage itself before it ever decrypts — defeating that is its own
+research effort (deep per-check tracing, or kernel-level hiding) and is out of scope here. The unpacker's
+Run-free mode, hide-layer toggles and fault localization (above) are the tools for *diagnosing* how far a
+given sample gets; they do not promise to beat a top-tier protector's anti-debug.
