@@ -998,43 +998,10 @@ public sealed partial class DebuggerEngine
 
     /// <summary>Capture the full in-memory image at <paramref name="imageBase"/> as a virtual-address-indexed
     /// buffer (buffer offset == RVA) by reading every committed region across SizeOfImage. Breakpoints are
-    /// masked by <see cref="ReadMemory"/>, so the dump is clean. Returns [] if the PE headers can't be parsed.</summary>
-    public byte[] DumpImage(ulong imageBase, out uint sizeOfImage)
-    {
-        sizeOfImage = 0;
-        if (_proc == IntPtr.Zero) return [];
-        var hdr = ReadMemory(imageBase, 0x1000);
-        if (hdr.Length < 0x200 || !PeView.TryParse(hdr, out var view)) return [];
-        uint size = view.SizeOfImage;
-        if (size < 0x1000 || size > 1024u * 1024 * 1024) return [];
-        sizeOfImage = size;
-        var buf = new byte[size];
-        Array.Copy(hdr, 0, buf, 0, Math.Min(hdr.Length, buf.Length));
-        ulong endVa = imageBase + size, addr = imageBase;
-        int mbiSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
-        while (addr < endVa)
-        {
-            if (Native.VirtualQueryEx(_proc, addr, out var mbi, (nuint)mbiSize) == 0) break;
-            ulong regionBase = mbi.BaseAddress, regionSize = mbi.RegionSize;
-            if (regionSize == 0) break;
-            ulong next = regionBase + regionSize;
-            bool readable = mbi.State == Native.MEM_COMMIT
-                && (mbi.Protect & 0xFF) != Native.PAGE_NOACCESS && (mbi.Protect & Native.PAGE_GUARD) == 0;
-            if (readable)
-            {
-                ulong copyStart = Math.Max(regionBase, imageBase);
-                ulong copyEnd = Math.Min(next, endVa);
-                if (copyEnd > copyStart)
-                {
-                    var chunk = ReadMemory(copyStart, (int)(copyEnd - copyStart));
-                    if (chunk.Length > 0) Array.Copy(chunk, 0, buf, (int)(copyStart - imageBase), chunk.Length);
-                }
-            }
-            if (next <= addr) break;
-            addr = next;
-        }
-        return buf;
-    }
+    /// masked by <see cref="ReadMemory"/>, so the dump is clean. Returns [] if the PE headers can't be parsed.
+    /// Shares its region-walk with the non-invasive dumper via <see cref="Unpacking.MemoryImageDump"/>.</summary>
+    public byte[] DumpImage(ulong imageBase, out uint sizeOfImage) =>
+        Unpacking.MemoryImageDump.Dump(_proc, imageBase, ReadMemory, out sizeOfImage);
 
     /// <summary>True if the bytes around a (foreign) breakpoint/single-step exception are a program anti-debug
     /// instruction — int 2Dh (CD 2D), 2-byte int3 (CD 03), int3 (CC), or ICEBP/int1 (F1) — so it should be

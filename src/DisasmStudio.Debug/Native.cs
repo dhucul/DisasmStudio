@@ -13,6 +13,7 @@ internal static class Native
     // ---- creation / debug control ----
     public const uint DEBUG_ONLY_THIS_PROCESS = 0x00000002;
     public const uint DEBUG_PROCESS = 0x00000001;
+    public const uint CREATE_SUSPENDED = 0x00000004;
     public const uint CREATE_NEW_CONSOLE = 0x00000010;
     public const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
 
@@ -220,11 +221,28 @@ internal static class Native
     public static extern bool IsWow64Process(IntPtr hProcess, out bool Wow64Process);
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    // STILL_ACTIVE (259) in lpExitCode means the process is still running. Used by the auto-timing dumper to
+    // notice a target that exits before its image settles.
+    public const uint STILL_ACTIVE = 259;
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+
+    // Best-effort "the GUI has finished starting up and is waiting for input" signal (returns 0 when idle,
+    // WAIT_TIMEOUT for busy, WAIT_FAILED for a non-GUI process). One accelerator among the auto-timing signals.
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint WaitForInputIdle(IntPtr hProcess, uint dwMilliseconds);
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr hObject);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "K32GetModuleFileNameExW")]
     public static extern uint GetModuleFileNameEx(IntPtr hProcess, ulong hModule, char[] lpFilename, uint nSize);
+
+    // Enumerate a process's loaded modules (HMODULE == module base). The first entry is the main image.
+    // Used by the non-invasive dumper to find the EXE base and the dependency set for IAT reconstruction,
+    // without attaching a debugger.
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "K32EnumProcessModules")]
+    public static extern bool EnumProcessModules(IntPtr hProcess, [Out] IntPtr[] lphModule, uint cb, out uint lpcbNeeded);
 
     // Resolve a path from a file handle — reliable at LOAD_DLL time (when GetModuleFileNameEx often isn't,
     // since the loader hasn't yet registered the module). dwFlags 0 = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS.
@@ -304,4 +322,12 @@ internal static class Native
 
     [DllImport("ntdll.dll")]
     public static extern int NtQueryInformationProcess(IntPtr hProcess, int infoClass, IntPtr buffer, uint length, out uint returnLength);
+
+    // Freeze / thaw every thread of a process in one call (needs PROCESS_SUSPEND_RESUME). The non-invasive
+    // dumper uses these for a consistent snapshot; unlike DebugActiveProcess they do not make us the target's
+    // debugger, so they don't trip a protector's IsDebuggerPresent / debug-port checks.
+    [DllImport("ntdll.dll")]
+    public static extern int NtSuspendProcess(IntPtr hProcess);
+    [DllImport("ntdll.dll")]
+    public static extern int NtResumeProcess(IntPtr hProcess);
 }

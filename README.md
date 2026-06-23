@@ -141,6 +141,23 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   execution window and writes a `.vmtrace.txt` report with hot indirect dispatch sites, concrete runtime
   handler targets, and short handler-body samples. This is trace-based recovery evidence, not a restored
   native-code unpack.
+- **Non-invasive dump (no debugger — for anti-debug protectors):** when a protector's anti-debug defeats even a
+  clean user-mode debugger (the case the unpacker's Run-free/hide-layer tools can only *diagnose*), the
+  **Dump Process…** toolbar action snapshots a process's main image to a clean PE **without attaching a debugger
+  at all** — so every `IsDebuggerPresent` / debug-port / debug-object check passes and the program self-decrypts —
+  then opens it read-only (`OpenProcess` with `PROCESS_VM_READ`), enumerates its modules, optionally freezes its
+  threads (`NtSuspendProcess`) for a consistent snapshot, and runs the **same dump → IAT-rebuild → clean-PE
+  pipeline** as the unpacker (shared `MemoryImageDump`). A passive cross-process reader is not "being debugged",
+  so the protector can't detect it; there is no OEP trace, so the PE header's entry is used as a best-effort OEP,
+  and the dump reports the largest code section's entropy as a decryption indicator. Two ways to drive it:
+  **Attach** to a target you launched separately and pick it by PID, or **Launch and watch**, where the tool
+  starts the target itself (still no debugger — created `CREATE_SUSPENDED`, optionally in a kill-on-close job
+  sandbox, then resumed) and watches from the very first instruction. Either way the built-in **auto-timing**
+  watch picks the moment: it polls the target's largest code section and dumps once that region has stopped
+  changing (the unpack/decrypt stub has finished writing it) and either looks decrypted or the app has gone
+  input-idle — falling back to the current state on a timeout (and dumping a fully-quiescent-but-still-high-entropy
+  image too, so a virtualizer doesn't just wait out the clock). Merely packed/encrypted code is recovered as real
+  bytes; *virtualized* code stays virtualized — feed such a dump to the **Devirt…** engine.
 - **Anti-anti-debug ("Hide debugger"):** a ScyllaHide-style layer (toolbar checkbox; always on during
   *Unpack*) that hides the debugger from a target's detection checks. Applied at the loader breakpoint —
   before the program's own code runs — it normalizes the PEB (`BeingDebugged`, the `NtGlobalFlag` heap-debug

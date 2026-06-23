@@ -271,6 +271,20 @@ public partial class MainWindow : Window
             await LoadFile(p);   // reopen the rebuilt PE through the normal load + analysis pipeline
     }
 
+    private async void OnDumpProcess(object sender, RoutedEventArgs e)
+    {
+        // Deliberately attaches no debugger: the target is meant to run separately so its anti-debug passes and
+        // it self-decrypts. An active debug session here would defeat the point, so require it stopped first.
+        if (_dbg is not null) { MessageBox.Show(this, "Stop the current debug session first. The non-invasive dumper snapshots a separately-running process and never attaches a debugger.", "Dump Process", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+
+        ulong preferred = _image?.ImageBase ?? 0;
+        string? dir = _image?.FilePath is { Length: > 0 } fp ? Path.GetDirectoryName(fp) : null;
+        var dlg = new NonInvasiveDumpDialog(this, preferred, dir);
+        dlg.ShowDialog();
+        if (dlg.OpenPath is { } p && File.Exists(p))
+            await LoadFile(p);   // reopen the dumped PE through the normal load + analysis pipeline
+    }
+
     private async void OnDevirt(object sender, RoutedEventArgs e)
     {
         if (_image is null)
