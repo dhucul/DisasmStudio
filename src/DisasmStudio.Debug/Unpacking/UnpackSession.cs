@@ -31,6 +31,9 @@ public sealed class UnpackSession
     private bool _done;
     private bool _first = true;
     private FaultSnapshot? _lastFault;
+    private string? _faultDumpPath;
+    private uint _faultDumpSize;
+    private int _dumpCount;
 
     /// <summary>Progress lines as the run proceeds (also accumulated into <see cref="UnpackResult.Log"/>).</summary>
     public event Action<string>? Progress;
@@ -133,8 +136,29 @@ public sealed class UnpackSession
     // target, so a protector's anti-debug self-crash would otherwise be lost behind the bare exit code.
     private void OnException(ExceptionEvent e)
     {
-        if ((e.Code & 0xF0000000) == 0xC0000000 || !e.FirstChance)
-            _lastFault = _eng.CaptureFault(e);
+        bool fatal = (e.Code & 0xF0000000) == 0xC0000000 || !e.FirstChance;
+        if (!fatal) return;
+        _lastFault = _eng.CaptureFault(e);
+        // The fault is inside the target itself => its (partially) self-decrypted body is in memory right now.
+        // Snapshot it so the decrypted code can be analyzed/devirtualized even though anti-debug crashes the run.
+        if (_dumpCount < 8 && _lastFault.Module.Equals(Path.GetFileName(_target), StringComparison.OrdinalIgnoreCase))
+            DumpAtFault();
+    }
+
+    /// <summary>Dump the live image at a fault. The debuggee is frozen at the exception, so what the unpack
+    /// stub has decrypted so far (notably the VM body) is committed and readable. Best-effort, last-one-wins.</summary>
+    private void DumpAtFault()
+    {
+        try
+        {
+            var img = _eng.DumpImage(_eng.ImageBase, out uint size);
+            if (img.Length == 0) return;
+            string dir = Path.GetDirectoryName(_opt.OutputPath) ?? Path.GetDirectoryName(_target) ?? ".";
+            string path = Path.Combine(dir, Path.GetFileNameWithoutExtension(_target) + "_fault_dump.bin");
+            File.WriteAllBytes(path, img);
+            _faultDumpPath = path; _faultDumpSize = size; _dumpCount++;
+        }
+        catch { /* best-effort: a dump failure must not mask the fault report */ }
     }
 
     private void ReportFault(FaultSnapshot f)
@@ -147,6 +171,8 @@ public sealed class UnpackSession
         Report(inTarget
             ? "  -> the fault is inside the target's own code — likely the protector's anti-tamper/anti-debug self-crash, or our breakpoints/single-step/guards derailing it."
             : $"  -> the fault is inside {f.Module} — possibly an API or anti-debug-hook detection path.");
+        if (_faultDumpPath is not null)
+            Report($"  decrypted-state snapshot: {_faultDumpSize:X} bytes -> {_faultDumpPath}. Open it as a raw binary at base {_eng.ImageBase:X} to inspect the decrypted body (the VM may now be visible).");
     }
 
     /// <summary>Interpret a process exit code for the failure message. When a process is killed by an
