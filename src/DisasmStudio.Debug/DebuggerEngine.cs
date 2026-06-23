@@ -544,9 +544,19 @@ public sealed partial class DebuggerEngine
     }
 
     /// <summary>Create a job object (kill-on-close + one active process) and assign the debuggee to it.
-    /// Best-effort: failures are reported but do not abort the launch.</summary>
+    /// Best-effort: failures are reported but do not abort the launch. If the process is already in a
+    /// job (e.g. the host terminal's) and can't be moved, that's still acceptable — it's already
+    /// contained by the host's job; we note it and drop our own (now-unused) job handle.</summary>
     private void TrySetupJob()
     {
+        // Is the process already in a job (e.g. launched by Windows Terminal/VS)? If so, it's already
+        // contained and we cannot re-assign it. Err 5 (ACCESS_DENIED) from AssignProcessToJobObject is a
+        // reliable "already in a job" signal; we check proactively to give a better diagnostic.
+        if (Native.IsProcessInJob(_proc, IntPtr.Zero, out bool alreadyJob) && alreadyJob)
+        {
+            Output?.Invoke("Job containment: process is already in a host job (Terminal/VS runner); containment is active from the host side.");
+            return;
+        }
         _job = Native.CreateJobObjectW(IntPtr.Zero, null);
         if (_job == IntPtr.Zero) { Output?.Invoke("Job containment: CreateJobObject failed; running uncontained."); return; }
         var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
@@ -555,12 +565,27 @@ public sealed partial class DebuggerEngine
         uint sz = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
         if (!Native.SetInformationJobObject(_job, Native.JobObjectExtendedLimitInformation, ref info, sz))
             Output?.Invoke($"Job containment: SetInformationJobObject failed (err {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
-        bool assigned = Native.AssignProcessToJobObject(_job, _proc);
+
+        // AssignProcessToJobObject requires PROCESS_SET_QUOTA and PROCESS_TERMINATE on the process handle.
+        // The handle from CREATE_PROCESS_DEBUG_EVENT may not carry these. Open a fresh handle via the PID.
+        IntPtr hProc = Native.OpenProcess(Native.PROCESS_SET_QUOTA | Native.PROCESS_TERMINATE, false, _pid);
+        if (hProc == IntPtr.Zero) hProc = _proc;   // fall back to the event handle
+        bool assigned = Native.AssignProcessToJobObject(_job, hProc);
         int assignErr = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        if (hProc != _proc) Native.CloseHandle(hProc);
         if (assigned)
             Output?.Invoke("Job containment active (child processes blocked, kill-on-close).");
         else
-            Output?.Invoke($"Job containment: AssignProcessToJobObject failed (err {assignErr}).");
+        {
+            // If the process is already in a job (CREATE_BREAKAWAY_FROM_JOB couldn't pull it out because
+            // the host job doesn't allow breakaway), AssignProcessToJobObject returns ERROR_ACCESS_DENIED.
+            // That containment is still active — just not ours. Report it and drop our unused job handle.
+            if (assignErr == 5 || assignErr == 0)
+                Output?.Invoke("Job containment: process was not breakable from its host job; it remains contained by the host (Terminal/VS runner).");
+            else
+                Output?.Invoke($"Job containment: AssignProcessToJobObject failed (err {assignErr}).");
+            Native.CloseHandle(_job); _job = IntPtr.Zero;
+        }
     }
 
     // ---- breakpoints ----

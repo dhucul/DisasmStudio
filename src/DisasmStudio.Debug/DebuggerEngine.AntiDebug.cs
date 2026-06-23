@@ -31,8 +31,8 @@ public sealed partial class DebuggerEngine
     /// <summary>When hiding, spoof the debuggee's parent PID (the value a packer compares against explorer.exe)
     /// so it doesn't see the debugger as its parent. Auto-resolved to this session's explorer.exe at the loader
     /// breakpoint; disable to leave the real parent in place. <see cref="SpoofParentProcessId"/> reports what
-    /// was used. Covers the NtQueryInformationProcess(ProcessBasicInformation) parent check (the common one);
-    /// a CreateToolhelp32Snapshot parent walk is not spoofed (its result is an opaque kernel handle).</summary>
+    /// was used. Covers NtQueryInformationProcess(ProcessBasicInformation) (the common one) and, when
+    /// <see cref="HideUseApiHooks"/> is on, the kernel32 Process32FirstW/Process32NextW snapshot walk.</summary>
     public bool SpoofParentProcess { get; set; } = true;
 
     /// <summary>The parent PID injected into NtQueryInformationProcess(ProcessBasicInformation) results, or 0 if
@@ -61,6 +61,8 @@ public sealed partial class DebuggerEngine
         FindWindowW, FindWindowA, FindWindowExW, FindWindowExA,      // emulate: hide known debugger windows (return NULL)
         TickCount, TickCount64, Qpc, NtQpc, SysTimeAsFileTime, NtSystemTime,   // timing: emulate a slow synthetic clock
         Rdtsc, Rdtscp,                                               // instruction hooks: emulate the synthetic TSC
+        CloseHandle,                                                 // return-patch: swallow invalid-handle closes
+        Process32First, Process32Next,                               // return-patch: hide debugger from snapshot walk
     }
 
     private sealed class InternalBp
@@ -81,6 +83,7 @@ public sealed partial class DebuggerEngine
     private void ApplyAntiAntiDebug()
     {
         try { PatchPeb(); } catch { /* best-effort */ }
+        try { PatchKUserSharedData(); } catch { }
         try { ResolveSpoofParent(); } catch { }
         if (HideUseApiHooks) { try { InstallNtdllHooks(); } catch { } }
         else Output?.Invoke("Anti-debug: ntdll/user32 API hooks DISABLED.");
@@ -130,6 +133,50 @@ public sealed partial class DebuggerEngine
         finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(buf); }
     }
 
+    // ---- KUSER_SHARED_DATA.KdDebuggerEnabled spoof ----
+    /// <summary>Zero the KdDebuggerEnabled byte in the debuggee's read-only view of KUSER_SHARED_DATA
+    /// (0x7FFE0000). This shared page is mapped as read-only into every process; a protector can read it
+    /// directly as a fast "am I being debugged?" check that needs no API call. We temporarily re-protect
+    /// to writable, zero the byte, then restore. On x64 the byte is at offset 0x2D4; on WOW64 the 32-bit
+    /// view is at a different VA (segment base), so we patch both if a WOW64 target.</summary>
+    private void PatchKUserSharedData()
+    {
+        // The 64-bit KUSER_SHARED_DATA is mapped at the same fixed VA in every 64-bit process on x64 Windows.
+        const ulong kuser64 = 0x7FFE0000;
+        const int kdOff = 0x2D4;
+        if (!Is32)
+        {
+            WriteByteNoDefault(kuser64 + (ulong)kdOff, 0);
+            Output?.Invoke($"Anti-debug: KUSER_SHARED_DATA.KdDebuggerEnabled zeroed (x64 @ {kuser64 + (ulong)kdOff:X}).");
+        }
+        else
+        {
+            // For a WOW64 target, the 32-bit KUSER_SHARED_DATA is at a per-process VA. The segment base the
+            // CPU uses for 32-bit linear addressing doesn't map 1:1 to a VA in the 64-bit host process, but
+            // the WOW64 layer maps a known copy at a fixed offset. The most reliable approach: locate the
+            // 32-bit PEB, walk TEB->TIB->Self to get the 32-bit linear address space bounds, and read the
+            // FS:[0x2D4] value via the debuggee's context. Since we don't have a full 32-bit-address-space
+            // remapping layer, we zero the 64-bit KUSER_SHARED_DATA (which the WOW64 thunk transitions
+            // through) and trust that any WOW64-level read of KdDebuggerEnabled sees the same underlying
+            // page. A sufficiently aggressive WOW64 protector can read FS:[0x2D4] directly; covering that
+            // requires a per-instruction hook on every `mov al, fs:[0x2D4]` — impractical here.
+            WriteByteNoDefault(kuser64 + (ulong)kdOff, 0);
+            Output?.Invoke($"Anti-debug: KUSER_SHARED_DATA.KdDebuggerEnabled zeroed (x64 page @ WOW64 target).");
+        }
+    }
+
+    /// <summary>Write a single byte to a guest VA that may be read-only, without changing the page
+    /// protection in a way that a protector can detect later. Temporarily makes the page RW, writes,
+    /// restores. On failure the call is silently dropped; a dead KdDebuggerEnabled is best-effort.</summary>
+    private void WriteByteNoDefault(ulong va, byte value)
+    {
+        ulong page = va & ~0xFFFUL;
+        uint orig = 0;
+        if (!Native.VirtualProtectEx(_proc, page, 0x1000, Native.PAGE_READWRITE, out orig)) return;
+        try { WriteMemory(va, [value]); }
+        finally { Native.VirtualProtectEx(_proc, page, 0x1000, orig, out _); }
+    }
+
     // ---- hooks ----
     private void InstallNtdllHooks()
     {
@@ -145,6 +192,12 @@ public sealed partial class DebuggerEngine
         // clearing our Dr breakpoints via a set-context.
         TryHook(ntdll, "NtGetContextThread", AdKind.GetContextThread, 2);
         TryHook(ntdll, "NtSetContextThread", AdKind.SetContextThread, 2);
+        // Fake-handle close test: swallow the STATUS_INVALID_HANDLE exception via return-patch. NtClose has
+        // no standard export name — the stub lives at a known syscall ordinal, so we hook ZwClose instead
+        // (the user-mode entry NtClose forwards to). On x64 ZwClose == NtClose (identical prologue).
+        TryHook(ntdll, "ZwClose", AdKind.CloseHandle, 1);
+        if (_internalBps.Count == 0 || !_internalBps.Values.Any(bp => bp.Kind == AdKind.CloseHandle))
+            TryHook(ntdll, "NtClose", AdKind.CloseHandle, 1);
         // Timing (syscall side).
         TryHook(ntdll, "NtQueryPerformanceCounter", AdKind.NtQpc, 2);
         TryHook(ntdll, "NtQuerySystemTime", AdKind.NtSystemTime, 1);
@@ -158,6 +211,18 @@ public sealed partial class DebuggerEngine
             TryHook(kbase, "QueryPerformanceCounter", AdKind.Qpc, 1);
             TryHook(kbase, "GetSystemTimeAsFileTime", AdKind.SysTimeAsFileTime, 1);
         }
+
+        // Snapshot parent walk: hook kernel32!Process32FirstW / Process32NextW. The packer calls these to
+        // walk its own process tree; we override the th32ParentProcessID field on return so it always sees
+        // explorer.exe as its parent. Process32FirstW → 2 stdcall args (hSnapshot, out PROCESSENTRY32W);
+        // Process32NextW → 2 stdcall args (hSnapshot, out PROCESSENTRY32W). Both return BOOL.
+        ulong k32 = ModuleBaseByName("kernel32.dll", Is32);
+        if (k32 != 0)
+        {
+            TryHook(k32, "Process32FirstW", AdKind.Process32First, 2);
+            TryHook(k32, "Process32NextW", AdKind.Process32Next, 2);
+        }
+
         Output?.Invoke($"Anti-debug: {_internalBps.Count} hook(s) armed ({(Is32 ? "32-bit" : "64-bit")}; ntdll @ {ntdll:X}).");
 
         TryInstallWindowHooks();   // user32 is usually already mapped; LOAD_DLL re-tries any later load
@@ -280,6 +345,29 @@ public sealed partial class DebuggerEngine
                 uint flags = ReadU32(ctxPtr + (ulong)flagsOff);
                 if ((flags & 0x10) != 0) WriteU32(ctxPtr + (ulong)flagsOff, flags & ~0x10u);   // 0x10 = debug-register group
             }
+            LetItRun(addr, tid, c, hThread);
+            return;
+        }
+
+        // NtClose(handle): the "close an invalid handle" trick raises STATUS_INVALID_HANDLE only under a
+        // debugger. Run it; on return, if the status is 0xC0000008 (INVALID_HANDLE), swallow it by setting
+        // eax/rax to 0 (STATUS_SUCCESS) — the no-debugger outcome where closing a bad handle is silent.
+        // The per-call overhead is trivial: the function runs, and on return we check one dword.
+        if (bp.Kind == AdKind.CloseHandle && Arg(1) is var hVal && hVal != 0)
+        {
+            ArmReturnBp(ReadPtr(sp, Is32), AdKind.CloseHandle, 0, 0);
+            LetItRun(addr, tid, c, hThread);
+            return;
+        }
+
+        // Process32FirstW(snapshot, out entry) / Process32NextW(snapshot, out entry): run the real function,
+        // then on return overwrite only the th32ParentProcessID field in the output PROCESSENTRY32W — so every
+        // process in the snapshot walk looks like its parent is explorer.exe (i.e. the debugger is invisible).
+        // arg2 = pointer to PROCESSENTRY32W.
+        if (bp.Kind is AdKind.Process32First or AdKind.Process32Next && _spoofParentPid != 0)
+        {
+            ulong entryPtr = Arg(2);
+            ArmReturnBp(ReadPtr(sp, Is32), bp.Kind, entryPtr, 0);
             LetItRun(addr, tid, c, hThread);
             return;
         }
@@ -420,7 +508,8 @@ public sealed partial class DebuggerEngine
     // ---- return-patch hooks: run the real function, then scrub its output on return ----
     private void ArmReturnBp(ulong retAddr, AdKind kind, ulong ptr, ulong len)
     {
-        if (retAddr == 0 || ptr == 0) return;
+        // CloseHandle doesn't scrub a buffer (ptr==0 is valid — it patches the return status instead).
+        if (retAddr == 0 || (ptr == 0 && kind != AdKind.CloseHandle)) return;
         lock (_lock)
             if (_pendingReturns.ContainsKey(retAddr) || _swBps.ContainsKey(retAddr)
                 || _tempBps.ContainsKey(retAddr) || _internalBps.ContainsKey(retAddr)) return;
@@ -444,7 +533,33 @@ public sealed partial class DebuggerEngine
             case AdKind.GetContextThread: ScrubDebugRegisters(pend.Ptr); break;
             case AdKind.QueryObject: ScrubDebugObjectCounts(pend.Ptr, pend.Len); break;
             case AdKind.QueryInfoProcessParent: ScrubParentProcessId(pend.Ptr); break;
+            case AdKind.CloseHandle: SwallowInvalidHandle(hThread); break;
+            case AdKind.Process32First:
+            case AdKind.Process32Next: ScrubSnapshotParent(pend.Ptr); break;
         }
+    }
+
+    /// <summary>If a just-completed NtClose returned STATUS_INVALID_HANDLE (0xC0000008), overwrite the
+    /// return value with STATUS_SUCCESS (0) — the no-debugger behaviour where closing a bad handle is a
+    /// silent no-op. This is a direct register patch (no buffer involved), done at the return-patch landing.</summary>
+    private void SwallowInvalidHandle(IntPtr hThread)
+    {
+        using var c = new Ctx(Is32);
+        if (!c.Get(hThread)) return;
+        ulong eax = c.GetReg(Is32 ? "eax" : "rax");
+        if (eax == 0xC0000008) { c.TrySetByName(Is32 ? "eax" : "rax", 0); c.Set(hThread); }
+    }
+
+    /// <summary>Overwrite the th32ParentProcessID field at offset 24 (x86/x64) in the PROCESSENTRY32W an
+    /// Process32FirstW / Process32NextW just filled in, so the debuggee always sees explorer.exe as its
+    /// parent — regardless of which iteration of the snapshot walk returned. FIELD_OFFSET spec in tlhelp32.h;
+    /// 0 if the spoof PID hasn't been resolved.</summary>
+    private void ScrubSnapshotParent(ulong pe32Ptr)
+    {
+        if (pe32Ptr == 0 || _spoofParentPid == 0) return;
+        const int parentOffX86 = 24, parentOffX64 = 24;   // same offset — the pid field is DWORD in both
+        int off = Is32 ? parentOffX86 : parentOffX64;
+        WriteU32(pe32Ptr + (ulong)off, _spoofParentPid);
     }
 
     /// <summary>Zero the Dr0-Dr3/Dr6/Dr7 fields of a CONTEXT a NtGetContextThread call filled in, hiding our

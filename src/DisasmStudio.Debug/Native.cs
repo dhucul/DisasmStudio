@@ -47,6 +47,8 @@ internal static class Native
 
     // ---- access / protection ----
     public const uint PROCESS_ALL_ACCESS = 0x001FFFFF;
+    public const uint PROCESS_SET_QUOTA = 0x0100;
+    public const uint PROCESS_TERMINATE = 0x0001;
     public const uint THREAD_ALL_ACCESS = 0x001FFFFF;
     public const uint PAGE_EXECUTE_READWRITE = 0x40;
 
@@ -284,12 +286,17 @@ internal static class Native
         public nuint ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
     }
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr CreateJobObjectW(IntPtr lpJobAttributes, string? lpName);
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION lpJobObjectInfo, uint cbJobObjectInfoLength);
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool IsProcessInJob(IntPtr hProcess, IntPtr hJob, out bool result);
 
     // ---- anti-anti-debug: locate the debuggee PEB (and the 32-bit PEB for WOW64) ----
     public const int ProcessBasicInformation = 0;
