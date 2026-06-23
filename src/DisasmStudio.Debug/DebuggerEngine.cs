@@ -23,9 +23,8 @@ public sealed partial class DebuggerEngine
 
     /// <summary>Raised on the debug-loop thread for every real exception (AV / illegal / etc.; not our own
     /// breakpoints or single-steps), before the break/pass decision — so a caller can localize a fault even
-    /// when first-chance exceptions are being passed straight to the program (capture/unpack mode). Args:
-    /// exception code, faulting address, first-chance flag, thread id.</summary>
-    public event Action<uint, ulong, bool, uint>? ExceptionObserved;
+    /// when first-chance exceptions are being passed straight to the program (capture/unpack mode).</summary>
+    public event Action<ExceptionEvent>? ExceptionObserved;
 
     /// <summary>Raised on the debug-loop thread when the target DLL (hosted in an EXE) is mapped — i.e. when
     /// <see cref="ImageBase"/> becomes the DLL's real base. Lets the UI build the rebased live analysis with
@@ -445,7 +444,9 @@ public sealed partial class DebuggerEngine
         // Any other exception (AV, C++ EH, etc.). The filter decides whether to break and whether to pass it
         // to the debuggee's own handler (DBG_EXCEPTION_NOT_HANDLED) or swallow it (DBG_CONTINUE) on resume.
         bool firstChance = ev.Exception.dwFirstChance != 0;
-        ExceptionObserved?.Invoke(code, addr, firstChance, ev.dwThreadId);
+        bool isAv = code == Native.EXCEPTION_ACCESS_VIOLATION;
+        ExceptionObserved?.Invoke(new ExceptionEvent(code, addr, firstChance, ev.dwThreadId,
+            isAv ? (int)er.Info0 : -1, isAv ? er.Info1 : 0));
         var (brk, pass) = ExceptionFilter.Decide(code, firstChance);
         cont = pass ? Native.DBG_EXCEPTION_NOT_HANDLED : Native.DBG_CONTINUE;
         if (_pauseRequested || _stopping) return false;
@@ -781,16 +782,19 @@ public sealed partial class DebuggerEngine
     }
 
     /// <summary>Snapshot a fault for diagnostics: which module faulted (and the offset into it), the faulting
-    /// instruction disassembled from live memory, and the thread's registers. Call while frozen at the
-    /// exception (e.g. from <see cref="ExceptionObserved"/>).</summary>
-    public FaultSnapshot CaptureFault(uint code, ulong addr, bool firstChance, uint threadId)
+    /// instruction disassembled from live memory, the registers, and — for an access violation — what address
+    /// it tried to touch (read/write/execute) and the page state there. Call while frozen at the exception.</summary>
+    public FaultSnapshot CaptureFault(in ExceptionEvent e)
     {
-        var mod = ModuleContaining(addr);
+        var mod = ModuleContaining(e.Address);
         string instr = "";
-        try { if (new LiveDisassembler(this).TryDecodeAt(addr, out var ins)) instr = new Core.Disasm.AsmFormatter().FormatText(ins); }
+        try { if (new LiveDisassembler(this).TryDecodeAt(e.Address, out var ins)) instr = new Core.Disasm.AsmFormatter().FormatText(ins); }
         catch { /* unreadable code page at the fault — leave blank */ }
-        string regs = GetRegisters(threadId) is { } r ? FormatRegisters(r) : "";
-        return new FaultSnapshot(code, addr, firstChance, mod?.Name ?? "?", mod is null ? 0 : addr - mod.Base, instr, regs);
+        string regs = GetRegisters(e.ThreadId) is { } r ? FormatRegisters(r) : "";
+        // For an AV, describe the page at the *target* address (what was inaccessible); else the faulting IP's page.
+        string mem = DescribeMemory(e.AccessType >= 0 ? e.FaultAddress : e.Address);
+        return new FaultSnapshot(e.Code, e.Address, e.FirstChance, mod?.Name ?? "?",
+            mod is null ? 0 : e.Address - mod.Base, instr, regs, e.AccessType, e.FaultAddress, mem);
     }
 
     private static string FormatRegisters(RegisterSet r)
@@ -800,6 +804,30 @@ public sealed partial class DebuggerEngine
             : ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "rip"];
         return string.Join(" ", keys.Select(k => $"{k}={r[k]:X}"));
     }
+
+    /// <summary>Describe a page's commit state + protection, e.g. "committed RW (non-exec)" — so an execute
+    /// fault on a non-executable page (NX / control-flow derail) or a read of unmapped memory is obvious.</summary>
+    private string DescribeMemory(ulong va)
+    {
+        if (_proc == IntPtr.Zero) return "";
+        int sz = System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
+        if (Native.VirtualQueryEx(_proc, va, out var mbi, (nuint)sz) == 0) return "unqueryable";
+        if (mbi.State != Native.MEM_COMMIT) return mbi.State == 0x2000 ? "reserved (uncommitted)" : "free (unmapped)";
+        return "committed " + ProtName(mbi.Protect);
+    }
+
+    private static string ProtName(uint p) => (p & 0xFF) switch
+    {
+        0x01 => "no-access",
+        0x02 => "R (non-exec)",
+        0x04 => "RW (non-exec)",
+        0x08 => "WC (non-exec)",
+        0x10 => "X-only",
+        0x20 => "RX",
+        0x40 => "RWX",
+        0x80 => "WCX",
+        _ => $"prot 0x{p:X}",
+    };
 
     public bool IsExecutable(ulong addr)
     {

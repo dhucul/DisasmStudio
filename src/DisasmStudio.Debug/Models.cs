@@ -18,11 +18,18 @@ public sealed record ModuleInfo(ulong Base, string Path)
     public string Name => System.IO.Path.GetFileName(Path);
 }
 
+/// <summary>An observed exception, raised so a caller can localize a fault. For an access violation,
+/// <see cref="AccessType"/> is 0/1/8 (read/write/execute) and <see cref="FaultAddress"/> is the inaccessible
+/// address; for other exceptions <see cref="AccessType"/> is -1.</summary>
+public readonly record struct ExceptionEvent(uint Code, ulong Address, bool FirstChance, uint ThreadId,
+    int AccessType, ulong FaultAddress);
+
 /// <summary>A captured fault: the exception, where it happened (module + offset), the faulting instruction,
-/// and a register snapshot. Used to localize an anti-debug self-crash (which module faulted, and on what)
-/// instead of reporting only the final process exit code.</summary>
+/// a register snapshot, and — for an access violation — what address it tried to touch (read/write/execute)
+/// and the page state there. Localizes an anti-debug self-crash instead of reporting only the exit code.</summary>
 public sealed record FaultSnapshot(uint Code, ulong Address, bool FirstChance,
-    string Module, ulong ModuleOffset, string Instruction, string Registers)
+    string Module, ulong ModuleOffset, string Instruction, string Registers,
+    int AccessType, ulong FaultAddress, string MemState)
 {
     public string CodeName => Code switch
     {
@@ -36,6 +43,11 @@ public sealed record FaultSnapshot(uint Code, ulong Address, bool FirstChance,
         0xC0000420 => "ASSERTION_FAILURE",
         _ => $"0x{Code:X8}",
     };
+
+    public string Access => AccessType switch { 0 => "read", 1 => "write", 8 => "execute", _ => "" };
+
+    /// <summary>e.g. "tried to execute 401D2A" — empty when not an access violation.</summary>
+    public string AccessDesc => AccessType < 0 ? "" : $"tried to {Access} {FaultAddress:X}";
 }
 
 /// <summary>A thread in the debuggee.</summary>

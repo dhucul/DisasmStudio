@@ -131,20 +131,21 @@ public sealed class UnpackSession
     // Keep the most recent error-severity (0xCxxxxxxx) or any second-chance exception — the likely crash site.
     // Captured here (not as a stop) because the unpack run passes first-chance exceptions straight to the
     // target, so a protector's anti-debug self-crash would otherwise be lost behind the bare exit code.
-    private void OnException(uint code, ulong addr, bool firstChance, uint threadId)
+    private void OnException(ExceptionEvent e)
     {
-        if ((code & 0xF0000000) == 0xC0000000 || !firstChance)
-            _lastFault = _eng.CaptureFault(code, addr, firstChance, threadId);
+        if ((e.Code & 0xF0000000) == 0xC0000000 || !e.FirstChance)
+            _lastFault = _eng.CaptureFault(e);
     }
 
     private void ReportFault(FaultSnapshot f)
     {
-        Report($"Fault site: {f.CodeName} at {f.Address:X} in {f.Module}+{f.ModuleOffset:X} ({(f.FirstChance ? "first-chance" : "second-chance")}).");
+        string av = f.AccessDesc.Length > 0 ? $" — {f.AccessDesc} ({f.MemState})" : "";
+        Report($"Fault site: {f.CodeName} at {f.Address:X} in {f.Module}+{f.ModuleOffset:X} ({(f.FirstChance ? "first-chance" : "second-chance")}){av}.");
         if (f.Instruction.Length > 0) Report($"  faulting instruction: {f.Instruction}");
         if (f.Registers.Length > 0) Report($"  registers: {f.Registers}");
         bool inTarget = f.Module.Equals(Path.GetFileName(_target), StringComparison.OrdinalIgnoreCase);
         Report(inTarget
-            ? "  -> the fault is inside the target's own code — the protector's anti-tamper/anti-debug self-crash on detecting the debugger."
+            ? "  -> the fault is inside the target's own code — likely the protector's anti-tamper/anti-debug self-crash, or our breakpoints/single-step/guards derailing it."
             : $"  -> the fault is inside {f.Module} — possibly an API or anti-debug-hook detection path.");
     }
 
