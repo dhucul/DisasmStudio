@@ -2,10 +2,14 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
@@ -60,11 +64,14 @@ public partial class MainWindow : Window
     private ICollectionView? _functionsView;
     private ICollectionView? _stringsView;
     private ICollectionView? _exportsView;
+    private string? _lastDroppedPath;
+    private long _lastDropTick;
 
     public MainWindow()
     {
         InitializeComponent();
         WireControls();
+        EnableFileDrop();
         _nav.Navigated += OnNavigated;
 
         // Allow "DisasmStudio <file>" (CLI / Open-with) to load a target on startup.
@@ -95,6 +102,101 @@ public partial class MainWindow : Window
         Linear.CaptureFunctionRequested += CaptureFunctionAt;
         Debug.NavigateRequested += va => _nav.Navigate(va);
         PreviewKeyDown += OnWindowPreviewKeyDown;
+    }
+
+    private void EnableFileDrop()
+    {
+        AllowDrop = true;
+        AddHandler(DragDrop.PreviewDragEnterEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
+        AddHandler(DragDrop.PreviewDragOverEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
+        AddHandler(DragDrop.PreviewDropEvent, new DragEventHandler(OnFileDrop), handledEventsToo: true);
+        AddHandler(DragDrop.DragEnterEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
+        AddHandler(DragDrop.DragOverEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
+        AddHandler(DragDrop.DropEvent, new DragEventHandler(OnFileDrop), handledEventsToo: true);
+        SourceInitialized += (_, _) => EnableNativeFileDrop();
+        Loaded += (_, _) => EnableFileDropOnVisualTree(this);
+    }
+
+    private void EnableNativeFileDrop()
+    {
+        if (PresentationSource.FromVisual(this) is not HwndSource source) return;
+        NativeFileDrop.Enable(source.Handle);
+        source.AddHook(OnNativeMessage);
+    }
+
+    private IntPtr OnNativeMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg != NativeFileDrop.WmDropFiles) return IntPtr.Zero;
+
+        handled = true;
+        if (NativeFileDrop.TryGetFirstFile(wParam, out var path))
+            _ = OpenDroppedFile(path);
+        return IntPtr.Zero;
+    }
+
+    private static void EnableFileDropOnVisualTree(DependencyObject root)
+    {
+        if (root is UIElement ui) ui.AllowDrop = true;
+        if (root is ContentElement content) content.AllowDrop = true;
+        if (root is not Visual) return;
+
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+            EnableFileDropOnVisualTree(VisualTreeHelper.GetChild(root, i));
+    }
+
+    private static class NativeFileDrop
+    {
+        public const int WmDropFiles = 0x0233;
+        private const uint WmCopyData = 0x004A;
+        private const uint WmCopyGlobalData = 0x0049;
+        private const uint MsgfltAllow = 1;
+
+        public static void Enable(IntPtr hwnd)
+        {
+            DragAcceptFiles(hwnd, true);
+            _ = ChangeWindowMessageFilterEx(hwnd, WmDropFiles, MsgfltAllow, IntPtr.Zero);
+            _ = ChangeWindowMessageFilterEx(hwnd, WmCopyData, MsgfltAllow, IntPtr.Zero);
+            _ = ChangeWindowMessageFilterEx(hwnd, WmCopyGlobalData, MsgfltAllow, IntPtr.Zero);
+        }
+
+        public static bool TryGetFirstFile(IntPtr dropHandle, out string path)
+        {
+            path = "";
+            try
+            {
+                uint count = DragQueryFile(dropHandle, 0xFFFFFFFF, null, 0);
+                if (count == 0) return false;
+
+                uint len = DragQueryFile(dropHandle, 0, null, 0);
+                if (len == 0) return false;
+
+                var buffer = new StringBuilder((int)len + 1);
+                if (DragQueryFile(dropHandle, 0, buffer, (uint)buffer.Capacity) == 0) return false;
+
+                string candidate = buffer.ToString();
+                if (!File.Exists(candidate)) return false;
+
+                path = candidate;
+                return true;
+            }
+            finally
+            {
+                DragFinish(dropHandle);
+            }
+        }
+
+        [DllImport("shell32.dll")]
+        private static extern void DragAcceptFiles(IntPtr hWnd, bool fAccept);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint DragQueryFile(IntPtr hDrop, uint iFile, StringBuilder? lpszFile, uint cch);
+
+        [DllImport("shell32.dll")]
+        private static extern void DragFinish(IntPtr hDrop);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint message, uint action, IntPtr changeInfo);
     }
 
     private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
@@ -676,9 +778,95 @@ public partial class MainWindow : Window
     {
         var dlg = new OpenFileDialog { Title = "Open project", Filter = "DisasmStudio project|*.dsproj|All files|*.*" };
         if (dlg.ShowDialog(this) != true) return;
+        await LoadProject(dlg.FileName);
+    }
 
+    private async void OnFileDrop(object sender, DragEventArgs e)
+    {
+        if (!TryGetDroppedFile(e, out var path))
+        {
+            e.Effects = DragDropEffects.None;
+            e.Handled = true;
+            StatusText.Text = "Drop ignored: drag a file into DisasmStudio.";
+            return;
+        }
+
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true;
+        await OpenDroppedFile(path);
+    }
+
+    private void OnFileDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = HasFileDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private static bool HasFileDrop(DragEventArgs e) =>
+        e.Data.GetDataPresent(DataFormats.FileDrop, autoConvert: true)
+        || e.Data.GetDataPresent("FileNameW", autoConvert: true)
+        || e.Data.GetDataPresent("FileName", autoConvert: true);
+
+    private static bool TryGetDroppedFile(DragEventArgs e, out string path)
+    {
+        path = "";
+        return TryGetFilePath(e.Data.GetData(DataFormats.FileDrop, autoConvert: true), out path)
+            || TryGetFilePath(e.Data.GetData("FileNameW", autoConvert: true), out path)
+            || TryGetFilePath(e.Data.GetData("FileName", autoConvert: true), out path);
+    }
+
+    private static bool TryGetFilePath(object? data, out string path)
+    {
+        path = "";
+        if (data is string candidate) return TryUseFile(candidate, out path);
+        if (data is not string[] paths) return false;
+
+        foreach (string item in paths)
+            if (TryUseFile(item, out path))
+                return true;
+
+        return false;
+    }
+
+    private static bool TryUseFile(string candidate, out string path)
+    {
+        path = "";
+        if (string.IsNullOrWhiteSpace(candidate)) return false;
+        candidate = candidate.TrimEnd('\0');
+        if (!File.Exists(candidate)) return false;
+
+        path = candidate;
+        return true;
+    }
+
+    private async Task OpenDroppedFile(string path)
+    {
+        long now = Environment.TickCount64;
+        if (string.Equals(_lastDroppedPath, path, StringComparison.OrdinalIgnoreCase) && now - _lastDropTick < 1000)
+            return;
+
+        _lastDroppedPath = path;
+        _lastDropTick = now;
+        StatusText.Text = $"Opening {Path.GetFileName(path)}...";
+
+        try
+        {
+            if (string.Equals(Path.GetExtension(path), ".dsproj", StringComparison.OrdinalIgnoreCase))
+                await LoadProject(path);
+            else
+                await LoadFile(path);
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"Drop failed: {ex.Message}";
+            MessageBox.Show(this, ex.Message, "Drop failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async Task LoadProject(string path)
+    {
         ProjectFile proj;
-        try { proj = ProjectFile.Load(dlg.FileName); }
+        try { proj = ProjectFile.Load(path); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
 
         IBinaryImage image;
@@ -695,7 +883,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        _projectPath = dlg.FileName;
+        _projectPath = path;
         _loadOptions = new AnalysisOptions
         {
             IncludedDataSections = proj.LoadedSections is { Count: > 0 } ls ? new HashSet<string>(ls) : new HashSet<string>(),
