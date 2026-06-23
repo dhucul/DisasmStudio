@@ -35,6 +35,9 @@ internal static class VmLifter
                 leaders.Add(program[i + 1].VipVa);
         }
 
+        // Every decoded vinsn's VIP is a candidate block start (a branch target is always also a leader, so a
+        // decoded target is a real block) — used to keep every emitted CFG edge pointing at an existing block.
+        var starts = new HashSet<ulong>(program.Select(p => p.VipVa));
         var blocks = new List<LiftedBlock>();
         int idx = 0;
         while (idx < program.Count)
@@ -49,10 +52,11 @@ internal static class VmLifter
             for (; j < program.Count; j++)
             {
                 var vi = program[j];
-                bool boundary = j + 1 >= program.Count || leaders.Contains(program[j + 1].VipVa);
-                var term = Emit(vi, stack, stmts, VReg, width, j + 1 < program.Count ? program[j + 1].VipVa : 0);
-                if (term is not null) { outEdges = term; break; }      // Branch / VmExit ended the block
-                if (boundary) { outEdges = [new CfgEdge(program[j + 1].VipVa, EdgeKind.FallThrough)]; break; }
+                ulong fall = j + 1 < program.Count ? program[j + 1].VipVa : 0;   // 0 = ran off the end
+                bool boundary = fall == 0 || leaders.Contains(fall);
+                var term = Emit(vi, stack, stmts, VReg, width, fall, starts);
+                if (term is not null) { outEdges = term; break; }      // Branch / Jump / VmExit ended the block
+                if (boundary) { outEdges = fall != 0 ? [new CfgEdge(fall, EdgeKind.FallThrough)] : []; break; }
             }
             idx = j + 1;
 
@@ -75,7 +79,7 @@ internal static class VmLifter
     /// <summary>Fold one vinsn into the model stack / statements. Returns the block's out-edges when the vinsn
     /// is a terminator (branch / exit), else null.</summary>
     private static IReadOnlyList<CfgEdge>? Emit(VInsn vi, Stack<Expr> stack, List<Stmt> stmts,
-        System.Func<int, Variable> vreg, int width, ulong fallVip)
+        System.Func<int, Variable> vreg, int width, ulong fallVip, HashSet<ulong> starts)
     {
         var h = vi.Handler;
         switch (h.Kind)
@@ -117,12 +121,20 @@ internal static class VmLifter
             {
                 var cond = Pop(stack);
                 ulong target = (ulong)vi.Operand;
-                stmts.Add(new BranchStmt { Va = vi.VipVa, Cond = cond, IfTrue = fallVip, IfFalse = target });
-                return [new CfgEdge(fallVip, EdgeKind.FallThrough), new CfgEdge(target, EdgeKind.Taken)];
+                ulong fall = fallVip;
+                bool tValid = starts.Contains(target), fValid = fall != 0 && starts.Contains(fall);
+                if (!tValid && !fValid) { stmts.Add(new ReturnStmt { Va = vi.VipVa }); return []; }  // nowhere to go
+                if (!fValid) fall = target;     // only the taken target resolved
+                if (!tValid) target = fall;     // only the fall-through resolved
+                stmts.Add(new BranchStmt { Va = vi.VipVa, Cond = cond, IfTrue = fall, IfFalse = target });
+                var edges = new List<CfgEdge> { new(fall, EdgeKind.FallThrough) };
+                if (target != fall) edges.Add(new(target, EdgeKind.Taken));
+                return edges;
             }
             case HandlerKind.Jump:
             {
                 ulong target = (ulong)vi.Operand;
+                if (!starts.Contains(target)) { stmts.Add(new ReturnStmt { Va = vi.VipVa }); return []; }  // unresolved
                 stmts.Add(new GotoStmt { Va = vi.VipVa, Target = target });
                 return [new CfgEdge(target, EdgeKind.Jump)];
             }
