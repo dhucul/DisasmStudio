@@ -136,11 +136,26 @@ public static class NonInvasiveDumper
             var resolver = new ModuleExportResolver(modules, read);
             Log($"Indexed {resolver.ModuleCount} module(s), {resolver.ExportCount} export(s).");
 
-            ulong oepVa = mainBase + view.EntryRva;   // best-effort OEP — the header entry of the (decrypted) image
+            // Recover the real OEP. The PE header entry is the packer/protector STUB; a dump run from the stub
+            // re-runs it over already-unpacked bytes and crashes, so a runnable rebuild needs the original entry.
+            // OepScanner finds the stub's tail jump to it. Falls back to the header entry (analysis-only) if not
+            // found. The recovered OEP also anchors the IAT code-scan at the real code, improving import location.
+            uint oepRva = view.EntryRva;
+            ulong recovered = OepScanner.FindOep(read, view, mainBase, view.Is64);
+            if (recovered > mainBase && recovered < mainBase + sizeOfImage)
+            {
+                oepRva = (uint)(recovered - mainBase);
+                Log($"Recovered OEP at {recovered:X} (RVA {oepRva:X}); header/stub entry was {mainBase + view.EntryRva:X}.");
+            }
+            else
+                Log("Using the header entry as the OEP (it already looks like a valid entry, or no packer-stub tail " +
+                    "was found). If the target is packed, the rebuilt PE may re-run the stub rather than the original.");
+
+            ulong oepVa = mainBase + oepRva;
             var iat = ImportRebuilder.Rebuild(read, resolver, view, mainBase, oepVa);
             foreach (var line in iat.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Log(line);
 
-            var outBytes = PeBuilder.Build(image, view, view.EntryRva, iat.Ok ? iat : null, mainBase, preferredImageBase, out var buildLog);
+            var outBytes = PeBuilder.Build(image, view, oepRva, iat.Ok ? iat : null, mainBase, preferredImageBase, out var buildLog);
             foreach (var line in buildLog.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Log(line);
 
             try { File.WriteAllBytes(outputPath, outBytes); }
