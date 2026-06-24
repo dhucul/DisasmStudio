@@ -39,6 +39,7 @@ internal sealed class UnpackerDialog : Window
     private readonly Button _open;
     private readonly Button _devirt;
     private readonly Button _devirtProbe;
+    private readonly Button _verify;
     private UnpackResult? _lastResult;
     private bool _running;
     private readonly int _staticIndex;
@@ -167,9 +168,12 @@ internal sealed class UnpackerDialog : Window
         _devirt.Click += OnDevirtSnapshot;
         _devirtProbe = new Button { Content = "Devirt best probe", MinWidth = 120, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
         _devirtProbe.Click += OnDevirtBestProbe;
+        _verify = new Button { Content = "Verify run", MinWidth = 90, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
+        _verify.Click += OnVerify;
         var close = new Button { Content = "Close", IsCancel = true, MinWidth = 80 };
         buttons.Children.Add(_start);
         buttons.Children.Add(_open);
+        buttons.Children.Add(_verify);
         buttons.Children.Add(_devirt);
         buttons.Children.Add(_devirtProbe);
         buttons.Children.Add(close);
@@ -213,6 +217,7 @@ internal sealed class UnpackerDialog : Window
             _lastResult = null;
             _devirt.IsEnabled = false;
             _devirtProbe.IsEnabled = false;
+            _verify.IsEnabled = false;
             bool okStatic = await RunStaticAsync(outPath);
             _running = false;
             SetInputsEnabled(true);
@@ -242,6 +247,7 @@ internal sealed class UnpackerDialog : Window
         _lastResult = null;
         _devirt.IsEnabled = false;
         _devirtProbe.IsEnabled = false;
+        _verify.IsEnabled = false;
 
         var options = new UnpackOptions(method, manualOep, _sandbox.IsChecked == true, outPath, _imageBase,
             UseApiHooks: _apiHooks.IsChecked == true, InterceptRdtsc: _rdtsc.IsChecked == true);
@@ -268,6 +274,7 @@ internal sealed class UnpackerDialog : Window
             Append($"Imports: {result.ImportsResolved} resolved, {result.ImportsUnresolved} unresolved.");
             Append($"Wrote: {result.OutputPath}");
             _open.IsEnabled = true;
+            _verify.IsEnabled = true;
             }
             _lastResult = result;
             EnableProbeButton(result);
@@ -343,7 +350,41 @@ internal sealed class UnpackerDialog : Window
                "is unchanged, and the entry point is still the protector stub. Open it to analyze the recovered " +
                "native code, or feed it to the Devirt… engine.");
         _open.IsEnabled = true;
+        _verify.IsEnabled = true;
         return true;
+    }
+
+    /// <summary>Launch the rebuilt image (sandboxed) and classify whether — and where — it runs.</summary>
+    private async void OnVerify(object sender, RoutedEventArgs e)
+    {
+        if (_running) return;
+        string outPath = _output.Text.Trim();
+        if (outPath.Length == 0 || !File.Exists(outPath)) { Append("No output file to verify."); return; }
+
+        _running = true;
+        SetInputsEnabled(false);
+        _verify.IsEnabled = false; _open.IsEnabled = false; _devirt.IsEnabled = false; _devirtProbe.IsEnabled = false;
+        Append("");
+        Append("Verifying — launching the rebuilt image (sandboxed) to see if and where it runs. This executes the target.");
+
+        bool sandbox = _sandbox.IsChecked == true;
+        var progress = new Progress<string>(Append);
+        var report = ((IProgress<string>)progress).Report;
+
+        VerifyResult? result = null;
+        try { result = await Task.Run(() => UnpackVerifier.Verify(outPath, sandbox, report)); }
+        catch (Exception ex) { Append("Verify error: " + ex.Message); }
+
+        if (result is not null)
+        {
+            Append("");
+            Append((result.Verdict == UnpackVerdict.Runs ? "PASS — " : "RESULT — ") + result.Summary);
+        }
+
+        _running = false;
+        SetInputsEnabled(true);
+        _open.IsEnabled = true;
+        _verify.IsEnabled = true;
     }
 
     /// <summary>Off-thread probe for the LZMA output-compression layer; if present, pre-select Static.</summary>

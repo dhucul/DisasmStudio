@@ -42,6 +42,7 @@ internal sealed class NonInvasiveDumpDialog : Window
     private readonly Button _dump;
     private readonly Button _open;
     private readonly Button _openSnap;
+    private readonly Button _verify;
     private bool _running;
     private string? _snapPath;
     private CancellationTokenSource? _cts;
@@ -208,10 +209,13 @@ internal sealed class NonInvasiveDumpDialog : Window
         _open.Click += (_, _) => { OpenPath = _output.Text.Trim(); DialogResult = true; };
         _openSnap = new Button { Content = "Open snapshot", MinWidth = 110, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
         _openSnap.Click += (_, _) => { if (_snapPath is { Length: > 0 }) { OpenPath = _snapPath; DialogResult = true; } };
+        _verify = new Button { Content = "Verify run", MinWidth = 90, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
+        _verify.Click += OnVerify;
         var close = new Button { Content = "Close", IsCancel = true, MinWidth = 80 };
         buttons.Children.Add(_dump);
         buttons.Children.Add(_open);
         buttons.Children.Add(_openSnap);
+        buttons.Children.Add(_verify);
         buttons.Children.Add(close);
         root.Children.Add(buttons);
 
@@ -346,6 +350,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         SetInputsEnabled(false);
         _open.IsEnabled = false;
         _openSnap.IsEnabled = false;
+        _verify.IsEnabled = false;
         _log.Clear();
         Append($"{(launch ? "Launching + watching" : auto ? "Watching" : "Dumping")} {label}…");
 
@@ -391,6 +396,7 @@ internal sealed class NonInvasiveDumpDialog : Window
                 Append($"The in-memory PE header was reconstructed (protector anti-dump). A faithful raw copy was also " +
                        $"written: {rp} — if the rebuilt PE looks off, open that as a raw/flat image at base {result.ImageBase:X}.");
             _open.IsEnabled = true;
+            _verify.IsEnabled = true;
             if (result.SnapshotOutputPath is { } snap)
             {
                 _snapPath = snap;
@@ -405,6 +411,40 @@ internal sealed class NonInvasiveDumpDialog : Window
                 Append($"A raw decrypted memory image was still captured: {rp} — open it as a raw/flat image at the image base to inspect the decrypted bytes.");
         }
         FinishRun();
+    }
+
+    private async void OnVerify(object sender, RoutedEventArgs e)
+    {
+        if (_running) return;
+        string outPath = _output.Text.Trim();
+        if (outPath.Length == 0 || !File.Exists(outPath)) { Append("No output file to verify."); return; }
+
+        _running = true;
+        SetInputsEnabled(false);
+        _open.IsEnabled = false; _openSnap.IsEnabled = false; _verify.IsEnabled = false; _dump.IsEnabled = false;
+        Append("");
+        Append("Verifying — launching the rebuilt image (sandboxed) to see if and where it runs. This executes the target.");
+
+        bool sandbox = _sandbox.IsChecked == true;
+        var progress = new Progress<string>(Append);
+        var report = ((IProgress<string>)progress).Report;
+
+        VerifyResult? result = null;
+        try { result = await Task.Run(() => UnpackVerifier.Verify(outPath, sandbox, report)); }
+        catch (Exception ex) { Append("Verify error: " + ex.Message); }
+
+        if (result is not null)
+        {
+            Append("");
+            Append((result.Verdict == UnpackVerdict.Runs ? "PASS — " : "RESULT — ") + result.Summary);
+        }
+
+        _running = false;
+        SetInputsEnabled(true);
+        _dump.IsEnabled = true;
+        _open.IsEnabled = true;
+        _verify.IsEnabled = true;
+        _openSnap.IsEnabled = _snapPath is { Length: > 0 };
     }
 
     private void FinishRun()

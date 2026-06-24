@@ -10,7 +10,8 @@ namespace DisasmStudio.Debug.Unpacking;
 /// <param name="Fault">The first fatal fault, or null if none was captured.</param>
 /// <param name="FirstChanceExceptions">Count of non-fatal first-chance exceptions seen before the kill.</param>
 public sealed record FaultLocateResult(
-    bool Launched, bool Crashed, uint ExitCode, FaultSnapshot? Fault, int FirstChanceExceptions, string Log);
+    bool Launched, bool Crashed, uint ExitCode, FaultSnapshot? Fault, int FirstChanceExceptions, string Log,
+    ulong ImageBase = 0);
 
 /// <summary>
 /// Diagnostic: launch a (rebuilt / suspect) executable under the debugger, run it to its first fatal fault, and
@@ -26,7 +27,7 @@ public static class FaultLocator
     /// <summary>Launch <paramref name="path"/> and report where it first dies. Blocks until the target faults,
     /// exits, or <paramref name="timeoutMs"/> elapses, then terminates it.</summary>
     public static FaultLocateResult Run(string path, bool hideFromDebugger = false, int timeoutMs = 25000,
-        Action<string>? report = null)
+        Action<string>? report = null, bool sandbox = false)
     {
         var sb = new StringBuilder();
         void Log(string m) { sb.AppendLine(m); report?.Invoke(m); }
@@ -42,6 +43,7 @@ public static class FaultLocator
         int firstChance = 0;
         uint exitCode = 0;
         bool exited = false;
+        ulong imageBase = 0;
         using var done = new ManualResetEventSlim(false);
 
         eng.ExceptionObserved += e =>
@@ -52,16 +54,20 @@ public static class FaultLocator
         };
         eng.Stopped += stop =>
         {
+            if (imageBase == 0) imageBase = eng.ImageBase;    // first stop: the image is mapped
             if (stop.Reason == StopReason.Exception) { done.Set(); return; }
             try { eng.Go(); } catch { /* race with teardown */ }
         };
         eng.Exited += code => { exitCode = (uint)code; exited = true; done.Set(); };
 
-        Log($"Launching {Path.GetFileName(path)} under the debugger (hide layer {(hideFromDebugger ? "on" : "off")})…");
+        Log($"Launching {Path.GetFileName(path)} under the debugger (hide layer {(hideFromDebugger ? "on" : "off")}" +
+            $"{(sandbox ? ", job-sandboxed" : "")})…");
+        if (sandbox) { try { eng.EnableJobContainment(); } catch { } }
         try { eng.Launch(path); }
         catch (Exception ex) { Log("Launch failed: " + ex.Message); return new FaultLocateResult(false, false, 0, null, 0, sb.ToString()); }
 
         done.Wait(timeoutMs);
+        if (imageBase == 0) imageBase = eng.ImageBase;
         try { eng.Stop(); } catch { }
 
         if (fatal is { } f)
@@ -75,6 +81,6 @@ public static class FaultLocator
         else Log("No fault captured — the target hung or kept running; stopped at the timeout.");
 
         bool crashed = fatal is not null || (exited && (exitCode & 0xF000_0000) == 0xC000_0000);
-        return new FaultLocateResult(true, crashed, exitCode, fatal, firstChance, sb.ToString());
+        return new FaultLocateResult(true, crashed, exitCode, fatal, firstChance, sb.ToString(), imageBase);
     }
 }
