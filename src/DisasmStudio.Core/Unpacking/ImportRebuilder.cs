@@ -34,9 +34,10 @@ public static class ImportRebuilder
     {
         bool is64 = view.Is64;
         int ptr = is64 ? 8 : 4;
+        ulong imageEnd = imageBase + view.SizeOfImage;
         var log = new StringBuilder();
 
-        var (iatStartVa, iatSize) = LocateIat(mem, resolver, view, imageBase, ptr, is64, oepVa, log);
+        var (iatStartVa, iatSize) = LocateIat(mem, resolver, view, imageBase, imageEnd, ptr, is64, oepVa, log);
         if (iatStartVa == 0 || iatSize == 0)
             return new IatRebuildResult([], 0, 0, [], 0, 0, 0, log.Append("IAT not located.\n").ToString());
 
@@ -56,7 +57,7 @@ public static class ImportRebuilder
 
             if (value == 0) { current = null; continue; }   // a null slot terminates the current run
 
-            var (api, ord, byOrd) = ResolveSlot(mem, resolver, value, is64);
+            var (api, ord, byOrd) = ResolveSlot(mem, resolver, value, is64, imageBase, imageEnd);
             if (api is null)
             {
                 current = null; unresolved.Add(slotVa);
@@ -87,13 +88,23 @@ public static class ImportRebuilder
     /// <summary>Resolve a slot value to an export — directly, or by following one redirection hop. A value that
     /// points into a module but isn't an exact export is NOT an import (e.g. a CFG guard pointer the loader
     /// writes); it's left unresolved so it doesn't get fabricated into a bogus import.</summary>
-    private static (ApiRef? Api, ushort Ord, bool ByOrd) ResolveSlot(MemReader mem, IApiResolver resolver, ulong value, bool is64)
+    private static (ApiRef? Api, ushort Ord, bool ByOrd) ResolveSlot(MemReader mem, IApiResolver resolver, ulong value, bool is64, ulong imageBase, ulong imageEnd)
     {
         if (resolver.Resolve(value) is { } direct)
             return (direct, direct.Ordinal, direct.ByOrdinal);
         if (!resolver.IsInModule(value))   // points outside any module → trampoline/redirected stub
         {
             ulong target = FollowTrampoline(mem, value, is64);
+            if (target != 0 && resolver.Resolve(target) is { } via)
+                return (via, via.Ordinal, via.ByOrdinal);
+        }
+        else if (value >= imageBase && value < imageEnd)
+        {
+            // The slot points at a stub INSIDE the protected image — a protector's import wrapper
+            // (Themida / VMProtect Type 1/2). Trace it statically to the real API it forwards to. Conservative:
+            // a stub that enters the VM or dispatches through a runtime-only register yields nothing, so a bogus
+            // import is never invented (a CFG/guard pointer into the image is also left alone this way).
+            ulong target = ImportWrapperTracer.Trace(mem, resolver, value, is64, imageBase, imageEnd);
             if (target != 0 && resolver.Resolve(target) is { } via)
                 return (via, via.Ordinal, via.ByOrdinal);
         }
@@ -148,7 +159,7 @@ public static class ImportRebuilder
     // candidate region and keep the one whose slots RESOLVE to the most imports — which auto-selects the real
     // OEP IAT (code scan) for packers and the precise data-directory table for normal images.
     private static (ulong Va, uint Size) LocateIat(
-        MemReader mem, IApiResolver resolver, PeView view, ulong imageBase, int ptr, bool is64, ulong? oepVa, StringBuilder log)
+        MemReader mem, IApiResolver resolver, PeView view, ulong imageBase, ulong imageEnd, int ptr, bool is64, ulong? oepVa, StringBuilder log)
     {
         // Candidates are tried in PRIORITY order — authoritative PE structures first, the heuristic code scan
         // last — and the pick uses a strict ">" on resolvable-slot count, so an earlier (more trustworthy)
@@ -189,7 +200,16 @@ public static class ImportRebuilder
             if (r.Size > 0) candidates.Add((r.Va, r.Size, "OEP code scan"));
         }
 
-        // 4) Last resort: scan data sections for the longest module-pointer run.
+        // 4) Resolved-pointer autosearch: scan EVERY section (including the executable body — a protector may
+        //    embed the real IAT there) for the longest contiguous run of pointers that resolve to genuine module
+        //    exports. This finds the true IAT when the file's own descriptors point at a decoy — e.g. Themida
+        //    leaves the import name-strings where the data directory points, but the resolved table the code
+        //    calls through sits elsewhere in the image. Added as a scored candidate, so it only wins when it
+        //    resolves STRICTLY more than the structural candidates (a normal image's data-dir IAT still wins).
+        var auto = AutosearchResolvedIat(mem, resolver, view, imageBase, ptr);
+        if (auto.Size > 0) candidates.Add((auto.Va, auto.Size, "resolved-pointer autosearch"));
+
+        // 5) Last resort: scan data sections for the longest module-pointer run.
         if (candidates.Count == 0)
             return ScanForIat(mem, resolver, view, imageBase, ptr, log);
 
@@ -197,7 +217,7 @@ public static class ImportRebuilder
         var best = candidates[0]; int bestScore = -1;
         foreach (var c in candidates)
         {
-            int score = CountResolved(mem, resolver, c.Va, c.Size, ptr, is64);
+            int score = CountResolved(mem, resolver, c.Va, c.Size, ptr, is64, imageBase, imageEnd);
             log.Append($"  IAT candidate ({c.Src}) @ {c.Va:X} size {c.Size:X}: {score} resolvable.\n");
             if (score > bestScore) { bestScore = score; best = c; }
         }
@@ -256,14 +276,14 @@ public static class ImportRebuilder
         return GrowRun(mem, resolver, start, ptr);
     }
 
-    private static int CountResolved(MemReader mem, IApiResolver resolver, ulong va, uint size, int ptr, bool is64)
+    private static int CountResolved(MemReader mem, IApiResolver resolver, ulong va, uint size, int ptr, bool is64, ulong imageBase, ulong imageEnd)
     {
         var b = mem(va, (int)Math.Min(size, 256u * 1024));
         int n = b.Length / ptr, c = 0;
         for (int i = 0; i < n; i++)
         {
             ulong v = ptr == 8 ? BitConverter.ToUInt64(b, i * ptr) : BitConverter.ToUInt32(b, i * ptr);
-            if (v != 0 && ResolveSlot(mem, resolver, v, is64).Api is not null) c++;
+            if (v != 0 && ResolveSlot(mem, resolver, v, is64, imageBase, imageEnd).Api is not null) c++;
         }
         return c;
     }
@@ -297,6 +317,41 @@ public static class ImportRebuilder
     }
 
     private static bool LooksLikePointer(ulong v) => v > 0x10000 && v < 0x7FFF_FFFF_FFFF;
+
+    /// <summary>Scan every section (data <i>and</i> executable) for the longest contiguous run of pointers that
+    /// resolve to genuine module exports, and grow it into a full IAT run. Unlike <see cref="ScanForIat"/> this
+    /// does not skip executable sections (a protector embeds the real IAT in its body) and keys strictly on exact
+    /// exports (not the broader "points into a module"), so it locks onto the genuine resolved table rather than
+    /// incidental module-pointer noise. Returns (0,0) if no run of at least 3 exports is found.</summary>
+    private static (ulong Va, uint Size) AutosearchResolvedIat(MemReader mem, IApiResolver resolver, PeView view, ulong imageBase, int ptr)
+    {
+        ulong bestVa = 0; int bestRun = 0;
+        foreach (var s in view.Sections)
+        {
+            uint size = Math.Min(Math.Max(s.VirtualSize, s.SizeOfRawData), 8u << 20);
+            if (size < (uint)(ptr * 3)) continue;
+            var data = mem(imageBase + s.VirtualAddress, (int)size);
+            int n = data.Length / ptr;
+            int runStart = -1, runLen = 0;
+            for (int i = 0; i <= n; i++)
+            {
+                bool isExport = false;
+                if (i < n)
+                {
+                    ulong v = ptr == 8 ? BitConverter.ToUInt64(data, i * ptr) : BitConverter.ToUInt32(data, i * ptr);
+                    isExport = v != 0 && resolver.Resolve(v) is not null;
+                }
+                if (isExport) { if (runStart < 0) runStart = i; runLen++; }
+                else
+                {
+                    if (runLen > bestRun) { bestRun = runLen; bestVa = imageBase + s.VirtualAddress + (ulong)(runStart * ptr); }
+                    runStart = -1; runLen = 0;
+                }
+            }
+        }
+        if (bestVa == 0 || bestRun < 3) return (0, 0);   // require a real run, not an incidental pointer pair
+        return GrowRun(mem, resolver, bestVa, ptr);       // grow to include any trailing/ordinal slots
+    }
 
     private static (ulong Va, uint Size) ScanForIat(
         MemReader mem, IApiResolver resolver, PeView view, ulong imageBase, int ptr, StringBuilder log)

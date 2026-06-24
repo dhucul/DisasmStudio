@@ -1,7 +1,7 @@
 namespace DisasmStudio.Core.Formats;
 
 /// <summary>Which container format a file is.</summary>
-public enum BinaryFormat { Unknown, Pe, Elf, Raw }
+public enum BinaryFormat { Unknown, Pe, Elf, Raw, Snapshot }
 
 /// <summary>A loaded section/segment, addressed in absolute VAs so the UI is format-agnostic.</summary>
 public sealed class Section

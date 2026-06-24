@@ -24,12 +24,14 @@ public sealed record LaunchWatchOptions(
     string? WorkingDirectory = null,
     bool Sandbox = true);
 
-/// <summary>Outcome of a non-invasive dump.</summary>
+/// <summary>Outcome of a non-invasive dump. <see cref="RawOutputPath"/> is set when the in-memory header had to
+/// be reconstructed (a protector wiped it): the raw VA-indexed memory image, openable at the image base, is a
+/// reliable artifact even if the rebuilt PE is imperfect.</summary>
 public sealed record NonInvasiveDumpResult(
     bool Ok, ulong ImageBase, int Bitness, uint SizeOfImage,
     int ModuleCount, int ExportCount, int ImportsResolved, int ImportsUnresolved,
     double HottestExecEntropy, string? HottestExecSection,
-    string? OutputPath, string? Error, string Log);
+    string? OutputPath, string? Error, string Log, string? RawOutputPath = null, string? SnapshotOutputPath = null);
 
 /// <summary>
 /// Dumps a running process's main image to a clean, re-analyzable PE <b>without debugging it</b>. Where the
@@ -57,11 +59,12 @@ public static class NonInvasiveDumper
     /// <param name="suspend">Freeze the target's threads for a consistent snapshot, then thaw them (best-effort).</param>
     /// <param name="preferredImageBase">The file's preferred image base (for the rebuilt PE / relocation choice).</param>
     public static NonInvasiveDumpResult Dump(int pid, string outputPath, bool suspend,
-        ulong preferredImageBase, Action<string>? report = null)
+        ulong preferredImageBase, Action<string>? report = null, string? snapshotPath = null)
     {
         var sb = new System.Text.StringBuilder();
+        string? rawPath = null, snapPath = null;
         void Log(string m) { sb.AppendLine(m); report?.Invoke(m); }
-        NonInvasiveDumpResult Fail(string error) { Log("FAILED: " + error); return new NonInvasiveDumpResult(false, 0, 0, 0, 0, 0, 0, 0, 0, null, null, error, sb.ToString()); }
+        NonInvasiveDumpResult Fail(string error) { Log("FAILED: " + error); return new NonInvasiveDumpResult(false, 0, 0, 0, 0, 0, 0, 0, 0, null, null, error, sb.ToString(), rawPath, snapPath); }
 
         // Request suspend rights too; fall back to read-only if that's denied (e.g. cross-integrity).
         IntPtr h = Native.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SUSPEND_RESUME, false, (uint)pid);
@@ -74,7 +77,7 @@ public static class NonInvasiveDumper
         bool suspended = false;
         try
         {
-            var modules = EnumerateModules(h, out string? mainPath, out ulong mainBase);
+            var modules = EnumerateModules(h, pid, out string? mainPath, out ulong mainBase);
             if (mainBase == 0 || modules.Count == 0)
                 return Fail("Could not enumerate the target's modules (EnumProcessModules failed). A 32-bit DisasmStudio cannot read a 64-bit target; this build is x64, so check the PID and access rights.");
             Log($"PID {pid}: {modules.Count} module(s); main image '{Path.GetFileName(mainPath ?? "?")}' @ {mainBase:X}.");
@@ -94,11 +97,23 @@ public static class NonInvasiveDumper
 
             MemReader read = MakeReader(h);
 
-            var image = MemoryImageDump.Dump(h, mainBase, read, out uint sizeOfImage);
+            var image = MemoryImageDump.Dump(h, mainBase, read, out uint sizeOfImage, out var regions);
             if (image.Length == 0 || !PeView.TryParse(image, out var view))
                 return Fail("Could not read or parse the target image. If it is a protector that decrypts lazily, let it run further (open its UI / let it idle) before dumping.");
             int bitness = view.Is64 ? 64 : 32;
             Log($"Dumped {sizeOfImage:X} bytes from base {mainBase:X} ({bitness}-bit).");
+
+            // A protector (Themida/WinLicense-class) may wipe its own section table in memory as an anti-dump
+            // measure, leaving an image PeBuilder can't lay out. Detect that, drop a raw copy of the decrypted
+            // image as a reliable fallback (openable at the image base), then reconstruct the section table from
+            // the committed-memory region map so the rebuilt PE can re-parse.
+            if (DumpRepair.NeedsReconstruction(view, sizeOfImage))
+            {
+                Log("In-memory PE header has no usable section table (a protector anti-dump measure).");
+                rawPath = WriteRaw(outputPath, image, Log);
+                if (DumpRepair.TryReconstruct(image, view, sizeOfImage, regions, Log, out var repaired))
+                    view = repaired;
+            }
 
             // Decryption indicator: a still-encrypted body reads as near-maximal entropy.
             var hot = view.Sections.Where(s => s.IsExecutable)
@@ -132,8 +147,13 @@ public static class NonInvasiveDumper
             catch (Exception ex) { return Fail("Failed to write output file: " + ex.Message); }
             Log($"Wrote {outputPath}.");
 
+            // Optional full process snapshot: capture the private (heap/VM) regions too — while the process is
+            // still open and frozen — so a protector's separately-allocated VM context is included.
+            if (snapshotPath is not null && ProcessSnapshot.CaptureToFile(h, mainBase, bitness, snapshotPath, Log) > 0)
+                snapPath = snapshotPath;
+
             return new NonInvasiveDumpResult(true, mainBase, bitness, sizeOfImage, resolver.ModuleCount,
-                resolver.ExportCount, iat.Resolved, iat.Unresolved, hotEnt, hotName, outputPath, null, sb.ToString());
+                resolver.ExportCount, iat.Resolved, iat.Unresolved, hotEnt, hotName, outputPath, null, sb.ToString(), rawPath, snapPath);
         }
         catch (Exception ex)
         {
@@ -153,14 +173,15 @@ public static class NonInvasiveDumper
     /// timeout, if the target exits, or if no code section can be watched. <paramref name="cancelled"/> lets the
     /// UI abort the wait.</summary>
     public static NonInvasiveDumpResult DumpWhenSettled(int pid, string outputPath, bool suspend,
-        ulong preferredImageBase, AutoTimingOptions opt, Action<string>? report = null, Func<bool>? cancelled = null)
+        ulong preferredImageBase, AutoTimingOptions opt, Action<string>? report = null, Func<bool>? cancelled = null,
+        string? snapshotPath = null)
     {
         void Log(string m) => report?.Invoke(m);
 
         // A read-only handle just for watching; the final Dump opens its own (and may add suspend rights).
         IntPtr h = Native.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)pid);
         if (h == IntPtr.Zero)
-            return Dump(pid, outputPath, suspend, preferredImageBase, report);   // surface the real OpenProcess error via the normal path
+            return Dump(pid, outputPath, suspend, preferredImageBase, report, snapshotPath);   // surface the real OpenProcess error via the normal path
 
         bool wasCancelled = false, exited = false;
         try
@@ -169,11 +190,12 @@ public static class NonInvasiveDumper
             // A just-launched / just-resumed target may not have its module list populated yet — retry briefly so
             // launch-and-watch can begin from t=0 without giving up before the main image is even mapped.
             (ulong Va, int Len)? section = null;
-            long bootDeadline = Environment.TickCount64 + Math.Min(opt.MaxWaitMs, 5000);
+            long bootStart = Environment.TickCount64;
+            long bootDeadline = bootStart + Math.Min(opt.MaxWaitMs, 5000);
             while (true)
             {
                 if (cancelled?.Invoke() == true) { Log("Auto-timing: cancelled by user."); wasCancelled = true; break; }
-                EnumerateModules(h, out _, out ulong mainBase);
+                EnumerateModules(h, pid, out _, out ulong mainBase);
                 section = mainBase != 0 ? HottestExecSection(read, mainBase) : null;
                 if (section is not null) break;
                 if (ProcessGone(h)) { Log("Auto-timing: the target exited before its image mapped."); exited = true; break; }
@@ -181,7 +203,30 @@ public static class NonInvasiveDumper
                 Thread.Sleep(Math.Min(opt.PollIntervalMs, 100));
             }
 
-            if (!wasCancelled && section is null)
+            if (!wasCancelled && section is null && !exited)
+            {
+                // No executable section to time against — typically a protector that has wiped its in-memory PE
+                // header (the section table / exec flags) as an anti-dump measure, so "settled" can't be detected.
+                // Don't snapshot at ~t0: wait out the rest of the max-wait budget blind so the unpack/decrypt stub
+                // has time to run, then dump. (The normal "module not mapped yet" case finds a section in <1s and
+                // never reaches here.)
+                long elapsed = Environment.TickCount64 - bootStart;
+                int blind = (int)Math.Max(0, opt.MaxWaitMs - elapsed);
+                if (blind > 0)
+                {
+                    Log($"Auto-timing: no watchable code section (the protector likely wiped the PE header) — waiting " +
+                        $"{blind / 1000.0:F0}s blind for it to decrypt, then dumping.");
+                    long until = Environment.TickCount64 + blind;
+                    while (Environment.TickCount64 < until)
+                    {
+                        if (cancelled?.Invoke() == true) { Log("Auto-timing: cancelled by user."); wasCancelled = true; break; }
+                        if (ProcessGone(h)) { Log("Auto-timing: the target exited during the blind wait."); exited = true; break; }
+                        Thread.Sleep(Math.Min(opt.PollIntervalMs, 250));
+                    }
+                }
+                if (!wasCancelled && !exited) Log("Auto-timing: blind wait elapsed; dumping the current state.");
+            }
+            else if (!wasCancelled && section is null)
             {
                 Log("Auto-timing: no readable code section to watch; dumping the current state.");
             }
@@ -244,7 +289,7 @@ public static class NonInvasiveDumper
         if (exited)
             return new NonInvasiveDumpResult(false, 0, 0, 0, 0, 0, 0, 0, 0, null, null,
                 "The target exited before its image settled — nothing to dump. If it ran entirely inside a VM (a pure virtualizer) there is no decrypted native image to capture.", "");
-        return Dump(pid, outputPath, suspend, preferredImageBase, report);
+        return Dump(pid, outputPath, suspend, preferredImageBase, report, snapshotPath);
     }
 
     /// <summary>Launch the target ourselves (NO debugger), watch it from the very first instruction, and
@@ -254,7 +299,8 @@ public static class NonInvasiveDumper
     /// optionally placed in a kill-on-close job sandbox, then resumed. Because we are not its debugger, its
     /// anti-debug passes exactly as in a normal run.</summary>
     public static NonInvasiveDumpResult LaunchAndDump(LaunchWatchOptions launch, string outputPath, bool suspend,
-        ulong preferredImageBase, AutoTimingOptions opt, Action<string>? report = null, Func<bool>? cancelled = null)
+        ulong preferredImageBase, AutoTimingOptions opt, Action<string>? report = null, Func<bool>? cancelled = null,
+        string? snapshotPath = null)
     {
         var sb = new System.Text.StringBuilder();
         void Log(string m) { sb.AppendLine(m); report?.Invoke(m); }
@@ -303,7 +349,7 @@ public static class NonInvasiveDumper
             Native.ResumeThread(pi.hThread);   // the target now starts running; we already hold its PID to watch
             resumed = true;
             Log($"Launched pid {pi.dwProcessId}; watching from start.");
-            return DumpWhenSettled((int)pi.dwProcessId, outputPath, suspend, preferredImageBase, opt, report, cancelled);
+            return DumpWhenSettled((int)pi.dwProcessId, outputPath, suspend, preferredImageBase, opt, report, cancelled, snapshotPath);
         }
         catch (Exception ex) { return Err("Unexpected error: " + ex.Message); }
         finally
@@ -362,6 +408,22 @@ public static class NonInvasiveDumper
         catch { return 0; }
     }
 
+    /// <summary>Write the raw VA-indexed memory image beside the rebuilt PE (a reliable artifact when the header
+    /// had to be reconstructed). The user opens it as a raw binary at the image base. Returns the path or null.</summary>
+    private static string? WriteRaw(string outputPath, byte[] image, Action<string> log)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(outputPath) ?? ".";
+            string raw = Path.Combine(dir, Path.GetFileNameWithoutExtension(outputPath) + "_raw.bin");
+            File.WriteAllBytes(raw, image);
+            log($"Wrote raw decrypted memory image to {raw} ({image.Length} bytes) — open it as a raw binary at the " +
+                "image base to inspect the decrypted bytes even if the rebuilt PE is imperfect.");
+            return raw;
+        }
+        catch (Exception ex) { log("Raw dump write failed: " + ex.Message); return null; }
+    }
+
     /// <summary>A page-tolerant cross-process reader over <paramref name="h"/>: a single ReadProcessMemory, and
     /// on failure a page-by-page recovery so a request that straddles an unreadable gap still returns its
     /// readable prefix (matching the debugger's ReadMemory semantics).</summary>
@@ -418,9 +480,19 @@ public static class NonInvasiveDumper
 
     /// <summary>Enumerate the target's modules into (base, path) pairs. The first HMODULE is the main image;
     /// an HMODULE <i>is</i> the module's load base, so no extra query is needed for the address.</summary>
-    private static List<ModuleInfo> EnumerateModules(IntPtr h, out string? mainPath, out ulong mainBase)
+    private static List<ModuleInfo> EnumerateModules(IntPtr h, int pid, out string? mainPath, out ulong mainBase)
     {
         mainPath = null; mainBase = 0;
+
+        // A 32-bit (WOW64) target: EnumProcessModules from this x64 process returns the 64-bit module view,
+        // whose kernel32/ntdll bases differ from the 32-bit ones the target actually imports through — so the
+        // IAT can't resolve. Enumerate the target's *32-bit* modules via a Toolhelp snapshot instead.
+        if (Native.IsWow64Process(h, out bool isWow) && isWow)
+        {
+            var wow = EnumerateModulesToolhelp(pid, out mainPath, out mainBase);
+            if (wow.Count > 0) return wow;   // else fall through to the EnumProcessModules path
+        }
+
         var list = new List<ModuleInfo>();
         var hmods = new IntPtr[1024];
         if (!Native.EnumProcessModules(h, hmods, (uint)(hmods.Length * IntPtr.Size), out uint needed))
@@ -435,6 +507,34 @@ public static class NonInvasiveDumper
             list.Add(new ModuleInfo(baseVa, path));
             if (i == 0) { mainBase = baseVa; mainPath = path; }
         }
+        return list;
+    }
+
+    /// <summary>Enumerate a 32-bit (WOW64) target's 32-bit modules via a Toolhelp snapshot (the first entry is
+    /// the main image; modBaseAddr is the 32-bit load base). Empty list if the snapshot couldn't be taken.</summary>
+    private static List<ModuleInfo> EnumerateModulesToolhelp(int pid, out string? mainPath, out ulong mainBase)
+    {
+        mainPath = null; mainBase = 0;
+        var list = new List<ModuleInfo>();
+        IntPtr snap = Native.CreateToolhelp32Snapshot(Native.TH32CS_SNAPMODULE | Native.TH32CS_SNAPMODULE32, (uint)pid);
+        if (snap == Native.INVALID_HANDLE_VALUE) return list;
+        try
+        {
+            var me = new Native.MODULEENTRY32W { dwSize = (uint)Marshal.SizeOf<Native.MODULEENTRY32W>() };
+            if (!Native.Module32FirstW(snap, ref me)) return list;
+            do
+            {
+                ulong baseVa = (ulong)me.modBaseAddr.ToInt64() & 0xFFFF_FFFFUL;
+                string path = !string.IsNullOrEmpty(me.szExePath) ? me.szExePath
+                            : !string.IsNullOrEmpty(me.szModule) ? me.szModule
+                            : $"module_{baseVa:X}";
+                list.Add(new ModuleInfo(baseVa, path));
+                if (list.Count == 1) { mainBase = baseVa; mainPath = path; }
+                me.dwSize = (uint)Marshal.SizeOf<Native.MODULEENTRY32W>();
+            }
+            while (Native.Module32NextW(snap, ref me));
+        }
+        finally { Native.CloseHandle(snap); }
         return list;
     }
 

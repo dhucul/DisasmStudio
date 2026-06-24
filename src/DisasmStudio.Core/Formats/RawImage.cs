@@ -96,19 +96,22 @@ public static class BinaryLoader
     public static BinaryFormat Detect(string path)
     {
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        Span<byte> head = stackalloc byte[4];
+        Span<byte> head = stackalloc byte[8];
         int n = fs.Read(head);
+        if (n >= 8 && ProcessSnapshotImage.IsSnapshot(head)) return BinaryFormat.Snapshot;
         if (n >= 2 && head[0] == (byte)'M' && head[1] == (byte)'Z') return BinaryFormat.Pe;
         if (n >= 4 && head[0] == 0x7F && head[1] == (byte)'E' && head[2] == (byte)'L' && head[3] == (byte)'F')
             return BinaryFormat.Elf;
         return BinaryFormat.Unknown;
     }
 
-    /// <summary>Load a PE or ELF by sniffing its magic; throws for anything else (use <see cref="RawImage.Load"/>).</summary>
+    /// <summary>Load a PE, ELF or process snapshot by sniffing its magic; throws for anything else
+    /// (use <see cref="RawImage.Load"/>).</summary>
     public static IBinaryImage Load(string path) => Detect(path) switch
     {
         BinaryFormat.Pe => PeImage.Load(path),
         BinaryFormat.Elf => ElfImage.Load(path),
+        BinaryFormat.Snapshot => ProcessSnapshotImage.Load(path),
         _ => throw new BinaryFormatException("Unrecognised format — open as raw instead."),
     };
 }

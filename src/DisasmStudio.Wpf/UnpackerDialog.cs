@@ -41,6 +41,8 @@ internal sealed class UnpackerDialog : Window
     private readonly Button _devirtProbe;
     private UnpackResult? _lastResult;
     private bool _running;
+    private readonly int _staticIndex;
+    private byte[]? _fileBytes;
 
     /// <summary>Set to the rebuilt file's path when the user chooses to reopen it; null otherwise.</summary>
     public string? OpenPath { get; private set; }
@@ -90,13 +92,15 @@ internal sealed class UnpackerDialog : Window
         _strategy.Items.Add("Manual OEP");
         _strategy.Items.Add("Run free — no trace (VM protectors); dump on settle/fault");
         _strategy.Items.Add("Trace VM loop/handlers (single-step diagnostic)");
+        _strategy.Items.Add("Static — VMProtect packed output (LZMA; no run, no debugger)");
+        _staticIndex = _strategy.Items.Count - 1;
         _strategy.SelectedIndex = 0;
         opt.Children.Add(_strategy);
 
         opt.Children.Add(Label("Manual OEP address (hex) — used only with the Manual strategy"));
         _manualOep = new TextBox { FontFamily = Mono, IsEnabled = false, Margin = new Thickness(0, 0, 0, 8) };
         opt.Children.Add(_manualOep);
-        _strategy.SelectionChanged += (_, _) => _manualOep.IsEnabled = _strategy.SelectedIndex == 3;
+        _strategy.SelectionChanged += (_, _) => UpdateOptionEnablement();
 
         _sandbox = new CheckBox
         {
@@ -176,6 +180,10 @@ internal sealed class UnpackerDialog : Window
         if (virt)
             Append("WARNING: a code-virtualizing protector was detected. Generic unpacking cannot recover the " +
                    "original code; any dump will be unreliable. Proceeding will likely fail or produce a partial image.");
+
+        // Probe (off the UI thread) for VMProtect's "Pack the Output File" LZMA layer; if present, pre-select
+        // the Static strategy, which recovers the decompressed image without ever running the target.
+        _ = ProbeStaticApplicabilityAsync();
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)
@@ -195,6 +203,22 @@ internal sealed class UnpackerDialog : Window
         if (_running) return;
         string outPath = _output.Text.Trim();
         if (outPath.Length == 0) { Append("Choose an output path first."); return; }
+
+        // Static VMProtect "Pack the Output File" unpack: no process, no debugger — handled entirely in Core.
+        if (_strategy.SelectedIndex == _staticIndex)
+        {
+            _running = true;
+            SetInputsEnabled(false);
+            _log.Clear();
+            _lastResult = null;
+            _devirt.IsEnabled = false;
+            _devirtProbe.IsEnabled = false;
+            bool okStatic = await RunStaticAsync(outPath);
+            _running = false;
+            SetInputsEnabled(true);
+            _start.IsEnabled = !okStatic;
+            return;
+        }
 
         ulong? manualOep = null;
         var method = _strategy.SelectedIndex switch
@@ -273,6 +297,83 @@ internal sealed class UnpackerDialog : Window
         }
         _running = false;
         _start.IsEnabled = !result.Ok;
+    }
+
+    /// <summary>Run the static VMProtect output-decompression in Core (no debugger). Returns true on success.</summary>
+    private async Task<bool> RunStaticAsync(string outPath)
+    {
+        Append("Static VMProtect unpack — decompressing the packed image (no process launched)…");
+        byte[] file;
+        try { file = await Task.Run(EnsureFileBytes); }
+        catch (Exception ex) { Append("ERROR reading input file: " + ex.Message); return false; }
+
+        VmpStaticResult result;
+        try { result = await Task.Run(() => VmpStaticUnpacker.Unpack(file)); }
+        catch (Exception ex) { Append("ERROR: " + ex.Message); return false; }
+
+        foreach (var line in result.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            Append(line.TrimEnd());
+
+        if (!result.Applicable)
+        {
+            Append("");
+            Append("Static unpack does not apply: no VMProtect \"Pack the Output File\" (LZMA) layer was found.");
+            Append("This static path only undoes VMProtect's LZMA output compression. If the file is a different " +
+                   "protector (Themida/WinLicense, Enigma, …) or VMProtect-virtualized but not output-packed, there is " +
+                   "no LZMA block table to replay.");
+            Append("For an anti-debug protector that self-decrypts at runtime, the best route is the toolbar's " +
+                   "\"Dump Process…\" (non-invasive, no debugger) — run it, let it decrypt, snapshot it — then feed the " +
+                   "dump to Devirt…. Or try a dynamic strategy here (Run free / Auto). Virtualized code stays " +
+                   "virtualized either way.");
+            return false;
+        }
+        if (!result.Ok || result.Image is null)
+        {
+            Append("");
+            Append("FAILED: " + (result.Error ?? "could not reconstruct the image."));
+            return false;
+        }
+
+        try { File.WriteAllBytes(outPath, result.Image); }
+        catch (Exception ex) { Append("Failed to write output file: " + ex.Message); return false; }
+
+        Append("");
+        Append($"SUCCESS — decompressed {result.Blocks} block(s); wrote {outPath}.");
+        Append("This undoes VMProtect's output compression only: virtualized functions remain VM bytecode, the IAT " +
+               "is unchanged, and the entry point is still the protector stub. Open it to analyze the recovered " +
+               "native code, or feed it to the Devirt… engine.");
+        _open.IsEnabled = true;
+        return true;
+    }
+
+    /// <summary>Off-thread probe for the LZMA output-compression layer; if present, pre-select Static.</summary>
+    private async Task ProbeStaticApplicabilityAsync()
+    {
+        bool applicable;
+        try { applicable = await Task.Run(() => VmpStaticUnpacker.LooksApplicable(EnsureFileBytes())); }
+        catch { return; }
+        if (!applicable) return;
+        _ = Dispatcher.BeginInvoke(() =>
+        {
+            if (_running || _strategy.SelectedIndex == _staticIndex) return;
+            _strategy.SelectedIndex = _staticIndex;
+            Append("Detected VMProtect \"Pack the Output File\" (LZMA) — selected the Static strategy: it decompresses " +
+                   "the image without running the target (no anti-debug to fight). It undoes compression only; " +
+                   "virtualized functions stay virtualized.");
+        });
+    }
+
+    private byte[] EnsureFileBytes() => _fileBytes ??= File.ReadAllBytes(_target);
+
+    /// <summary>Enable/disable the dynamic-only options to match the selected strategy. The Static path
+    /// launches no process, so sandbox / anti-debug / manual-OEP do not apply to it.</summary>
+    private void UpdateOptionEnablement()
+    {
+        bool isStatic = _strategy.SelectedIndex == _staticIndex;
+        _manualOep.IsEnabled = !isStatic && _strategy.SelectedIndex == 3;
+        _sandbox.IsEnabled = !isStatic;
+        _apiHooks.IsEnabled = !isStatic;
+        _rdtsc.IsEnabled = !isStatic;
     }
 
     private void EnableProbeButton(UnpackResult result)
@@ -436,6 +537,7 @@ internal sealed class UnpackerDialog : Window
         _sandbox.IsEnabled = on;
         _output.IsEnabled = on;
         _start.IsEnabled = on;
+        if (on) UpdateOptionEnablement();
     }
 
     private void Append(string line)

@@ -141,6 +141,16 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   execution window and writes a `.vmtrace.txt` report with hot indirect dispatch sites, concrete runtime
   handler targets, and short handler-body samples. This is trace-based recovery evidence, not a restored
   native-code unpack.
+- **Static VMProtect output-unpack (no run, no debugger):** VMProtect's optional *Pack the Output File* compresses
+  the original sections with LZMA and leaves a `PACKER_INFO` table of `{SrcRVA, DstRVA}` block descriptors (entry [0]
+  points at the shared 5-byte LZMA props); a tiny runtime stub replays those blocks at load. The **Static** strategy in
+  the Unpack dialog reconstructs the same image *statically* — it lays the raw sections into a virtual-address buffer,
+  locates `PACKER_INFO` by matching the RVAs of the virtual-only decompression-target sections, and LZMA-decompresses
+  each block into place — so it **sidesteps the anti-debug wall entirely** (nothing is executed). The dialog auto-detects
+  the packed-output layout on open and pre-selects this strategy. It undoes *compression only*: virtualized functions
+  stay as VM bytecode, the IAT is left as the packer wrote it, and the entry point remains the stub — but it recovers all
+  the non-virtualized native code and hands the `Devirt…` engine a decompressed image without needing a runtime dump.
+  The LZMA decoder is a self-contained port of the public-domain 7-Zip SDK (no new dependency). Handles x86 and x64.
 - **Non-invasive dump (no debugger — for anti-debug protectors):** when a protector's anti-debug defeats even a
   clean user-mode debugger (the case the unpacker's Run-free/hide-layer tools can only *diagnose*), the
   **Dump Process…** toolbar action snapshots a process's main image to a clean PE **without attaching a debugger

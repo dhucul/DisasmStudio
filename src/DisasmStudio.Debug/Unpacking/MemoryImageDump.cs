@@ -11,11 +11,19 @@ namespace DisasmStudio.Debug.Unpacking;
 /// for the debugger, a plain <c>ReadProcessMemory</c> for a read-only dump. Returns [] if the PE headers can't
 /// be parsed or <c>SizeOfImage</c> is implausible.
 /// </summary>
+/// <summary>One committed, readable region inside a dumped image: its RVA, byte length, and page protection.
+/// Used to reconstruct a section table when a protector has wiped the in-memory PE header (see DumpRepair).</summary>
+public readonly record struct MemRegion(uint Rva, uint Size, uint Protect);
+
 internal static class MemoryImageDump
 {
     public static byte[] Dump(IntPtr proc, ulong imageBase, MemReader read, out uint sizeOfImage)
+        => Dump(proc, imageBase, read, out sizeOfImage, out _);
+
+    public static byte[] Dump(IntPtr proc, ulong imageBase, MemReader read, out uint sizeOfImage, out List<MemRegion> regions)
     {
         sizeOfImage = 0;
+        regions = [];
         if (proc == IntPtr.Zero) return [];
         var hdr = read(imageBase, 0x1000);
         if (hdr.Length < 0x200 || !PeView.TryParse(hdr, out var view)) return [];
@@ -42,6 +50,7 @@ internal static class MemoryImageDump
                 {
                     var chunk = read(copyStart, (int)(copyEnd - copyStart));
                     if (chunk.Length > 0) Array.Copy(chunk, 0, buf, (int)(copyStart - imageBase), chunk.Length);
+                    regions.Add(new MemRegion((uint)(copyStart - imageBase), (uint)(copyEnd - copyStart), mbi.Protect));
                 }
             }
             if (next <= addr) break;

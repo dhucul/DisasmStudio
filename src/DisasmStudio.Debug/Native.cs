@@ -244,6 +244,35 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "K32EnumProcessModules")]
     public static extern bool EnumProcessModules(IntPtr hProcess, [Out] IntPtr[] lphModule, uint cb, out uint lpcbNeeded);
 
+    // Toolhelp module snapshot — the only reliable way for this x64 process to enumerate a 32-bit (WOW64)
+    // target's *32-bit* modules (EnumProcessModules returns the 64-bit view, whose kernel32 base differs from
+    // the one the WOW64 target actually imports through, breaking IAT resolution). TH32CS_SNAPMODULE32 asks for
+    // the 32-bit list explicitly. The first module is the main image; modBaseAddr is the 32-bit load base.
+    public const uint TH32CS_SNAPMODULE = 0x00000008;
+    public const uint TH32CS_SNAPMODULE32 = 0x00000010;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct MODULEENTRY32W
+    {
+        public uint dwSize;
+        public uint th32ModuleID;
+        public uint th32ProcessID;
+        public uint GlblcntUsage;
+        public uint ProccntUsage;
+        public IntPtr modBaseAddr;   // BYTE* — 32-bit base zero-extended into the pointer field
+        public uint modBaseSize;
+        public IntPtr hModule;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string szModule;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExePath;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool Module32FirstW(IntPtr hSnapshot, ref MODULEENTRY32W lpme);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool Module32NextW(IntPtr hSnapshot, ref MODULEENTRY32W lpme);
+
     // Resolve a path from a file handle — reliable at LOAD_DLL time (when GetModuleFileNameEx often isn't,
     // since the loader hasn't yet registered the module). dwFlags 0 = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS.
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

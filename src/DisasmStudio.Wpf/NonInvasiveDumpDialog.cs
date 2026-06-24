@@ -34,13 +34,16 @@ internal sealed class NonInvasiveDumpDialog : Window
     private readonly TextBox _args;
     private readonly CheckBox _sandbox;
     private readonly CheckBox _suspend;
+    private readonly CheckBox _snapshot;
     private readonly CheckBox _auto;
     private readonly TextBox _maxWait;
     private readonly TextBox _output;
     private readonly TextBox _log;
     private readonly Button _dump;
     private readonly Button _open;
+    private readonly Button _openSnap;
     private bool _running;
+    private string? _snapPath;
     private CancellationTokenSource? _cts;
 
     /// <summary>Set to the dumped file's path when the user chooses to reopen it; null otherwise.</summary>
@@ -146,6 +149,13 @@ internal sealed class NonInvasiveDumpDialog : Window
         };
         opt.Children.Add(_suspend);
 
+        _snapshot = new CheckBox
+        {
+            Content = "Full process snapshot (.dssnap): also capture private VM/heap regions (for VM protectors)",
+            Foreground = Fg, IsChecked = false, Margin = new Thickness(0, 0, 0, 4),
+        };
+        opt.Children.Add(_snapshot);
+
         _auto = new CheckBox
         {
             Content = "Auto: watch the target and dump when its image settles (decrypted / idle)",
@@ -196,9 +206,12 @@ internal sealed class NonInvasiveDumpDialog : Window
         _dump.Click += OnDump;
         _open = new Button { Content = "Open dump", MinWidth = 100, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
         _open.Click += (_, _) => { OpenPath = _output.Text.Trim(); DialogResult = true; };
+        _openSnap = new Button { Content = "Open snapshot", MinWidth = 110, Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
+        _openSnap.Click += (_, _) => { if (_snapPath is { Length: > 0 }) { OpenPath = _snapPath; DialogResult = true; } };
         var close = new Button { Content = "Close", IsCancel = true, MinWidth = 80 };
         buttons.Children.Add(_dump);
         buttons.Children.Add(_open);
+        buttons.Children.Add(_openSnap);
         buttons.Children.Add(close);
         root.Children.Add(buttons);
 
@@ -332,6 +345,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         _running = true;
         SetInputsEnabled(false);
         _open.IsEnabled = false;
+        _openSnap.IsEnabled = false;
         _log.Clear();
         Append($"{(launch ? "Launching + watching" : auto ? "Watching" : "Dumping")} {label}…");
 
@@ -346,15 +360,16 @@ internal sealed class NonInvasiveDumpDialog : Window
 
         var optAuto = new AutoTimingOptions(MaxWaitMs: maxWaitSec * 1000);
         Func<bool>? cancelled = _cts is { } cts ? () => cts.IsCancellationRequested : null;
+        string? snapReq = _snapshot.IsChecked == true ? Path.ChangeExtension(outPath, ".dssnap") : null;
 
         NonInvasiveDumpResult result;
         try
         {
             result = await Task.Run(() => launch
-                ? NonInvasiveDumper.LaunchAndDump(new LaunchWatchOptions(target, args, null, sandbox), outPath, suspend, preferred, optAuto, report, cancelled)
+                ? NonInvasiveDumper.LaunchAndDump(new LaunchWatchOptions(target, args, null, sandbox), outPath, suspend, preferred, optAuto, report, cancelled, snapReq)
                 : auto
-                    ? NonInvasiveDumper.DumpWhenSettled(pid, outPath, suspend, preferred, optAuto, report, cancelled)
-                    : NonInvasiveDumper.Dump(pid, outPath, suspend, preferred, report));
+                    ? NonInvasiveDumper.DumpWhenSettled(pid, outPath, suspend, preferred, optAuto, report, cancelled, snapReq)
+                    : NonInvasiveDumper.Dump(pid, outPath, suspend, preferred, report, snapReq));
         }
         catch (Exception ex)
         {
@@ -372,11 +387,22 @@ internal sealed class NonInvasiveDumpDialog : Window
                 Append("Note: the largest code section is still high-entropy — the target may not have finished " +
                        "decrypting (or it is virtualized). Increase the max wait and retry, or feed this dump to Devirt.");
             Append($"Wrote: {result.OutputPath}");
+            if (result.RawOutputPath is { } rp)
+                Append($"The in-memory PE header was reconstructed (protector anti-dump). A faithful raw copy was also " +
+                       $"written: {rp} — if the rebuilt PE looks off, open that as a raw/flat image at base {result.ImageBase:X}.");
             _open.IsEnabled = true;
+            if (result.SnapshotOutputPath is { } snap)
+            {
+                _snapPath = snap;
+                Append($"Full process snapshot: {snap} — open it to follow indirect jumps into the protector's private VM regions.");
+                _openSnap.IsEnabled = true;
+            }
         }
         else
         {
             Append("FAILED: " + (result.Error ?? "unknown error"));
+            if (result.RawOutputPath is { } rp)
+                Append($"A raw decrypted memory image was still captured: {rp} — open it as a raw/flat image at the image base to inspect the decrypted bytes.");
         }
         FinishRun();
     }
@@ -400,6 +426,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         _args.IsEnabled = on;
         _sandbox.IsEnabled = on;
         _suspend.IsEnabled = on;
+        _snapshot.IsEnabled = on;
         _auto.IsEnabled = on && !LaunchMode;
         _maxWait.IsEnabled = on && (LaunchMode || _auto.IsChecked == true);
         _output.IsEnabled = on;
