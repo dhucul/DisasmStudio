@@ -413,7 +413,9 @@ public partial class MainWindow : Window
                     _stringsView = CollectionViewSource.GetDefaultView(_strings);
                     _stringsView.Filter = StringFilterPredicate;
                     StringList.ItemsSource = _stringsView;
-                    StatusText.Text = $"Live strings: {_strings.Count:N0} in process memory @ {_dbg?.CurrentIp:X}";
+                    // A per-stop header (count + the IP it was scanned at) so it's visible that the list re-scans
+                    // on each breakpoint, even when the contents happen to be unchanged.
+                    StringHeader.Text = $"live · {_strings.Count:N0} strings · scanned @ {_dbg?.CurrentIp:X}";
                 }
                 if (_liveStringsPending && StringsTabVisible) RefreshLiveStrings();   // a stop arrived during the scan
             });
@@ -716,7 +718,9 @@ public partial class MainWindow : Window
         Linear.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();   // now showing live (rebased) breakpoints; reflects the pre-run set just armed
-        if (StringsTabVisible) RefreshLiveStrings();   // rescan process memory for strings if the user is viewing them
+        // Re-scan process memory for strings on every stop except a pure single-step (where it would thrash) —
+        // unless the Strings tab is showing, in which case scan then too so stepping updates it live.
+        if (_dbg.LastReason != StopReason.Step || StringsTabVisible) RefreshLiveStrings();
         if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp);   // graph follows RIP too
         string? name = _result?.NameFor(_dbg.CurrentIp);
         string extra = _dbg.LastReason == StopReason.Exception ? $" (code 0x{_dbg.LastExceptionCode:X8})" : "";
@@ -1349,6 +1353,7 @@ public partial class MainWindow : Window
         _stringsView = CollectionViewSource.GetDefaultView(_strings);
         _stringsView.Filter = StringFilterPredicate;
         StringList.ItemsSource = _stringsView;
+        StringHeader.Text = $"{_strings.Count:N0} strings";
 
         _exports = new ObservableCollection<ExportItem>(result.Image.Symbols
             .Where(s => s.Kind == NamedSymbolKind.Export)
@@ -1381,6 +1386,7 @@ public partial class MainWindow : Window
     {
         FuncList.ItemsSource = null;
         StringList.ItemsSource = null;
+        StringHeader.Text = "";
         ExportList.ItemsSource = null;
         ImportList.ItemsSource = null;
         SectionList.ItemsSource = null;

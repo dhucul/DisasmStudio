@@ -167,7 +167,9 @@
                     </TabItem>
                     <TabItem Header="Strings">
                         <DockPanel>
-                            <TextBox x:Name="StringFilter" DockPanel.Dock="Top" Margin="8,8,8,6" TextChanged="OnStringFilter" />
+                            <TextBlock x:Name="StringHeader" DockPanel.Dock="Top" Margin="10,8,10,2"
+                                       Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                            <TextBox x:Name="StringFilter" DockPanel.Dock="Top" Margin="8,2,8,6" TextChanged="OnStringFilter" />
                             <ListBox x:Name="StringList" MouseDoubleClick="OnStringActivate"
                                      FontFamily="Cascadia Mono, Consolas" FontSize="12">
                                 <ListBox.ItemTemplate>
