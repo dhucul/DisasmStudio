@@ -31,16 +31,22 @@ public static class LiveAnalysis
         var jt = new Dictionary<ulong, ulong[]>();
         foreach (var kv in staticResult.JumpTables) jt[kv.Key + slide] = kv.Value.Select(x => x + slide).ToArray();
 
+        // Reuse the static cross-references (and string-pointer slots), rebased — so during a session a clicked
+        // string still resolves to the code that references it (shown in the linear view) instead of falling
+        // back to the hex dump, and the Xrefs panel works live.
+        var sps = new Dictionary<ulong, ulong>();
+        foreach (var kv in staticResult.StringPointerSlots) sps[kv.Key + slide] = kv.Value + slide;
+
         var result = new AnalysisResult
         {
             Image = img,
             Linear = idx,
             Functions = funcs,
             FunctionByVa = byVa,
-            Xrefs = new XrefDatabase(),
+            Xrefs = staticResult.Xrefs.Rebased(slide),
             Strings = strings,
             JumpTables = jt,
-            StringPointerSlots = new Dictionary<ulong, ulong>(),
+            StringPointerSlots = sps,
             Names = names,
             Comments = comments,
             Warnings = [],

@@ -15,27 +15,36 @@ public sealed record FoundString(ulong Va, int Length, bool Wide, string Text);
 /// </summary>
 public static class StringScanner
 {
+    /// <summary>Cap on bytes scanned per section when reading live process memory: a section's VirtualSize can
+    /// be huge or only partly committed, so this bounds the read + buffer (ReadBytesAtVa returns the committed
+    /// prefix anyway).</summary>
+    private const int MaxLiveSectionBytes = 32 * 1024 * 1024;
+
+    /// <param name="useVirtualSize">Scan each section's whole virtual extent rather than its on-disk size — used
+    /// when scanning live process memory, where decrypted/unpacked strings can live past the raw file size.</param>
     public static List<FoundString> Scan(IBinaryImage img, IReadOnlySet<ulong>? execRefs = null,
-        int minLength = 4, int maxResults = 200_000, CancellationToken token = default)
+        int minLength = 4, int maxResults = 200_000, bool useVirtualSize = false, CancellationToken token = default)
     {
         var found = new List<FoundString>();
         foreach (var s in img.Sections)
         {
-            if (!s.IsReadable || s.FileSize <= 0) continue;
+            if (!s.IsReadable) continue;
+            int size = useVirtualSize
+                ? (int)Math.Min(Math.Max(s.VirtualSize, (ulong)s.FileSize), (ulong)MaxLiveSectionBytes)
+                : s.FileSize;
+            if (size <= 0) continue;
             // Executable section: only mine it for strings code points into (needs the ref set).
             var gate = s.IsExecutable ? execRefs : null;
             if (s.IsExecutable && gate is null) continue;
-            ScanSection(img, s, minLength, maxResults, found, gate, token);
+            ScanSection(img, s.StartVa, size, minLength, maxResults, found, gate, token);
             if (found.Count >= maxResults) break;
         }
         return found;
     }
 
-    private static void ScanSection(IBinaryImage img, Section s, int minLength, int maxResults,
+    private static void ScanSection(IBinaryImage img, ulong start, int size, int minLength, int maxResults,
         List<FoundString> found, IReadOnlySet<ulong>? gate, CancellationToken token)
     {
-        ulong start = s.StartVa;
-        int size = s.FileSize;
         var buf = img.ReadBytesAtVa(start, size);
 
         int i = 0;

@@ -145,7 +145,8 @@
             <!-- Right: xrefs / strings / imports / sections -->
             <Border Grid.Column="4" Background="{StaticResource Surface}"
                     BorderBrush="{StaticResource Outline}" BorderThickness="1,0,0,0">
-                <TabControl x:Name="SideTabs" Background="{StaticResource Surface}">
+                <TabControl x:Name="SideTabs" Background="{StaticResource Surface}"
+                            SelectionChanged="OnSideTabChanged">
                     <TabItem Header="Xrefs">
                         <DockPanel>
                             <TextBlock x:Name="XrefHeader" DockPanel.Dock="Top" Margin="10,8"

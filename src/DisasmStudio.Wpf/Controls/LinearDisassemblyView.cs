@@ -450,6 +450,32 @@ public sealed class LinearDisassemblyView : Grid
         SelectionChanged?.Invoke(_result.Linear.VaAt(instrLine));
     }
 
+    /// <summary>True if <paramref name="p"/> falls in the left gutter margin on a code line — the breakpoint
+    /// strip, where a click toggles a breakpoint (Visual Studio–style). Outputs that instruction line. Section
+    /// headers (collapse markers), label rows and data lines are not breakpoint rows, so folding/selection on
+    /// them is unaffected.</summary>
+    private bool InBreakpointGutter(Point p, out long instrLine)
+    {
+        instrLine = -1;
+        if (_result is null || _dis is null || p.X > GutterW) return false;
+        long display = ToDisplay(Math.Clamp(_topDisplay + (long)(p.Y / _rowHeight), 0, Math.Max(0, VisibleCount - 1)));
+        var (isLabel, line) = ContentAt(display);
+        if (isLabel || RegionStartAt(line) >= 0 || line < 0 || line >= _result.Linear.Count || _result.Linear.IsDataAt(line)) return false;
+        instrLine = line;
+        return true;
+    }
+
+    private void ToggleBreakpointAtLine(long instrLine)
+    {
+        if (_result is null) return;
+        _caretInstr = instrLine;
+        if (_selAnchor < 0) _selAnchor = instrLine;
+        _surface.InvalidateVisual();
+        ulong va = _result.Linear.VaAt(instrLine);
+        BreakpointToggleRequested?.Invoke(va);
+        SelectionChanged?.Invoke(va);
+    }
+
     /// <summary>Extend the selection to the line under the cursor (drag), auto-scrolling at the edges.</summary>
     private void DragTo(Point p)
     {
@@ -801,6 +827,15 @@ public sealed class LinearDisassemblyView : Grid
                 e.Handled = true;
                 return;
             }
+            // A click in the left gutter margin is the breakpoint strip: a single-click toggles a breakpoint on
+            // that code line. Consume it so the margin never selects or follows (and a double-click can't slip a
+            // follow through). Header/label/data rows aren't breakpoint rows, so they fall through to OnClick.
+            if (_owner.InBreakpointGutter(p, out long bpLine))
+            {
+                if (e.ClickCount == 1) _owner.ToggleBreakpointAtLine(bpLine);
+                e.Handled = true;
+                return;
+            }
             _owner.OnClick(p, extend: (Keyboard.Modifiers & ModifierKeys.Shift) != 0);
             if (e.ClickCount == 2) _owner.FollowCaret();
             else { _owner._dragging = true; CaptureMouse(); }
@@ -812,7 +847,9 @@ public sealed class LinearDisassemblyView : Grid
             var p = e.GetPosition(this);
             if (_owner._draggingDivider && e.LeftButton == MouseButtonState.Pressed) { _owner.SetDisasmGap(p.X); return; }
             if (_owner._dragging && e.LeftButton == MouseButtonState.Pressed) { _owner.DragTo(p); return; }
-            Cursor = _owner.NearDivider(p.X) ? Cursors.SizeWE : Cursors.Arrow;
+            Cursor = _owner.NearDivider(p.X) ? Cursors.SizeWE
+                   : _owner.InBreakpointGutter(p, out _) ? Cursors.Hand   // breakpoint margin
+                   : Cursors.Arrow;
         }
 
         protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)

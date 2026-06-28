@@ -54,4 +54,16 @@ public sealed class XrefDatabase
 
     public bool HasRefsTo(ulong va) => _toTarget.ContainsKey(va);
     public int TargetCount => _toTarget.Count;
+
+    /// <summary>A copy with every reference's from/to shifted by <paramref name="slide"/> — lets the live
+    /// (ASLR-rebased) analysis reuse the static cross-references instead of starting empty.</summary>
+    public XrefDatabase Rebased(ulong slide)
+    {
+        var db = new XrefDatabase();
+        if (slide == 0) { foreach (var list in _toTarget.Values) foreach (var x in list) db.Add(x.From, x.To, x.Kind); return db; }
+        foreach (var list in _toTarget.Values)
+            foreach (var x in list)
+                db.Add(x.From + slide, x.To + slide, x.Kind);
+        return db;
+    }
 }

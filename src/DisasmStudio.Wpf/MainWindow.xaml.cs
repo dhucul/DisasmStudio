@@ -71,6 +71,9 @@ public partial class MainWindow : Window
     private ICollectionView? _exportsView;
     private string? _lastDroppedPath;
     private long _lastDropTick;
+    private int _liveStringsGen;             // bumped per live-strings scan; a stale background result is dropped
+    private volatile bool _liveStringsScanning;   // a live-strings scan is in flight (don't pile up another)
+    private bool _liveStringsPending;        // a stop arrived mid-scan; rescan once the in-flight scan finishes (UI thread only)
 
     public MainWindow()
     {
@@ -380,6 +383,51 @@ public partial class MainWindow : Window
         _nav.Navigate(b.Va);
     }
 
+    // ---- live strings ----
+
+    private bool StringsTabVisible => SideTabs.SelectedItem is TabItem { Header: "Strings" };
+
+    /// <summary>While stopped in a live session, re-scan the debuggee's memory for strings and show them in the
+    /// Strings panel (replacing the static set) — so decrypted/unpacked strings that aren't in the file appear.
+    /// Scanned off the UI thread (the engine is frozen at the stop); a generation guard drops a result a newer
+    /// stop or session-end has superseded, and an in-flight flag avoids piling up scans during fast stepping.</summary>
+    private void RefreshLiveStrings()
+    {
+        if (!_dbgViewLive || _dbg is not { IsStopped: true } || _dbg.LiveResult is not { } live) return;
+        if (_liveStringsScanning) { _liveStringsPending = true; return; }   // a stop landed mid-scan → rescan after it finishes
+        _liveStringsScanning = true;
+        _liveStringsPending = false;
+        var img = live.Image;
+        int gen = ++_liveStringsGen;
+        Task.Run(() =>
+        {
+            List<FoundString>? found = null;
+            try { found = StringScanner.Scan(img, minLength: 4, maxResults: MaxStringRows, useVirtualSize: true); }
+            catch { /* a memory read raced a resume / exit */ }
+            finally { _liveStringsScanning = false; }
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (found is not null && gen == _liveStringsGen && _dbgViewLive)   // else superseded / raced exit
+                {
+                    _strings = new ObservableCollection<StringItem>(found.Take(MaxStringRows).Select(s => new StringItem(s)));
+                    _stringsView = CollectionViewSource.GetDefaultView(_strings);
+                    _stringsView.Filter = StringFilterPredicate;
+                    StringList.ItemsSource = _stringsView;
+                    StatusText.Text = $"Live strings: {_strings.Count:N0} in process memory @ {_dbg?.CurrentIp:X}";
+                }
+                if (_liveStringsPending && StringsTabVisible) RefreshLiveStrings();   // a stop arrived during the scan
+            });
+        });
+    }
+
+    /// <summary>When the user switches to the Strings tab at a stop, refresh it to the current live strings.
+    /// Reads the tab off <paramref name="e"/> (not the named field, which may be unset during init) and ignores
+    /// SelectionChanged bubbling up from the inner list boxes.</summary>
+    private void OnSideTabChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.Source is TabControl { SelectedItem: TabItem { Header: "Strings" } }) RefreshLiveStrings();
+    }
+
     private void OnBreakpointActivate(object sender, MouseButtonEventArgs e) => NavigateToBreakpoint();
     private void OnBreakpointJump(object sender, RoutedEventArgs e) => NavigateToBreakpoint();
     private void OnBreakpointRemove(object sender, RoutedEventArgs e) { if (BreakpointList.SelectedItem is BreakpointItem b) OnBreakpointToggle(b.Va); }
@@ -668,6 +716,7 @@ public partial class MainWindow : Window
         Linear.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();   // now showing live (rebased) breakpoints; reflects the pre-run set just armed
+        if (StringsTabVisible) RefreshLiveStrings();   // rescan process memory for strings if the user is viewing them
         if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp);   // graph follows RIP too
         string? name = _result?.NameFor(_dbg.CurrentIp);
         string extra = _dbg.LastReason == StopReason.Exception ? $" (code 0x{_dbg.LastExceptionCode:X8})" : "";

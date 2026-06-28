@@ -23,6 +23,8 @@ internal static class HelpDialog
             ("F8", "Step over"),
             ("Shift+F11", "Step out"),
             ("F2", "Toggle breakpoint on the caret instruction"),
+            ("Click the gutter", "Toggle a breakpoint on that instruction (the left margin)"),
+            ("Breakpoints panel", "Lists breakpoints; double-click to jump, Delete to remove"),
             ("Ctrl+Z", "Undo the last patch"),
             ("(toolbar)", "Pause · Stop · Restart · Attach… · Exceptions…"),
         ]),
