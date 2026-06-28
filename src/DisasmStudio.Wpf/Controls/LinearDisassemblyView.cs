@@ -64,6 +64,8 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? BreakpointToggleRequested;
     public event Action<ulong>? RunToCursorRequested;
     public event Action<ulong>? CaptureFunctionRequested;
+    /// <summary>A transient one-line status message (e.g. why "Follow target" did nothing).</summary>
+    public event Action<string>? StatusRequested;
 
     /// <summary>Set the debuggee's current instruction (highlighted + centred); 0 clears it.</summary>
     public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va); else _surface.InvalidateVisual(); }
@@ -400,12 +402,31 @@ public sealed class LinearDisassemblyView : Grid
     private void FollowCaret()
     {
         if (_result is null || _dis is null || _caretInstr < 0) return;
-        if (_result.Linear.IsDataAt(_caretInstr)) return;   // data line — nothing to follow
+        if (_result.Linear.IsDataAt(_caretInstr)) { StatusRequested?.Invoke("Follow: data line — nothing to follow."); return; }
         ulong va = _result.Linear.VaAt(_caretInstr);
-        if (!_dis.TryDecodeAt(va, out var instr)) return;
-        if (FlowAnalysis.DirectBranchTarget(instr) is ulong t && _result.Image.IsMappedVa(t))
-            NavigateRequested?.Invoke(t);
+        if (!_dis.TryDecodeAt(va, out var instr)) { StatusRequested?.Invoke("Follow: this line can't be decoded."); return; }
+        if (FlowAnalysis.DirectBranchTarget(instr) is ulong t)
+        {
+            if (_result.Image.IsMappedVa(t)) { NavigateRequested?.Invoke(t); StatusRequested?.Invoke($"Followed → {NameOrAddr(t)}"); }
+            else StatusRequested?.Invoke($"Follow: target {t:X} is outside the loaded image.");
+            return;
+        }
+        StatusRequested?.Invoke(instr.FlowControl is FlowControl.IndirectBranch or FlowControl.IndirectCall
+            ? "Follow: indirect target — can't be resolved statically (run the debugger to follow it live)."
+            : "Follow: no branch or call on this line.");
     }
+
+    /// <summary>The direct branch/call target under the caret, or null when this line has nothing to follow
+    /// (data, an indirect/non-branch instruction, or a target outside the image).</summary>
+    private ulong? CaretFollowTarget()
+    {
+        if (_result is null || _dis is null || _caretInstr < 0 || _result.Linear.IsDataAt(_caretInstr)) return null;
+        ulong va = _result.Linear.VaAt(_caretInstr);
+        if (!_dis.TryDecodeAt(va, out var instr)) return null;
+        return FlowAnalysis.DirectBranchTarget(instr) is ulong t && _result.Image.IsMappedVa(t) ? t : null;
+    }
+
+    private string NameOrAddr(ulong va) => _result?.NameFor(va) is { Length: > 0 } n ? n : va.ToString("X" + _addrDigits);
 
     private ulong CaretVa => _result is not null && _caretInstr >= 0 ? _result.Linear.VaAt(_caretInstr) : 0;
 
@@ -727,6 +748,14 @@ public sealed class LinearDisassemblyView : Grid
         saveAsm.Click += (_, _) => { if (CaretVa != 0) SaveAsmRequested?.Invoke(CaretVa); };
         var follow = new MenuItem { Header = "Follow target", InputGestureText = "Enter" };
         follow.Click += (_, _) => FollowCaret();
+        // Reflect the caret's actual target each time the menu opens: show where Follow goes, and grey it
+        // out when there's nothing to follow — so it's clear up front whether the action will do anything.
+        menu.Opened += (_, _) =>
+        {
+            ulong? t = CaretFollowTarget();
+            follow.IsEnabled = t is not null;
+            follow.Header = t is ulong tt ? $"Follow target → {NameOrAddr(tt)}" : "Follow target";
+        };
         var patch = new MenuItem { Header = "Patch instruction…" };
         patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2" };

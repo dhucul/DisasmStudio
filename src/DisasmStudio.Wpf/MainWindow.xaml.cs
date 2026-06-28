@@ -41,6 +41,10 @@ public partial class MainWindow : Window
     private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
 
     private DebugSession? _dbg;
+    // Breakpoints toggled on the static listing before (or between) debug runs, kept as static VAs. They are
+    // armed at the first stop of each session (rebased by the live ASLR slide) and mirror live toggles, so the
+    // set persists across Run / Restart. The gutter reads it whenever the view isn't showing live addresses.
+    private readonly HashSet<ulong> _pendingBreakpoints = [];
     private ExceptionFilter _exceptionFilter = ExceptionStore.Load();   // persisted x64dbg-style exception policy (swapped wholesale on edit)
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
@@ -98,9 +102,14 @@ public partial class MainWindow : Window
         Decompiler.SelectionChanged += OnAddressFocused;
         Linear.SaveAsmRequested += SaveFunctionAsm;
         Decompiler.SaveCRequested += SaveFunctionC;
-        Linear.BreakpointToggleRequested += va => { _dbg?.ToggleBreakpoint(va); Linear.Refresh(); Debug.Refresh(); };
+        Linear.BreakpointToggleRequested += OnBreakpointToggle;
+        // Gutter dots come from the user breakpoint set (not the raw engine list, which during a capture also
+        // holds internal capture breakpoints). `va - LiveSlide` maps the shown address back to its static VA —
+        // LiveSlide is 0 unless the listing is showing live addresses — so this is correct before and during a run.
+        Linear.IsBreakpointAt = va => _pendingBreakpoints.Contains(va - LiveSlide);
         Linear.RunToCursorRequested += va => _dbg?.RunToCursor(va);
         Linear.CaptureFunctionRequested += CaptureFunctionAt;
+        Linear.StatusRequested += msg => StatusText.Text = msg;
         Debug.NavigateRequested += va => _nav.Navigate(va);
         PreviewKeyDown += OnWindowPreviewKeyDown;
     }
@@ -315,6 +324,67 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>ASLR slide of the live debuggee relative to the static image (live base − static base), or 0
+    /// when the view isn't showing live addresses.</summary>
+    private ulong LiveSlide => _dbgViewLive && _dbg?.LiveResult is { } lr && _image is not null ? lr.Image.ImageBase - _image.ImageBase : 0;
+
+    // F2 / gutter / context-menu breakpoint toggle. While the listing shows live (rebased) addresses the
+    // engine is the source of truth; otherwise the address is a static VA we stash in the pre-run set. Either
+    // way the static set is kept in sync, so breakpoints survive across Run / Restart and stay shown after exit.
+    private void OnBreakpointToggle(ulong va)
+    {
+        if (_dbgViewLive && _dbg is { } d)
+        {
+            d.ToggleBreakpoint(va);                       // va is a live, rebased VA
+            ulong sva = va - LiveSlide;                   // mirror as a static VA so it persists across runs
+            if (d.HasBreakpoint(va)) _pendingBreakpoints.Add(sva); else _pendingBreakpoints.Remove(sva);
+        }
+        else if (!_pendingBreakpoints.Remove(va))         // pre-run / before the first stop: va is a static VA
+            _pendingBreakpoints.Add(va);
+        Linear.Refresh();
+        Debug.Refresh();
+        RefreshBreakpointList();
+    }
+
+    /// <summary>Arm the pre-run breakpoints on the live engine once the image is mapped (called at the first
+    /// stop), translating each static VA by the live ASLR slide.</summary>
+    private void ApplyPendingBreakpoints()
+    {
+        if (_dbg is null || _pendingBreakpoints.Count == 0) return;
+        ulong slide = LiveSlide;
+        foreach (var sva in _pendingBreakpoints) _dbg.Engine.SetBreakpoint(sva + slide);
+    }
+
+    // ---- breakpoints side list ----
+
+    /// <summary>Rebuild the always-visible Breakpoints side list. It is driven by the user's breakpoint set —
+    /// not the raw engine list, which during a "Capture all" also holds the thousands of internal capture
+    /// breakpoints — so it stays a clean view of breakpoints the user set. Addresses are rebased to live VAs
+    /// while debugging so a double-click lands on the right line, and symbols resolve against the shown analysis.</summary>
+    private void RefreshBreakpointList()
+    {
+        if (BreakpointList is null) return;   // not yet built (called during construction)
+        ulong slide = LiveSlide;              // 0 unless the listing is showing live addresses
+        var names = _dbgViewLive ? _dbg?.LiveResult : _result;
+        BreakpointList.ItemsSource = _pendingBreakpoints
+            .Select(sva => sva + slide)
+            .OrderBy(va => va)
+            .Select(va => new BreakpointItem(va, names?.NameFor(va) ?? ""))
+            .ToList();
+    }
+
+    private void NavigateToBreakpoint()
+    {
+        if (BreakpointList.SelectedItem is not BreakpointItem b) return;
+        CenterTabs.SelectedIndex = 0;   // ensure the linear view is the one shown
+        _nav.Navigate(b.Va);
+    }
+
+    private void OnBreakpointActivate(object sender, MouseButtonEventArgs e) => NavigateToBreakpoint();
+    private void OnBreakpointJump(object sender, RoutedEventArgs e) => NavigateToBreakpoint();
+    private void OnBreakpointRemove(object sender, RoutedEventArgs e) { if (BreakpointList.SelectedItem is BreakpointItem b) OnBreakpointToggle(b.Va); }
+    private void OnBreakpointListKey(object sender, KeyEventArgs e) { if (e.Key == Key.Delete && BreakpointList.SelectedItem is BreakpointItem b) { OnBreakpointToggle(b.Va); e.Handled = true; } }
+
     private void BeginDebug(Action<DebugSession> start)
     {
         _savedResult = _result;
@@ -327,7 +397,6 @@ public partial class MainWindow : Window
         _dbg.Output += m => StatusText.Text = m;
         Debug.SetSession(_dbg);
         DebugDock.Visibility = Visibility.Visible;
-        Linear.IsBreakpointAt = va => _dbg?.HasBreakpoint(va) ?? false;
         _dbg.Engine.ExceptionFilter = _exceptionFilter;   // apply the persisted exception policy to this session
         _dbg.Engine.StopAtLoaderBreakpoint = LoaderBreakCheck.IsChecked == true;   // break before the entry point
         _dbg.Engine.HideFromDebugger = HideDebuggerCheck.IsChecked == true;        // anti-anti-debug layer
@@ -592,11 +661,13 @@ public partial class MainWindow : Window
             Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
             CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true; DerefCheck.IsEnabled = true;
             RestartBtn.IsEnabled = true;
+            ApplyPendingBreakpoints();   // arm breakpoints set on the static listing before launch, now that memory exists
         }
         DbgRunBtn.Content = "▶ Continue"; DbgRunBtn.IsEnabled = true; SetStepButtons(true);   // Run doubles as Continue (F5) during a session
         Linear.SetCurrentIp(_dbg.CurrentIp);
         Linear.Refresh();
         Debug.Refresh();
+        RefreshBreakpointList();   // now showing live (rebased) breakpoints; reflects the pre-run set just armed
         if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp);   // graph follows RIP too
         string? name = _result?.NameFor(_dbg.CurrentIp);
         string extra = _dbg.LastReason == StopReason.Exception ? $" (code 0x{_dbg.LastExceptionCode:X8})" : "";
@@ -613,9 +684,8 @@ public partial class MainWindow : Window
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false; DerefCheck.IsEnabled = false;
         RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run"; DbgRunBtn.IsEnabled = true; SetStepButtons(false);   // re-enable for a fresh Run
         Linear.SetCurrentIp(0);
-        Linear.IsBreakpointAt = null;
         Hex.WriteByteAt = null;
-        _dbg = null; _dbgViewLive = false;
+        _dbg = null; _dbgViewLive = false;   // gutter now reads the static pre-run set again (IsBreakpointAt stays wired)
         Graph.Clear(); _graphFn = null;
         Debug.SetSession(null);
         DebugDock.Visibility = Visibility.Collapsed;
@@ -627,6 +697,7 @@ public partial class MainWindow : Window
             Linear.SetResult(_result);
             Hex.SetImage(_image);
         }
+        RefreshBreakpointList();   // back to the static pre-run set (kept in sync, so it persists for the next Run)
         StatusText.Text = $"Debuggee exited (code {code}).";
 
         if (_restartPending)
@@ -1145,6 +1216,7 @@ public partial class MainWindow : Window
             // lists and navigation visible until the new results replace them (no empty flash).
             _result = null;
             _dllDebug = null;   // a stale DLL-host config must not leak into a later EXE's Restart
+            _pendingBreakpoints.Clear();   // breakpoints belong to the old file's addresses
             _nav.Reset();
             _changeStack.Clear();
             ClearLists();
@@ -1253,6 +1325,7 @@ public partial class MainWindow : Window
         ResSaveBtn.IsEnabled = false;
         _selectedResource = null;
         ResHeader.Text = result.Image.Resources is { Roots.Count: > 0 } ? "Select a resource" : "No resources";
+        RefreshBreakpointList();
     }
 
     private void ClearLists()
@@ -1268,6 +1341,7 @@ public partial class MainWindow : Window
         _selectedResource = null;
         ResHeader.Text = "Select a resource";
         XrefList.ItemsSource = null;
+        BreakpointList.ItemsSource = null;
         Graph.Clear();
         _graphFn = null;
         Decompiler.Clear();

@@ -45,6 +45,16 @@ public sealed class ExportItem(NamedSymbol s)
     public string Name => Demangler.Demangle(s.Name);
 }
 
+/// <summary>Row in the Breakpoints list. <see cref="Va"/> is a static VA before/between runs and a live
+/// (rebased) VA during a session — the same address space the listing is showing, so a double-click navigates
+/// straight to it. <see cref="Label"/> is the resolved symbol (and, for hardware breakpoints, the kind).</summary>
+public sealed class BreakpointItem(ulong va, string label)
+{
+    public ulong Va => va;
+    public string Address => va.ToString("X");
+    public string Label => label;
+}
+
 /// <summary>Row in the Xrefs list.</summary>
 public sealed class XrefItem(Xref x)
 {

@@ -212,6 +212,32 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
+                    <TabItem Header="Breakpoints">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextMuted}" FontSize="11"
+                                       Text="Breakpoints set with F2 or the gutter (before Run or during a session). Double-click to jump to it in the listing; press Delete or right-click to remove." />
+                            <ListBox x:Name="BreakpointList" MouseDoubleClick="OnBreakpointActivate"
+                                     KeyDown="OnBreakpointListKey"
+                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                <ListBox.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Jump to breakpoint" Click="OnBreakpointJump" />
+                                        <MenuItem Header="Remove breakpoint" Click="OnBreakpointRemove" />
+                                    </ContextMenu>
+                                </ListBox.ContextMenu>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="120" />
+                                            <TextBlock Text="{Binding Label}" Foreground="{StaticResource TextPrimary}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                    </TabItem>
                     <TabItem Header="Sections">
                         <DockPanel>
                             <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
