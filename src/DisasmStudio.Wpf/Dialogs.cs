@@ -240,7 +240,13 @@ internal static class Dialogs
     public static uint? AskProcess(Window owner, int expectBitness)
     {
         var mono = new FontFamily("Cascadia Mono, Consolas");
-        string want = expectBitness == 64 ? "x64" : "x86";
+        // expectBitness 0 = no file open: the process's own image is analyzed after attach, so any arch is fine.
+        string hint = expectBitness switch
+        {
+            64 => "the open binary is x64, so match the Arch column",
+            32 => "the open binary is x86, so match the Arch column",
+            _  => "no file is open — DisasmStudio will analyze the process image after you attach",
+        };
 
         var grid = new DataGrid
         {
@@ -291,7 +297,7 @@ internal static class Dialogs
         filterRow.Children.Add(filter);
 
         var header = new StackPanel { Margin = new Thickness(16, 16, 16, 0) };
-        header.Children.Add(Label($"Select a process to attach to — the open binary is {want}, so match the Arch column. Filter by name, pid or path:"));
+        header.Children.Add(Label($"Select a process to attach to — {hint}. Filter by name, pid or path:"));
         header.Children.Add(filterRow);
 
         var win = new Window

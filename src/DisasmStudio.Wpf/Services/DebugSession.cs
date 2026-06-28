@@ -1,6 +1,7 @@
 using System.Windows.Threading;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
+using DisasmStudio.Core.Formats;
 using DisasmStudio.Debug;
 
 namespace DisasmStudio.Wpf.Services;
@@ -13,7 +14,13 @@ namespace DisasmStudio.Wpf.Services;
 public sealed class DebugSession
 {
     private readonly Dispatcher _ui;
-    private readonly AnalysisResult _static;
+    private readonly AnalysisResult? _static;   // null when attaching with no file open
+    private AnalysisResult? _synthStatic;        // analysis synthesized from the live image (attach-without-file)
+    private bool _synthAttempted;                // synthesize once, even if it fails, so stops don't re-analyze
+
+    /// <summary>The static analysis the live view is rebased from: the loaded file's, or — when attaching with
+    /// no file open — one synthesized from the process's own image on the first stop.</summary>
+    private AnalysisResult? BaseStatic => _static ?? _synthStatic;
 
     public DebuggerEngine Engine { get; } = new();
     public AnalysisResult? LiveResult { get; private set; }
@@ -45,7 +52,7 @@ public sealed class DebugSession
     /// capture (already stopped, but its edges are retained) so the handler can snapshot them.</summary>
     public event Action<FunctionCapture>? CaptureFinished;
 
-    public DebugSession(Dispatcher ui, AnalysisResult staticResult)
+    public DebugSession(Dispatcher ui, AnalysisResult? staticResult)
     {
         _ui = ui; _static = staticResult;
         Engine.Stopped += OnStopped;
@@ -85,7 +92,34 @@ public sealed class DebugSession
             if (cap.ResumeAfter && s.Reason == StopReason.Paused) { Engine.Go(); return; }
         }
 
+        // Attach-without-file: build the static analysis from the live image once, here on the engine thread
+        // (the heavy analysis must not run on the UI thread), so OnStoppedUi can rebase it like a file load.
+        // Attempted exactly once — on failure we don't re-analyze on every later stop.
+        if (_static is null && !_synthAttempted && Engine.ImageBase != 0)
+        {
+            _synthAttempted = true;
+            _ui.BeginInvoke(() => Output?.Invoke("Analyzing attached process image…"));
+            _synthStatic = SynthesizeStaticFromProcess();
+        }
+
         _ui.BeginInvoke(() => OnStoppedUi(s));
+    }
+
+    /// <summary>Dump the live main image and run the standard analyzer on it, so an attach with no file open
+    /// still gets functions, strings, xrefs and disassembly. Runs on the engine thread (the debuggee is frozen
+    /// at the stop). Best-effort: returns null if the image can't be dumped or parsed (non-PE / hostile).
+    /// Imports/API annotations are limited — the memory image's import directory isn't reconstructed here.</summary>
+    private AnalysisResult? SynthesizeStaticFromProcess()
+    {
+        try
+        {
+            var bytes = Engine.DumpImage(Engine.ImageBase, out _);
+            string path = Engine.Modules.FirstOrDefault(m => m.Base == Engine.ImageBase)?.Path ?? "(attached process)";
+            return PeMemoryImage.TryLoadFromBytes(bytes, Engine.ImageBase, path, out var img)
+                ? AnalysisEngine.Analyze(img)
+                : null;
+        }
+        catch { return null; }
     }
 
     private void OnStoppedUi(StopInfo s)
@@ -93,9 +127,9 @@ public sealed class DebugSession
         // Build the rebased live analysis once the debugged module's base is known. For a launched EXE that is
         // the process base, set at process-create (so true on the first stop); for a DLL hosted in an EXE the
         // slide is only known when the DLL maps, so Engine.ImageBase stays 0 until then — defer the build.
-        if (LiveResult is null && Engine.ImageBase != 0)
+        if (LiveResult is null && Engine.ImageBase != 0 && BaseStatic is { } baseStatic)
         {
-            LiveResult = LiveAnalysis.Build(Engine, _static).Result;
+            LiveResult = LiveAnalysis.Build(Engine, baseStatic).Result;
             LiveDecoder = new LiveDisassembler(Engine);
         }
         Registers = Engine.GetRegisters();
@@ -126,7 +160,7 @@ public sealed class DebugSession
     /// <summary>Start capturing function I/O. <paramref name="funcVa"/> is 0 for "all functions", else a single one.</summary>
     public FunctionCapture? StartCapture(ulong funcVa, string? logPath, bool captureOnce, bool argsOnly, bool annotate)
     {
-        if (LiveResult is null) return null;
+        if (LiveResult is null || BaseStatic is not { } baseStatic) return null;
         var deref = new DereferenceResolver(Engine, LiveResult.Names, Engine.Modules);
         // Gate breakpoint arming on "this VA is a genuine code instruction start" per the analysis's linear
         // index — so capture never writes a 0xCC into a jump/lookup table that sits in an executable section.
@@ -139,8 +173,8 @@ public sealed class DebugSession
         // Data tables / pointer-scan false positives satisfy none of these, so they stay excluded. (A byte-
         // level "looks like code" heuristic was tried and removed: common opcodes are common byte values, so
         // table data decodes to a plausible first instruction and slipped through, re-corrupting the image.)
-        ulong slide = LiveResult.Image.ImageBase - _static.Image.ImageBase;
-        var xrefs = _static.Xrefs;
+        ulong slide = LiveResult.Image.ImageBase - baseStatic.Image.ImageBase;
+        var xrefs = baseStatic.Xrefs;
         var symVas = new HashSet<ulong>();
         foreach (var s in LiveResult.Image.Symbols) symVas.Add(s.Va);
         var pdata = new HashSet<ulong>(LiveResult.Image.FunctionStarts);

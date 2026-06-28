@@ -87,14 +87,19 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   unit (generated preamble declaring the registers as integer globals, typed pointer casts, an
   indirect-call helper, forward prototypes) that compiles under MSVC (`cl /c`). It's an approximation
   for inspection/tweaking, not a faithful rebuild.
-- **Debugger (x86/x64, live):** launch the loaded PE under the debugger or *Attach…* to a running
-  process by PID. The disassembly switches to **live process memory** (so packed/self-modifying code is
-  shown as it executes), with the current instruction highlighted and followed. Run/Continue (F5),
-  Step Into (F7), Step Over (F8), Step Out (Shift+F11), Pause, Stop, and Run-to-cursor; software
-  breakpoints (F2 / gutter) and hardware breakpoints + watchpoints (Dr0–3). A bottom panel shows
-  **registers** (editable, with x64dbg-style **dereferencing** — `r9 → start`, `rcx → "C:\\…"`),
-  the **stack** and a **memory dump** (both dereferenced), the **call stack**, and breakpoints,
-  threads and modules. 32-bit targets are debugged from the 64-bit host via WOW64.
+- **Debugger (x86/x64, live):** launch the loaded PE under the debugger, or *Attach…* to a running
+  process picked from a **filterable list** (pid, name, arch, window title, image path). Attaching
+  **does not require a file to be open** — with no binary loaded the debugger analyzes the process's own
+  image (dumped from memory) so the disassembly, functions, strings and xrefs appear; with a binary open
+  its static analysis is rebased onto the process instead. The disassembly shows **live process memory**
+  (so packed/self-modifying code is shown as it executes), with the current instruction highlighted and
+  followed. Run/Continue (F5), Step Into (F7), Step Over (F8), Step Out (Shift+F11), Pause, Stop,
+  **Detach** (stop debugging but leave the program running — all breakpoints and hide-layer patches are
+  removed and the debug registers cleared first), and Run-to-cursor; software breakpoints (F2 / gutter)
+  and hardware breakpoints + watchpoints (Dr0–3). A bottom panel shows **registers** (editable, with
+  x64dbg-style **dereferencing** — `r9 → start`, `rcx → "C:\\…"`), the **stack** and a **memory dump**
+  (both dereferenced), the **call stack**, and breakpoints, threads and modules. 32-bit targets are
+  debugged from the 64-bit host via WOW64.
 - **Debug a DLL:** a DLL can't be launched on its own, so pressing Run on a loaded DLL opens a small
   *Debug DLL* dialog that hosts it in an EXE (the way x64dbg uses a loaddll stub). The default host is
   the bitness-matched OS `rundll32.exe`; you can browse to a custom host EXE (e.g. the real consumer

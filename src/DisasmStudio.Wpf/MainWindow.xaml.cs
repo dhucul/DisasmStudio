@@ -265,8 +265,9 @@ public partial class MainWindow : Window
     private void OnAttach(object sender, RoutedEventArgs e)
     {
         if (_dbg is not null) { MessageBox.Show(this, "A debug session is already active.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (_result is null) { MessageBox.Show(this, "Open the target's binary first so the disassembly matches.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (Dialogs.AskProcess(this, _result.Image.Bitness) is uint pid) BeginDebug(d => d.Attach(pid));
+        // No file required: with a binary open we rebase its analysis onto the process; without one we analyze
+        // the process's own image after attaching. The bitness hint is 0 ("unknown") when nothing is open.
+        if (Dialogs.AskProcess(this, _result?.Image.Bitness ?? 0) is uint pid) BeginDebug(d => d.Attach(pid));
     }
 
     private async void OnUnpack(object sender, RoutedEventArgs e)
@@ -461,7 +462,7 @@ public partial class MainWindow : Window
     {
         _savedResult = _result;
         _dbgViewLive = false;
-        _dbg = new DebugSession(Dispatcher, _result!);
+        _dbg = new DebugSession(Dispatcher, _result);   // _result may be null: attach with no file open
         _dbg.Stopped += OnDbgStopped;
         _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); };   // no continue/step while running
         _dbg.Exited += OnDbgExited;
@@ -735,8 +736,15 @@ public partial class MainWindow : Window
             Hex.SetImage(_result.Image);
             Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
             CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true; DerefCheck.IsEnabled = true;
-            RestartBtn.IsEnabled = true;
+            RestartBtn.IsEnabled = _image is not null;   // a fileless attach has no binary to relaunch
             ApplyPendingBreakpoints();   // arm breakpoints set on the static listing before launch, now that memory exists
+            if (_image is null)   // attach-without-file: label the window from the analyzed process image
+            {
+                var img = _result.Image;
+                string fn = Path.GetFileName(img.FilePath);
+                Title = $"DisasmStudio — {fn} (attached)";
+                FileInfo.Text = $"{fn}  ·  attached  ·  {img.ArchName}  ·  base {img.ImageBase:X}";
+            }
         }
         DbgRunBtn.Content = "▶ Continue"; DbgRunBtn.IsEnabled = true; SetStepButtons(true);   // Run doubles as Continue (F5) during a session
         Linear.SetCurrentIp(_dbg.CurrentIp);
@@ -777,6 +785,17 @@ public partial class MainWindow : Window
             PopulateLists(_result);
             Linear.SetResult(_result);
             Hex.SetImage(_image);
+        }
+        else   // attach-without-file: no prior analysis to return to — reset to the empty state
+        {
+            _result = null; _savedResult = null;
+            _funcStarts = [];
+            ClearLists();
+            Linear.SetResult(null);
+            Hex.SetImage(null);
+            _nav.Reset();
+            Title = "DisasmStudio";
+            FileInfo.Text = "";
         }
         RefreshBreakpointList();   // back to the static pre-run set (kept in sync, so it persists for the next Run)
     }
@@ -1148,9 +1167,11 @@ public partial class MainWindow : Window
     // ---- export to .asm / .c ----
     private async void OnSaveAsm(object sender, RoutedEventArgs e)
     {
-        if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Save ASM", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        // Works on _result (the live analysis when fileless-attached), so only that is required — the default
+        // filename comes from _result.Image (the file, or the attached process's module path).
+        if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save ASM", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         var dlg = new SaveFileDialog { Title = "Save disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
-            FileName = Path.GetFileNameWithoutExtension(_image.FilePath) + ".asm" };
+            FileName = ExportBaseName() + ".asm" };
         if (dlg.ShowDialog(this) != true) return;
         var r = _result;
         await RunExport(dlg.FileName, "disassembly", (w, p, ct) => SourceExporter.WriteAsm(w, r, p, ct));
@@ -1158,12 +1179,12 @@ public partial class MainWindow : Window
 
     private async void OnSaveC(object sender, RoutedEventArgs e)
     {
-        if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         var dlg = new SaveFileDialog
         {
             Title = "Save C",
             Filter = "Pseudo-C, readable|*.c|Compilable C|*.c|Text|*.txt|All files|*.*",
-            FileName = Path.GetFileNameWithoutExtension(_image.FilePath) + ".c",
+            FileName = ExportBaseName() + ".c",
         };
         if (dlg.ShowDialog(this) != true) return;
         var r = _result;
@@ -1171,6 +1192,17 @@ public partial class MainWindow : Window
         await RunExport(dlg.FileName, comp ? "compilable C" : "Pseudo-C",
             comp ? (w, p, ct) => SourceExporter.WriteCompilableC(w, r, p, ct)
                  : (w, p, ct) => SourceExporter.WriteC(w, r, p, ct));
+    }
+
+    /// <summary>Default filename base for whole-program exports: the loaded file's name, or the attached
+    /// process's module name when fileless. Falls back to "disasm" for the synthesized "(attached process)"
+    /// placeholder (no real module path), and replaces any invalid filename characters.</summary>
+    private string ExportBaseName()
+    {
+        string name = Path.GetFileNameWithoutExtension(_result?.Image.FilePath ?? "");
+        if (string.IsNullOrWhiteSpace(name) || name.StartsWith('(')) return "disasm";
+        foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+        return name;
     }
 
     /// <summary>Run a whole-program export on a background thread, streaming to disk with progress.</summary>

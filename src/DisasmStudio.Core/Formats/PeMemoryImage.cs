@@ -45,6 +45,21 @@ public sealed class PeMemoryImage : IBinaryImage
         catch { return false; }
     }
 
+    /// <summary>Build a memory-image view directly from an in-memory dump (e.g. <c>DebuggerEngine.DumpImage</c>),
+    /// with no file on disk. <paramref name="displayPath"/> is what the UI shows as the "file" (the process's
+    /// module path, or a placeholder). Returns false if the bytes aren't a parseable PE.</summary>
+    public static bool TryLoadFromBytes(byte[] bytes, ulong? imageBaseOverride, string displayPath, out PeMemoryImage image)
+    {
+        image = null!;
+        try
+        {
+            if (bytes is null || bytes.Length == 0 || !PeView.TryParse(bytes, out var view)) return false;
+            image = new PeMemoryImage(displayPath, bytes, view, imageBaseOverride);
+            return true;
+        }
+        catch { return false; }
+    }
+
     public string FilePath { get; }
     public BinaryFormat Format => BinaryFormat.Pe;
     public string FormatName => "PE memory";
