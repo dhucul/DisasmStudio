@@ -35,6 +35,8 @@ public sealed class DebugSession
     public event Action? Stopped;
     public event Action? Running;
     public event Action<int>? Exited;
+    /// <summary>Raised when the debugger detached but left the process running (see <see cref="Detach"/>).</summary>
+    public event Action? Detached;
     public event Action<string>? Output;
 
     /// <summary>Raised (on the UI thread) when a capture has finished draining and been torn down on the
@@ -49,6 +51,7 @@ public sealed class DebugSession
         Engine.Stopped += OnStopped;
         Engine.Running += () => _ui.BeginInvoke(() => { IsStopped = false; Running?.Invoke(); });
         Engine.Exited += code => _ui.BeginInvoke(() => { IsStopped = false; Exited?.Invoke(code); });
+        Engine.Detached += () => _ui.BeginInvoke(() => { IsStopped = false; Detached?.Invoke(); });
         Engine.Output += m => _ui.BeginInvoke(() => Output?.Invoke(m));
     }
 
@@ -111,6 +114,8 @@ public sealed class DebugSession
     public void StepOut() => Engine.StepOut();
     public void Pause() => Engine.Pause();
     public void Stop() => Engine.Stop();
+    /// <summary>Detach the debugger but keep the debuggee running. Only meaningful while stopped.</summary>
+    public void Detach() => Engine.Detach();
     public void RunToCursor(ulong va) => Engine.RunToCursor(va);
 
     public bool HasBreakpoint(ulong va) => Engine.HasBreakpoint(va);

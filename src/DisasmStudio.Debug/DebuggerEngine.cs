@@ -21,6 +21,9 @@ public sealed partial class DebuggerEngine
     /// <summary>Raised on EXIT_PROCESS_DEBUG_EVENT before the debug event is continued.</summary>
     public event Action<int>? ProcessExiting;
     public event Action<int>? Exited;
+    /// <summary>Raised when the debugger has detached but left the debuggee running (see <see cref="Detach"/>).
+    /// Distinct from <see cref="Exited"/> so the UI can report "still running" rather than an exit code.</summary>
+    public event Action? Detached;
     public event Action<string>? Output;
     public event Action? ModulesChanged;
     public event Action? ThreadsChanged;
@@ -95,6 +98,7 @@ public sealed partial class DebuggerEngine
     private bool _seenSystemBp;
     private volatile bool _pauseRequested;   // set by the UI thread (Pause), read by the debug loop
     private volatile bool _stopping;         // set by the UI thread (Stop), read by the debug loop
+    private volatile bool _detaching;        // set by the UI thread (Detach), read by the debug loop
     private bool _ended;
 
     public IReadOnlyList<ModuleInfo> Modules { get { lock (_lock) return _modules.Values.OrderBy(m => m.Base).ToList(); } }
@@ -203,6 +207,7 @@ public sealed partial class DebuggerEngine
                 var (mode, target) = _resume.Take();
                 IsStopped = false;
                 if (mode == ResumeMode.Stop) { DoStop(ev); break; }
+                if (mode == ResumeMode.Detach) { DoDetach(); break; }
                 Running?.Invoke();
                 DoResume(mode, target, ev, cont);
             }
@@ -456,7 +461,7 @@ public sealed partial class DebuggerEngine
             isAv ? (int)er.Info0 : -1, isAv ? er.Info1 : 0));
         var (brk, pass) = ExceptionFilter.Decide(code, firstChance);
         cont = pass ? Native.DBG_EXCEPTION_NOT_HANDLED : Native.DBG_CONTINUE;
-        if (_pauseRequested || _stopping) return false;
+        if (_pauseRequested || _stopping || _detaching) return false;
         // While capturing, let the program handle all its own first-chance exceptions without stopping.
         if (PassFirstChanceExceptions && firstChance) return false;
         if (!brk) return false;   // filter: don't break — exception was passed/swallowed per `pass`
@@ -584,10 +589,73 @@ public sealed partial class DebuggerEngine
 
     private void DoStop(in Native.DEBUG_EVENT ev)
     {
-        if (_attached) { Native.DebugActiveProcessStop(_pid); }
+        if (_attached)
+        {
+            // Attached targets are left running on Stop (we didn't create them), so this is really a detach:
+            // strip our instrumentation first or a leftover 0xCC / kill-on-close job would crash or kill the
+            // process. Same cleanup as Detach; the threads are frozen here (outstanding event), so it is safe.
+            RestoreAllInstrumentation();
+            ReleaseJob();
+            Native.DebugActiveProcessStop(_pid);
+        }
         else { Native.TerminateProcess(_proc, 0); Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_CONTINUE); }
         _ended = true;
         Exited?.Invoke(0);
+    }
+
+    /// <summary>Detach the debugger but leave the debuggee running. Only valid from a clean stop (the loop is
+    /// blocked on <see cref="_resume"/>, so memory edits are safe). Restores every byte we wrote (breakpoints +
+    /// hide-layer hooks/rdtsc patches) and clears the debug registers so the program runs exactly as if it had
+    /// never been debugged; drops our job's kill-on-close so closing the handle in <see cref="Cleanup"/> can't
+    /// kill the survivor; turns off kill-on-debugger-exit (a launched debuggee is otherwise killed when we stop
+    /// debugging); then <c>DebugActiveProcessStop</c>. Mirrors <see cref="DoStop"/> but never terminates.</summary>
+    public void Detach()
+    {
+        if (_ended || !IsStopped) return;   // only from a stop; the UI gates the button on IsStopped too
+        _detaching = true;
+        _resume.Add((ResumeMode.Detach, 0));
+    }
+
+    private void DoDetach()
+    {
+        RestoreAllInstrumentation();
+        ReleaseJob();
+        Native.DebugSetProcessKillOnExit(false);
+        Native.DebugActiveProcessStop(_pid);
+        _ended = true;
+        Detached?.Invoke();
+    }
+
+    /// <summary>Strip all instrumentation we wrote into the debuggee so it runs clean after a detach: restore the
+    /// saved original byte of every software int3 (user, temp, anti-debug/rdtsc hooks, return patches) and zero
+    /// the debug registers on every thread. Safe only while stopped (single-threaded w.r.t. the debug loop).</summary>
+    private void RestoreAllInstrumentation()
+    {
+        lock (_lock)
+        {
+            foreach (var bp in _swBps.Values) if (bp.Armed) WriteCode(bp.Address, [bp.Original]);
+            _swBps.Clear();
+            foreach (var (va, orig) in _tempBps) WriteCode(va, [orig]);
+            _tempBps.Clear();
+            foreach (var (va, bp) in _internalBps) WriteCode(va, [bp.Original]);
+            _internalBps.Clear();
+            foreach (var (va, pend) in _pendingReturns) WriteCode(va, [pend.Orig]);
+            _pendingReturns.Clear();
+            _hwBps.Clear();
+        }
+        ProgramHwAllThreads();   // _hwBps now empty -> writes a zeroed Dr0-3/Dr7 to each thread
+    }
+
+    /// <summary>Before a detach, clear our job's limits so the survivor isn't killed (kill-on-close) or
+    /// restricted (active-process limit blocks child spawning) once we close the handle. No-op if we never
+    /// created a job (uncontained, or contained by the host's job, which we don't own and can't relax).</summary>
+    private void ReleaseJob()
+    {
+        if (_job == IntPtr.Zero) return;
+        var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        info.BasicLimitInformation.LimitFlags = 0;   // drop kill-on-close AND the child-process block: run free
+        uint sz = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
+        Native.SetInformationJobObject(_job, Native.JobObjectExtendedLimitInformation, ref info, sz);
     }
 
     private void Cleanup()

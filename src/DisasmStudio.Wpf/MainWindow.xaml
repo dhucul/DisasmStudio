@@ -27,6 +27,7 @@
                 <Button x:Name="StepOutBtn" Content="⤴ Out" Click="OnStepOut" Margin="6,0,0,0" IsEnabled="False" ToolTip="Step out (Shift+F11)" />
                 <Button Content="⏸ Pause" Click="OnDebugPause" Margin="6,0,0,0" />
                 <Button Content="⏹ Stop" Click="OnDebugStop" Margin="6,0,0,0" />
+                <Button x:Name="DetachBtn" Content="⏏ Detach" Click="OnDebugDetach" Margin="6,0,0,0" IsEnabled="False" ToolTip="Detach the debugger but leave the program running. Restores all breakpoints and hide-layer code patches to the original bytes, clears the debug registers, releases job containment, and stops debugging — the process keeps running. Available only while stopped." />
                 <Button x:Name="RestartBtn" Content="⟳ Restart" Click="OnDebugRestart" Margin="6,0,0,0" IsEnabled="False" ToolTip="Terminate the debuggee and launch it again from the start" />
                 <Button Content="Attach…" Click="OnAttach" Margin="6,0,0,0" ToolTip="Attach the debugger to a running process" />
                 <Button x:Name="UnpackBtn" Content="Unpack…" Click="OnUnpack" Margin="6,0,0,0" ToolTip="Generic unpacker: run a packed PE under the debugger, stop at the original entry point, dump it, rebuild the IAT and write a clean, re-analyzable EXE." />
@@ -167,8 +168,13 @@
                     </TabItem>
                     <TabItem Header="Strings">
                         <DockPanel>
-                            <TextBlock x:Name="StringHeader" DockPanel.Dock="Top" Margin="10,8,10,2"
-                                       Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                            <DockPanel DockPanel.Dock="Top" Margin="8,6,8,2">
+                                <Button x:Name="StringRefreshBtn" DockPanel.Dock="Right" Content="⟳ Refresh"
+                                        Padding="6,1" Margin="6,0,0,0" Click="OnRefreshStrings"
+                                        ToolTip="Rebuild the strings list. While stopped in a live session this re-scans the debuggee's process memory (so decrypted/unpacked strings appear); otherwise it rebuilds from the file's static strings." />
+                                <TextBlock x:Name="StringHeader" VerticalAlignment="Center" Margin="2,0,0,0"
+                                           Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                            </DockPanel>
                             <TextBox x:Name="StringFilter" DockPanel.Dock="Top" Margin="8,2,8,6" TextChanged="OnStringFilter" />
                             <ListBox x:Name="StringList" MouseDoubleClick="OnStringActivate"
                                      FontFamily="Cascadia Mono, Consolas" FontSize="12">

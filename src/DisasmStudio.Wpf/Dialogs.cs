@@ -1,10 +1,13 @@
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf;
 
@@ -229,15 +232,119 @@ internal static class Dialogs
     private static string Quote(string s) =>
         s.Length > 0 && !s.StartsWith('"') && s.Contains(' ') ? $"\"{s}\"" : s;
 
-    /// <summary>Ask for a process id (decimal) to attach the debugger to.</summary>
-    public static uint? AskPid(Window owner)
+    /// <summary>Pick a running process to attach to, from a live, filterable list (pid, name, arch, window
+    /// title, image path). Double-click a row or press Attach to confirm; the filter box also accepts a bare
+    /// decimal pid as a fallback for a process that doesn't enumerate. <paramref name="expectBitness"/> (the
+    /// open binary's bitness) is shown as a hint so a mismatched-arch process isn't picked by accident.
+    /// Returns the chosen pid, or null if cancelled.</summary>
+    public static uint? AskProcess(Window owner, int expectBitness)
     {
-        var box = new TextBox();
-        var panel = new StackPanel { Margin = new Thickness(16) };
-        panel.Children.Add(Label("Attach to process id (decimal)"));
-        panel.Children.Add(box);
-        bool ok = ShowModal(owner, "Attach to process", panel, box);
-        return ok && uint.TryParse(box.Text.Trim(), out var pid) ? pid : null;
+        var mono = new FontFamily("Cascadia Mono, Consolas");
+        string want = expectBitness == 64 ? "x64" : "x86";
+
+        var grid = new DataGrid
+        {
+            AutoGenerateColumns = false,
+            IsReadOnly = true,
+            SelectionMode = DataGridSelectionMode.Single,
+            HeadersVisibility = DataGridHeadersVisibility.Column,
+        };
+        DataGridTextColumn Col(string header, string prop, double width, bool star = false) => new()
+        {
+            Header = header,
+            Binding = new Binding(prop),
+            Width = star ? new DataGridLength(1, DataGridLengthUnitType.Star) : new DataGridLength(width),
+        };
+        grid.Columns.Add(Col("PID", nameof(ProcessEntry.Pid), 60));
+        grid.Columns.Add(Col("Name", nameof(ProcessEntry.Name), 168));
+        grid.Columns.Add(Col("Arch", nameof(ProcessEntry.Arch), 54));
+        grid.Columns.Add(Col("Title", nameof(ProcessEntry.Title), 0, star: true));
+        grid.Columns.Add(Col("Path", nameof(ProcessEntry.Path), 0, star: true));
+
+        var filter = new TextBox { FontFamily = mono };
+        string FilterText() => (filter.Text ?? "").Trim();
+
+        ICollectionView? view = null;
+        void Load()
+        {
+            view = CollectionViewSource.GetDefaultView(ProcessList.Enumerate());
+            view.Filter = o =>
+            {
+                if (o is not ProcessEntry en) return false;
+                string f = FilterText();
+                return f.Length == 0
+                    || en.Name.Contains(f, StringComparison.OrdinalIgnoreCase)
+                    || en.Title.Contains(f, StringComparison.OrdinalIgnoreCase)
+                    || en.Path.Contains(f, StringComparison.OrdinalIgnoreCase)
+                    || en.Pid.ToString().Contains(f);
+            };
+            grid.ItemsSource = view;
+        }
+        Load();
+        filter.TextChanged += (_, _) => view?.Refresh();
+
+        var refresh = new Button { Content = "↻ Refresh", MinWidth = 86, Margin = new Thickness(8, 0, 0, 0) };
+        refresh.Click += (_, _) => Load();
+        var filterRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+        DockPanel.SetDock(refresh, Dock.Right);
+        filterRow.Children.Add(refresh);
+        filterRow.Children.Add(filter);
+
+        var header = new StackPanel { Margin = new Thickness(16, 16, 16, 0) };
+        header.Children.Add(Label($"Select a process to attach to — the open binary is {want}, so match the Arch column. Filter by name, pid or path:"));
+        header.Children.Add(filterRow);
+
+        var win = new Window
+        {
+            Title = "Attach to process",
+            Owner = owner,
+            Width = 680,
+            Height = 520,
+            MinWidth = 460,
+            MinHeight = 320,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.CanResize,
+            Background = Bg,
+            Foreground = Fg,
+        };
+
+        uint? result = null;
+        // The selected row, else a bare decimal pid typed into the filter box (manual fallback).
+        uint? Selected() => grid.SelectedItem is ProcessEntry en ? en.Pid
+            : uint.TryParse(FilterText(), out var pid) ? pid : null;
+        void Commit() { if (Selected() is uint pid) { result = pid; win.DialogResult = true; } }
+
+        var ok = new Button { Content = "Attach", IsDefault = true, MinWidth = 80, Margin = new Thickness(0, 0, 8, 0) };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 70 };
+        ok.Click += (_, _) => Commit();
+        // Commit only when the double-click lands on a row — not a column header (sorting) or empty space,
+        // which would otherwise attach to whatever row happened to be selected.
+        grid.MouseDoubleClick += (_, e) =>
+        {
+            for (DependencyObject? d = e.OriginalSource as Visual; d is not null; d = VisualTreeHelper.GetParent(d))
+                if (d is DataGridRow) { Commit(); return; }
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(16, 8, 16, 16),
+        };
+        buttons.Children.Add(ok);
+        buttons.Children.Add(cancel);
+
+        var root = new DockPanel();
+        DockPanel.SetDock(header, Dock.Top);
+        DockPanel.SetDock(buttons, Dock.Bottom);
+        root.Children.Add(header);
+        root.Children.Add(buttons);
+        root.Children.Add(new Border { Margin = new Thickness(16, 0, 16, 0), Child = grid });   // fills the middle
+        win.Content = root;
+
+        filter.Loaded += (_, _) => filter.Focus();
+        win.ShowDialog();
+        return result;
     }
 
     /// <summary>Ask for an address (hex) to navigate to.</summary>

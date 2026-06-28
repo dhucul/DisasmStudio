@@ -266,7 +266,7 @@ public partial class MainWindow : Window
     {
         if (_dbg is not null) { MessageBox.Show(this, "A debug session is already active.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_result is null) { MessageBox.Show(this, "Open the target's binary first so the disassembly matches.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (Dialogs.AskPid(this) is uint pid) BeginDebug(d => d.Attach(pid));
+        if (Dialogs.AskProcess(this, _result.Image.Bitness) is uint pid) BeginDebug(d => d.Attach(pid));
     }
 
     private async void OnUnpack(object sender, RoutedEventArgs e)
@@ -422,6 +422,28 @@ public partial class MainWindow : Window
         });
     }
 
+    /// <summary>Populate the Strings panel from the static (file) analysis — the non-live set. Shared by the
+    /// initial load, the post-exit revert (live process memory is gone once the debuggee ends), and a manual
+    /// refresh outside a live stop.</summary>
+    private void ShowStaticStrings(AnalysisResult result)
+    {
+        _strings = new ObservableCollection<StringItem>(result.Strings.Take(MaxStringRows).Select(s => new StringItem(s)));
+        _stringsView = CollectionViewSource.GetDefaultView(_strings);
+        _stringsView.Filter = StringFilterPredicate;
+        StringList.ItemsSource = _stringsView;
+        StringHeader.Text = $"{_strings.Count:N0} strings";
+    }
+
+    /// <summary>Manual Strings-panel refresh (⟳ Refresh button). At a live stop it re-scans the debuggee's
+    /// process memory so decrypted/unpacked strings show; while the debuggee is running the scan is skipped
+    /// (memory can't be read mid-run); with no live session — including after the debuggee exits — it rebuilds
+    /// from the file's static strings.</summary>
+    private void OnRefreshStrings(object sender, RoutedEventArgs e)
+    {
+        if (_dbgViewLive) RefreshLiveStrings();          // no-ops unless stopped (engine frozen)
+        else if (_result is not null) ShowStaticStrings(_result);
+    }
+
     /// <summary>When the user switches to the Strings tab at a stop, refresh it to the current live strings.
     /// Reads the tab off <paramref name="e"/> (not the named field, which may be unset during init) and ignores
     /// SelectionChanged bubbling up from the inner list boxes.</summary>
@@ -443,6 +465,7 @@ public partial class MainWindow : Window
         _dbg.Stopped += OnDbgStopped;
         _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); };   // no continue/step while running
         _dbg.Exited += OnDbgExited;
+        _dbg.Detached += OnDbgDetached;
         _dbg.CaptureFinished += OnCaptureFinished;
         _dbg.Output += m => StatusText.Text = m;
         Debug.SetSession(_dbg);
@@ -459,9 +482,11 @@ public partial class MainWindow : Window
     private void OnStepInto(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepInto(); }
     private void OnStepOver(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOver(); }
     private void OnStepOut(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOut(); }
-    private void SetStepButtons(bool on) { StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = on; }
+    private void SetStepButtons(bool on) { StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = DetachBtn.IsEnabled = on; }
     private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
     private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
+    // Detach keeps the debuggee running; only valid from a stop (so breakpoints/hooks can be cleanly removed).
+    private void OnDebugDetach(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.Detach(); }
 
     // The theme's MenuItem template is flat (no submenu popup), so drop the Help items via the button's
     // ContextMenu — opened on left-click, placed below the button.
@@ -727,13 +752,16 @@ public partial class MainWindow : Window
         StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
     }
 
-    private void OnDbgExited(int code)
+    /// <summary>Common UI teardown when a debug session ends — whether the debuggee exited or we detached from
+    /// it. Drains/closes any capture, drops the live view, restores the static (pre-run) analysis + listing, and
+    /// hides the debugger dock. The caller sets the status line (exit code vs. "still running").</summary>
+    private void TeardownDebugSessionUi()
     {
         _captureTimer?.Stop();
         _captureFlushTimer?.Dispose(); _captureFlushTimer = null;
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
         if (_dbg?.Capture is { } cap) RebuildCaptureGraph(cap);   // final graph before capture state is dropped
-        _dbg?.AbortCapture();   // process is gone: drop capture state and close the log (no live removal needed)
+        _dbg?.AbortCapture();   // drop capture state and close the log (the engine already removed its breakpoints)
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false; DerefCheck.IsEnabled = false;
         RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run"; DbgRunBtn.IsEnabled = true; SetStepButtons(false);   // re-enable for a fresh Run
         Linear.SetCurrentIp(0);
@@ -751,6 +779,19 @@ public partial class MainWindow : Window
             Hex.SetImage(_image);
         }
         RefreshBreakpointList();   // back to the static pre-run set (kept in sync, so it persists for the next Run)
+    }
+
+    /// <summary>Debugger detached but left the process running. Same teardown as an exit, but no restart and a
+    /// status line that makes clear the program is still alive.</summary>
+    private void OnDbgDetached()
+    {
+        TeardownDebugSessionUi();
+        StatusText.Text = "Debugger detached — the process is still running.";
+    }
+
+    private void OnDbgExited(int code)
+    {
+        TeardownDebugSessionUi();
         StatusText.Text = $"Debuggee exited (code {code}).";
 
         if (_restartPending)
@@ -1349,11 +1390,7 @@ public partial class MainWindow : Window
         _functionsView.Filter = FuncFilterPredicate;
         FuncList.ItemsSource = _functionsView;
 
-        _strings = new ObservableCollection<StringItem>(result.Strings.Take(MaxStringRows).Select(s => new StringItem(s)));
-        _stringsView = CollectionViewSource.GetDefaultView(_strings);
-        _stringsView.Filter = StringFilterPredicate;
-        StringList.ItemsSource = _stringsView;
-        StringHeader.Text = $"{_strings.Count:N0} strings";
+        ShowStaticStrings(result);
 
         _exports = new ObservableCollection<ExportItem>(result.Image.Symbols
             .Where(s => s.Kind == NamedSymbolKind.Export)
