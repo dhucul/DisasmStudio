@@ -438,9 +438,20 @@ public sealed partial class DebuggerEngine
                 return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
             }
             _stepping.Remove(ev.dwThreadId);
+            // SMC guard-step: a single-step we armed to let a write complete through our guarded page.
+            if (SmcHandleGuardStep(ev.dwThreadId, out _))
+                return false;
             if (st.ReArm != 0) ArmAddr(st.ReArm);   // re-arm the breakpoint this thread stepped off
             if (st.StopAfter) { Stopped?.Invoke(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
             return false;   // step-off of a breakpoint during a Go — keep running
+        }
+
+        // Self-modifying-code guard-page violation: a write landed on a code page we were guarding.
+        // Let the write complete (single-step), then re-evaluate breakpoints on that page.
+        if (code == Native.STATUS_GUARD_PAGE_VIOLATION && SmcTrackingEnabled)
+        {
+            if (SmcHandleGuardViolation(ev.dwThreadId, er.Info1, ref cont))
+                return false;
         }
 
         // A guard-page violation we didn't cause (the section-execute OEP catch uses NX, not PAGE_GUARD):
@@ -653,6 +664,7 @@ public sealed partial class DebuggerEngine
     /// the debug registers on every thread. Safe only while stopped (single-threaded w.r.t. the debug loop).</summary>
     private void RestoreAllInstrumentation()
     {
+        SmcCleanup();
         lock (_lock)
         {
             foreach (var bp in _swBps.Values) if (bp.Armed) WriteCode(bp.Address, [bp.Original]);
@@ -799,6 +811,10 @@ public sealed partial class DebuggerEngine
             lock (_lock)
                 foreach (var (va, orig) in originals)
                     if (_swBps.TryGetValue(va, out var bp)) { bp.Original = orig; bp.Armed = true; }
+
+            // SMC: guard all pages that now carry armed breakpoints.
+            if (SmcTrackingEnabled)
+                lock (_lock) foreach (var (va, _) in originals) GuardPageForBreakpoint(va);
         }
     }
 
@@ -811,6 +827,7 @@ public sealed partial class DebuggerEngine
             var hw = _hwBps.FirstOrDefault(b => b.Address == va);
             if (hw is not null) { _hwBps.Remove(hw); ProgramHwAllThreads(); }
         }
+        SmcUntrackBreakpoint(va);
     }
 
     public bool HasBreakpoint(ulong va) { lock (_lock) return _swBps.ContainsKey(va) || _hwBps.Any(b => b.Address == va); }
@@ -834,7 +851,11 @@ public sealed partial class DebuggerEngine
         var o = ReadMemory(va, 1);
         if (o.Length < 1) return;
         bp.Original = o[0];
-        if (WriteCode(va, [0xCC])) bp.Armed = true;
+        if (WriteCode(va, [0xCC]))
+        {
+            bp.Armed = true;
+            if (SmcTrackingEnabled) GuardPageForBreakpoint(va);
+        }
     }
 
     private void DisarmAddr(ulong va)
