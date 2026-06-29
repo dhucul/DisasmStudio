@@ -359,9 +359,15 @@ public sealed partial class DebuggerEngine
             Breakpoint? bp; lock (_lock) _swBps.TryGetValue(addr, out bp);
             if (bp is { Armed: true })
             {
-                SetIp(hThread, addr);   // rewind over the 0xCC
-                Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
-                return true;
+                SetIp(hThread, addr);   // rewind over the 0xCC (registers now valid for condition eval)
+                if (ShouldStop(bp, ev.dwThreadId))
+                {
+                    Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
+                    return true;
+                }
+                // condition / hit-count not met: step off the 0xCC and keep running, without surfacing a stop
+                SilentStepOff(ev.dwThreadId, hThread, addr);
+                return false;
             }
             // first breakpoint(s) = loader/system (or attach-injected). A WOW64 launch delivers both a
             // 64-bit and a 32-bit (STATUS_WX86_BREAKPOINT) system breakpoint, so allow one of each.
@@ -412,15 +418,15 @@ public sealed partial class DebuggerEngine
 
         if (code is Native.EXCEPTION_SINGLE_STEP or Native.STATUS_WX86_SINGLE_STEP)
         {
-            // SMC guard-step: a single-step we armed (in SmcHandleGuardViolation) to let a write complete
-            // through a guarded code page. Re-arm the page's breakpoints and re-apply PAGE_GUARD. This must
+            // SMC write-step: a single-step we armed (in SmcHandleWriteFault) to let a write complete through a
+            // write-protected code page. Re-arm the page's breakpoints and re-apply write-protection. This must
             // run BEFORE the internal-step and !stepping handling below: the SMC trap flag is armed directly,
-            // without a StepState, so a guard-step during a Go has stepping == false and would otherwise be
+            // without a StepState, so a write-step during a Go has stepping == false and would otherwise be
             // misclassified as a single-step we didn't arm and silently dropped, leaving every breakpoint on
-            // the page disarmed, the guard never restored, and _pendingGuardReeval/_guardDisarmedByPage leaked.
-            // SmcHandleGuardStep is a no-op (returns false) when this thread has no pending guard re-evaluation,
+            // the page disarmed, the page never re-protected, and _pendingGuardReeval/_guardDisarmedByPage leaked.
+            // SmcHandleWriteStep is a no-op (returns false) when this thread has no pending write-fault re-eval,
             // so it is safe to consult first on every single-step event.
-            bool smcStep = SmcHandleGuardStep(ev.dwThreadId, out _);
+            bool smcStep = SmcHandleWriteStep(ev.dwThreadId, out _);
 
             // A step armed only to run one instruction off an internal anti-debug hook, then re-arm it.
             if (_internalStep.Remove(ev.dwThreadId, out ulong isAddr))
@@ -435,9 +441,20 @@ public sealed partial class DebuggerEngine
             {
                 if (c.Get(hThread) && (c.Dr6 & 0xF) != 0 && !stepping && !smcStep)
                 {
-                    c.Dr6 = 0; c.Set(hThread);
-                    Stopped?.Invoke(new StopInfo(StopReason.Watchpoint, ev.dwThreadId, c.Ip, code));
-                    return true;
+                    int slot = System.Numerics.BitOperations.TrailingZeroCount(c.Dr6 & 0xF);
+                    Breakpoint? hb; lock (_lock) hb = _hwBps.FirstOrDefault(b => b.Slot == slot);
+                    c.Dr6 = 0;
+                    if (hb is null || ShouldStop(hb, ev.dwThreadId))
+                    {
+                        c.Set(hThread);
+                        Stopped?.Invoke(new StopInfo(StopReason.Watchpoint, ev.dwThreadId, c.Ip, code));
+                        return true;
+                    }
+                    // condition / hit-count not met: keep running. An execute hw bp would re-fire on this same
+                    // instruction, so set the Resume Flag to skip it for one instruction.
+                    if (hb.Kind == HwKind.Execute) c.ResumeFlag = true;
+                    c.Set(hThread);
+                    return false;
                 }
             }
             if (!stepping)
@@ -449,25 +466,26 @@ public sealed partial class DebuggerEngine
                 return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
             }
             _stepping.Remove(ev.dwThreadId);
-            // A guard-step can coincide with a user single-step when the stepped instruction itself wrote to a
-            // guarded page: SmcHandleGuardStep already re-armed the page's breakpoints, so ArmAddr below is a
-            // harmless no-op for any it already armed, and the user's StopAfter is still honored.
+            // A write-step can coincide with a user single-step when the stepped instruction itself wrote to a
+            // write-protected page: SmcHandleWriteStep already re-armed the page's breakpoints, so ArmAddr below
+            // is a harmless no-op for any it already armed, and the user's StopAfter is still honored.
             if (st.ReArm != 0) ArmAddr(st.ReArm);   // re-arm the breakpoint this thread stepped off
             if (st.StopAfter) { Stopped?.Invoke(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
             return false;   // step-off of a breakpoint during a Go — keep running
         }
 
-        // Self-modifying-code guard-page violation: a write landed on a code page we were guarding.
-        // Let the write complete (single-step), then re-evaluate breakpoints on that page.
-        if (code == Native.STATUS_GUARD_PAGE_VIOLATION && SmcTrackingEnabled)
+        // Self-modifying-code: a write (Info0 == 1) landed on a code page we write-protected for breakpoint
+        // resilience. Restore write, let it complete (single-step), then re-evaluate breakpoints on that page.
+        // SmcHandleWriteFault returns false for a write to any page that isn't ours, so a genuine program
+        // access violation falls through to normal reporting below.
+        if (code == Native.EXCEPTION_ACCESS_VIOLATION && er.Info0 == 1 && SmcTrackingEnabled)
         {
-            if (SmcHandleGuardViolation(ev.dwThreadId, er.Info1, ref cont))
+            if (SmcHandleWriteFault(ev.dwThreadId, er.Info1, ref cont))
                 return false;
         }
 
-        // A guard-page violation we didn't cause (the section-execute OEP catch uses NX, not PAGE_GUARD):
-        // e.g. stack auto-grow, or a program that uses PAGE_GUARD itself. Hand it to the program silently
-        // rather than surfacing it as a fault.
+        // A guard-page violation (we no longer use PAGE_GUARD ourselves; the OEP catch uses NX): e.g. a stack
+        // auto-grow, or a program that uses PAGE_GUARD itself. Hand it to the program silently.
         if (code == Native.STATUS_GUARD_PAGE_VIOLATION)
         {
             cont = Native.DBG_EXCEPTION_NOT_HANDLED;
@@ -823,9 +841,9 @@ public sealed partial class DebuggerEngine
                 foreach (var (va, orig) in originals)
                     if (_swBps.TryGetValue(va, out var bp)) { bp.Original = orig; bp.Armed = true; }
 
-            // SMC: guard all pages that now carry armed breakpoints.
+            // SMC: write-protect all pages that now carry armed breakpoints.
             if (SmcTrackingEnabled)
-                lock (_lock) foreach (var (va, _) in originals) GuardPageForBreakpoint(va);
+                lock (_lock) foreach (var (va, _) in originals) ProtectPageForBreakpoint(va);
         }
     }
 
@@ -855,17 +873,96 @@ public sealed partial class DebuggerEngine
         }
     }
 
+    /// <summary>Set the condition / hit-count / enabled state of the software or hardware breakpoint at
+    /// <paramref name="va"/> (a no-op if none exists). The condition text is parsed here; a malformed
+    /// expression clears the condition and is reported via <see cref="Output"/>. Resets the hit counter.
+    /// Call while stopped (it may arm/disarm a software int3 or reprogram the debug registers).</summary>
+    public void ConfigureBreakpoint(ulong va, string? condition, HitCountMode mode, int target, bool enabled)
+    {
+        ConditionExpr.TryParse(condition, out var expr, out var error);
+        if (error is not null) Output?.Invoke($"Breakpoint condition error: {error}");
+
+        Breakpoint? sw, hw;
+        lock (_lock)
+        {
+            _swBps.TryGetValue(va, out sw);
+            hw = _hwBps.FirstOrDefault(b => b.Address == va);
+        }
+        foreach (var bp in new[] { sw, hw })
+        {
+            if (bp is null) continue;
+            bp.Condition = error is null ? (string.IsNullOrWhiteSpace(condition) ? null : condition!.Trim()) : null;
+            bp.CompiledCondition = error is null ? expr : null;
+            bp.HitMode = mode;
+            bp.HitTarget = target;
+            bp.HitCount = 0;
+            bp.Enabled = enabled;
+        }
+        if (sw is not null) { if (enabled) ArmAddr(va); else DisarmAddr(va); }
+        if (hw is not null) ProgramHwAllThreads();   // honours Enabled
+    }
+
+    /// <summary>Decide, at a breakpoint hit, whether to actually stop: evaluate the condition (if any) against
+    /// the stopped thread's registers/memory, then apply the hit-count rule (counting only condition-passing
+    /// hits). Runs on the loop thread with the debuggee frozen, so register/memory reads are consistent.</summary>
+    private bool ShouldStop(Breakpoint bp, uint tid)
+    {
+        if (bp.CompiledCondition is { } expr)
+        {
+            var regs = GetRegisters(tid);
+            if (regs is null) return true;   // can't evaluate → stop (safe default)
+            var ctx = new EvalContext
+            {
+                Regs = regs,
+                ReadMem = (a, n) =>
+                {
+                    var b = ReadMemory(a, n);
+                    if (b.Length != n) return null;
+                    ulong v = 0;
+                    for (int i = 0; i < n; i++) v |= (ulong)b[i] << (8 * i);
+                    return v;
+                },
+            };
+            if (!expr.EvaluateBool(ctx)) return false;
+        }
+        if (bp.HitMode != HitCountMode.None)
+        {
+            bp.HitCount++;
+            bool meets = bp.HitMode switch
+            {
+                HitCountMode.Equals => bp.HitCount == bp.HitTarget,
+                HitCountMode.AtLeast => bp.HitCount >= bp.HitTarget,
+                HitCountMode.Multiple => bp.HitTarget > 0 && bp.HitCount % bp.HitTarget == 0,
+                _ => true,
+            };
+            if (!meets) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Silently continue past an armed software breakpoint at <paramref name="addr"/> whose condition /
+    /// hit-count was not met: disarm the 0xCC, arm a non-surfacing single-step (the EXCEPTION_SINGLE_STEP
+    /// handler re-arms the byte and keeps running), and set the trap flag. Mirrors the on-breakpoint branch of
+    /// <see cref="DoResume"/>'s SingleStepFallback. RIP must already be rewound to <paramref name="addr"/>.</summary>
+    private void SilentStepOff(uint tid, IntPtr hThread, ulong addr)
+    {
+        DisarmAddr(addr);
+        _stepping[tid] = new StepState(addr, StopAfter: false);
+        using var c = new Ctx(Is32);
+        if (c.Get(hThread)) { c.TrapFlag = true; c.Set(hThread); }
+    }
+
     private void ArmAddr(ulong va)
     {
         Breakpoint? bp; lock (_lock) _swBps.TryGetValue(va, out bp);
-        if (bp is null || bp.Armed) return;
+        if (bp is null || bp.Armed || !bp.Enabled) return;   // a disabled breakpoint is not planted
         var o = ReadMemory(va, 1);
         if (o.Length < 1) return;
         bp.Original = o[0];
         if (WriteCode(va, [0xCC]))
         {
             bp.Armed = true;
-            if (SmcTrackingEnabled) GuardPageForBreakpoint(va);
+            if (SmcTrackingEnabled) ProtectPageForBreakpoint(va);
         }
     }
 

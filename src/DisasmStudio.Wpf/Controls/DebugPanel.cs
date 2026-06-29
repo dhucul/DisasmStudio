@@ -219,7 +219,12 @@ public sealed class DebugPanel : Grid
         foreach (var bp in _session.Engine.BreakpointList)
         {
             _bpVas.Add(bp.Address);
-            _bps.Items.Add($"{bp.Address.ToString("X" + w)}  {(bp.Hardware ? $"hw {bp.Kind}" : "software")}  {_session.LiveResult?.NameFor(bp.Address) ?? ""}");
+            string kind = bp.Hardware ? $"hw {bp.Kind}{(bp.Kind == HwKind.Execute ? "" : "/" + bp.Size)}" : "software";
+            string extra = "";
+            if (!bp.Enabled) extra += "  (disabled)";
+            if (!string.IsNullOrEmpty(bp.Condition)) extra += $"  if({bp.Condition})";
+            if (bp.HitMode != HitCountMode.None) extra += $"  {bp.HitMode}:{bp.HitTarget}";
+            _bps.Items.Add($"{bp.Address.ToString("X" + w)}  {kind}{extra}  {_session.LiveResult?.NameFor(bp.Address) ?? ""}");
         }
 
         // threads

@@ -62,6 +62,10 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? SaveAsmRequested;
     public event Action<ulong>? PatchRequested;
     public event Action<ulong>? BreakpointToggleRequested;
+    /// <summary>Set a hardware breakpoint / watchpoint at the address (right-click → Hardware breakpoint…).</summary>
+    public event Action<ulong>? HardwareBreakpointRequested;
+    /// <summary>Edit the condition / hit-count / enabled state of the breakpoint at the address.</summary>
+    public event Action<ulong>? EditBreakpointRequested;
     public event Action<ulong>? RunToCursorRequested;
     public event Action? RunToReturnRequested;
     public event Action<ulong>? CaptureFunctionRequested;
@@ -72,6 +76,8 @@ public sealed class LinearDisassemblyView : Grid
     public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va); else _surface.InvalidateVisual(); }
     /// <summary>Predicate the gutter uses to mark addresses that have a breakpoint.</summary>
     public Func<ulong, bool>? IsBreakpointAt { get; set; }
+    /// <summary>Predicate the gutter uses to colour a hardware breakpoint's dot differently from a software one.</summary>
+    public Func<ulong, bool>? IsHardwareBreakpointAt { get; set; }
     /// <summary>Predicate the renderer uses to tint instructions that have executed (coverage overlay).</summary>
     public Func<ulong, bool>? IsInstrHit { get; set; }
 
@@ -578,7 +584,10 @@ public sealed class LinearDisassemblyView : Grid
             if (_ipVa != 0 && va == _ipVa)
                 dc.DrawRectangle(SyntaxTheme.CurrentIp, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
             if (IsBreakpointAt?.Invoke(va) == true)
-                dc.DrawEllipse(SyntaxTheme.BreakpointDot, null, new Point(GutterW - _charWidth, y + _rowHeight / 2), 4, 4);
+            {
+                var dot = IsHardwareBreakpointAt?.Invoke(va) == true ? SyntaxTheme.HwBreakpointDot : SyntaxTheme.BreakpointDot;
+                dc.DrawEllipse(dot, null, new Point(GutterW - _charWidth, y + _rowHeight / 2), 4, 4);
+            }
 
             if (selLo >= 0 && instrLine >= selLo && instrLine <= selHi)
                 dc.DrawRectangle(SyntaxTheme.Selection, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
@@ -782,16 +791,23 @@ public sealed class LinearDisassemblyView : Grid
         follow.Click += (_, _) => FollowCaret();
         // Reflect the caret's actual target each time the menu opens: show where Follow goes, and grey it
         // out when there's nothing to follow — so it's clear up front whether the action will do anything.
+        var patch = new MenuItem { Header = "Patch instruction…" };
+        patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
+        var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2" };
+        toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
+        var hwBp = new MenuItem { Header = "Hardware breakpoint…" };
+        hwBp.Click += (_, _) => { if (CaretVa != 0) HardwareBreakpointRequested?.Invoke(CaretVa); };
+        var editBp = new MenuItem { Header = "Edit breakpoint…" };
+        editBp.Click += (_, _) => { if (CaretVa != 0) EditBreakpointRequested?.Invoke(CaretVa); };
+        // Reflect the caret's actual target each time the menu opens: show where Follow goes, grey it out when
+        // there's nothing to follow, and enable "Edit breakpoint…" only when a breakpoint exists at the caret.
         menu.Opened += (_, _) =>
         {
             ulong? t = CaretFollowTarget();
             follow.IsEnabled = t is not null;
             follow.Header = t is ulong tt ? $"Follow target → {NameOrAddr(tt)}" : "Follow target";
+            editBp.IsEnabled = CaretVa != 0 && IsBreakpointAt?.Invoke(CaretVa) == true;
         };
-        var patch = new MenuItem { Header = "Patch instruction…" };
-        patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
-        var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2" };
-        toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
         var runTo = new MenuItem { Header = "Run to cursor" };
         runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
         var runToRet = new MenuItem { Header = "Continue to return", InputGestureText = "Ctrl+F9" };
@@ -808,6 +824,8 @@ public sealed class LinearDisassemblyView : Grid
         menu.Items.Add(saveAsm);
         menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
+        menu.Items.Add(hwBp);
+        menu.Items.Add(editBp);
         menu.Items.Add(runTo);
         menu.Items.Add(runToRet);
         menu.Items.Add(captureFn);

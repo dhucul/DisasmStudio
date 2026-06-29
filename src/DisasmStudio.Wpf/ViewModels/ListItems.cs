@@ -1,5 +1,6 @@
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Debug;
 
 namespace DisasmStudio.Wpf.ViewModels;
 
@@ -60,6 +61,38 @@ public sealed class BreakpointItem(ulong va, string label)
     public ulong Va => va;
     public string Address => va.ToString("X");
     public string Label => label;
+}
+
+/// <summary>The user's definition of a breakpoint, held in the pre-run / cross-run set keyed by static VA.
+/// Carries everything needed to (re)create and configure it on the engine each run: software vs. hardware
+/// (+ kind/size), the enabled flag, an optional condition expression, and a hit-count rule.</summary>
+public sealed class BpDef
+{
+    public bool Hardware;
+    public HwKind Kind;            // when Hardware
+    public int Size = 1;           // 1/2/4/8 when Hardware (1 for Execute)
+    public bool Enabled = true;
+    public string? Condition;      // raw expression text, null = unconditional
+    public HitCountMode HitMode = HitCountMode.None;
+    public int HitTarget;
+
+    /// <summary>One-line summary of the non-default attributes for the breakpoint lists (empty for a plain,
+    /// enabled software breakpoint with no condition / hit-count).</summary>
+    public string Describe()
+    {
+        var parts = new List<string>();
+        if (Hardware) parts.Add($"hw {Kind}{(Kind == HwKind.Execute ? "" : "/" + Size)}");
+        if (!string.IsNullOrEmpty(Condition)) parts.Add($"if ({Condition})");
+        parts.Add(HitMode switch
+        {
+            HitCountMode.Equals => $"hit = {HitTarget}",
+            HitCountMode.AtLeast => $"hit ≥ {HitTarget}",
+            HitCountMode.Multiple => $"every {HitTarget}",
+            _ => "",
+        });
+        if (!Enabled) parts.Add("disabled");
+        return string.Join("  ·  ", parts.Where(p => p.Length > 0));
+    }
 }
 
 /// <summary>Row in the Xrefs list.</summary>

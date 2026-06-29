@@ -6,6 +6,9 @@ public enum StopReason { EntryPoint, Attached, Breakpoint, Step, Watchpoint, Pau
 /// <summary>Kind of a hardware breakpoint / watchpoint.</summary>
 public enum HwKind { Execute, Write, ReadWrite }
 
+/// <summary>How a breakpoint's hit count gates the stop (None = the count is ignored).</summary>
+public enum HitCountMode { None, Equals, AtLeast, Multiple }
+
 /// <summary>What to do when resuming the debuggee.</summary>
 public enum ResumeMode { Go, StepInto, StepOver, StepOut, RunToCursor, RunToAny, Stop, Detach }
 
@@ -61,6 +64,13 @@ public sealed class Breakpoint
     public HwKind Kind { get; init; }
     public int Size { get; init; } = 1;     // hardware watch length: 1/2/4/8
     public bool Enabled { get; set; } = true;
+
+    // conditional / hit-count gating (evaluated on the loop thread when the bp is hit; see ShouldStop)
+    public string? Condition { get; set; }                  // raw expression text (null = unconditional)
+    internal ConditionExpr? CompiledCondition { get; set; }  // parsed once when Condition is assigned
+    public HitCountMode HitMode { get; set; } = HitCountMode.None;
+    public int HitTarget { get; set; }
+    public int HitCount { get; set; }                       // runtime counter; reset when (re)configured / per run
 
     // software-bp state
     public byte Original { get; set; }

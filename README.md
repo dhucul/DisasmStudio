@@ -98,7 +98,14 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   function's `ret`), Pause, Stop,
   **Detach** (stop debugging but leave the program running — all breakpoints and hide-layer patches are
   removed and the debug registers cleared first), and Run-to-cursor; software breakpoints (F2 / gutter)
-  and hardware breakpoints + watchpoints (Dr0–3). A bottom panel shows **registers** (editable, with
+  and **hardware breakpoints + watchpoints (Dr0–3)** set from the listing's right-click menu (pick
+  execute / write / read-write and a 1/2/4/8-byte length). Any breakpoint — software or hardware — can be
+  given a **condition**, a **hit count**, and an **enable/disable** toggle via *Edit breakpoint…*: the
+  condition is a C-like expression over registers and sub-registers (`rax`, `eax`, `al`, `r8d`), CPU flags
+  (`ZF`, `CF`, …), memory dereferences (`[rsp+8]`, `dword [rax]`) and the usual arithmetic/comparison/logical
+  operators (e.g. `rcx == 3`, `eax < 0x10 && ZF == 1`), evaluated in-engine when the breakpoint is hit so a
+  false condition continues at full speed without surfacing a stop; the hit count breaks on the *N*-th hit,
+  at-or-after *N*, or every *N*-th. A bottom panel shows **registers** (editable, with
   x64dbg-style **dereferencing** — `r9 → start`, `rcx → "C:\\…"`), the **stack** and a **memory dump**
   (both dereferenced), the **call stack**, and breakpoints, threads and modules. 32-bit targets are
   debugged from the 64-bit host via WOW64.

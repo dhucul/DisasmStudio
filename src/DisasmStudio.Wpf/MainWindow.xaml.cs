@@ -44,7 +44,7 @@ public partial class MainWindow : Window
     // Breakpoints toggled on the static listing before (or between) debug runs, kept as static VAs. They are
     // armed at the first stop of each session (rebased by the live ASLR slide) and mirror live toggles, so the
     // set persists across Run / Restart. The gutter reads it whenever the view isn't showing live addresses.
-    private readonly HashSet<ulong> _pendingBreakpoints = [];
+    private readonly Dictionary<ulong, BpDef> _pendingBreakpoints = [];
     private ExceptionFilter _exceptionFilter = ExceptionStore.Load();   // persisted x64dbg-style exception policy (swapped wholesale on edit)
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
@@ -118,10 +118,13 @@ public partial class MainWindow : Window
         Linear.SaveAsmRequested += SaveFunctionAsm;
         Decompiler.SaveCRequested += SaveFunctionC;
         Linear.BreakpointToggleRequested += OnBreakpointToggle;
+        Linear.HardwareBreakpointRequested += OnHardwareBreakpointRequest;
+        Linear.EditBreakpointRequested += OnEditBreakpointRequest;
         // Gutter dots come from the user breakpoint set (not the raw engine list, which during a capture also
         // holds internal capture breakpoints). `va - LiveSlide` maps the shown address back to its static VA —
         // LiveSlide is 0 unless the listing is showing live addresses — so this is correct before and during a run.
-        Linear.IsBreakpointAt = va => _pendingBreakpoints.Contains(va - LiveSlide);
+        Linear.IsBreakpointAt = va => _pendingBreakpoints.ContainsKey(va - LiveSlide);
+        Linear.IsHardwareBreakpointAt = va => _pendingBreakpoints.TryGetValue(va - LiveSlide, out var def) && def.Hardware;
         // Coverage tint: _coveredInstrs holds executed instruction VAs in static space (like the breakpoint set),
         // so `va - LiveSlide` maps the shown (live) address back to it during a run and matches directly after.
         Linear.IsInstrHit = va => _coveredInstrs.Count > 0 && _coveredInstrs.Contains(va - LiveSlide);
@@ -363,24 +366,67 @@ public partial class MainWindow : Window
     {
         if (_dbgViewLive && _dbg is { } d)
         {
-            d.ToggleBreakpoint(va);                       // va is a live, rebased VA
+            d.ToggleBreakpoint(va);                       // va is a live, rebased VA (plain software bp)
             ulong sva = va - LiveSlide;                   // mirror as a static VA so it persists across runs
-            if (d.HasBreakpoint(va)) _pendingBreakpoints.Add(sva); else _pendingBreakpoints.Remove(sva);
+            if (d.HasBreakpoint(va)) _pendingBreakpoints[sva] = new BpDef(); else _pendingBreakpoints.Remove(sva);
         }
         else if (!_pendingBreakpoints.Remove(va))         // pre-run / before the first stop: va is a static VA
-            _pendingBreakpoints.Add(va);
+            _pendingBreakpoints[va] = new BpDef();
+        Linear.Refresh();
+        Debug.Refresh();
+        RefreshBreakpointList();
+    }
+
+    /// <summary>Add or replace a hardware breakpoint at the caret (right-click → Hardware breakpoint…). Asks for
+    /// kind/size, records it in the pre-run set (so it survives Run/Restart), and — if a session is live — drops
+    /// any existing breakpoint at the address and programs the hardware one now.</summary>
+    private void OnHardwareBreakpointRequest(ulong va)
+    {
+        if (Dialogs.AskHardwareBreakpoint(this) is not { } hw) return;
+        ulong sva = va - LiveSlide;
+        var def = _pendingBreakpoints.TryGetValue(sva, out var existing) ? existing : new BpDef();
+        def.Hardware = true; def.Kind = hw.Kind; def.Size = hw.Size;
+        _pendingBreakpoints[sva] = def;
+        if (_dbgViewLive && _dbg is { } d)
+        {
+            if (d.HasBreakpoint(va)) d.Engine.RemoveBreakpoint(va);   // replace any software bp at this address
+            d.Engine.SetHardwareBreakpoint(va, def.Kind, def.Size);
+            d.Engine.ConfigureBreakpoint(va, def.Condition, def.HitMode, def.HitTarget, def.Enabled);
+        }
+        Linear.Refresh();
+        Debug.Refresh();
+        RefreshBreakpointList();
+    }
+
+    /// <summary>Edit the condition / hit-count / enabled state of the breakpoint at <paramref name="va"/>
+    /// (right-click → Edit breakpoint…, or the side list's Edit menu). No-op if there is no breakpoint there.</summary>
+    private void OnEditBreakpointRequest(ulong va)
+    {
+        ulong sva = va - LiveSlide;
+        if (!_pendingBreakpoints.TryGetValue(sva, out var def)) return;
+        if (Dialogs.AskBreakpointEdit(this, def) is not { } updated) return;
+        _pendingBreakpoints[sva] = updated;
+        if (_dbgViewLive && _dbg is { } d && d.HasBreakpoint(va))
+            d.Engine.ConfigureBreakpoint(va, updated.Condition, updated.HitMode, updated.HitTarget, updated.Enabled);
         Linear.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
     }
 
     /// <summary>Arm the pre-run breakpoints on the live engine once the image is mapped (called at the first
-    /// stop), translating each static VA by the live ASLR slide.</summary>
+    /// stop), translating each static VA by the live ASLR slide and applying its condition / hit-count / enabled
+    /// state and (for hardware breakpoints) kind/size.</summary>
     private void ApplyPendingBreakpoints()
     {
         if (_dbg is null || _pendingBreakpoints.Count == 0) return;
         ulong slide = LiveSlide;
-        foreach (var sva in _pendingBreakpoints) _dbg.Engine.SetBreakpoint(sva + slide);
+        foreach (var (sva, def) in _pendingBreakpoints)
+        {
+            ulong va = sva + slide;
+            if (def.Hardware) _dbg.Engine.SetHardwareBreakpoint(va, def.Kind, def.Size);
+            else _dbg.Engine.SetBreakpoint(va);
+            _dbg.Engine.ConfigureBreakpoint(va, def.Condition, def.HitMode, def.HitTarget, def.Enabled);
+        }
     }
 
     // ---- breakpoints side list ----
@@ -395,9 +441,17 @@ public partial class MainWindow : Window
         ulong slide = LiveSlide;              // 0 unless the listing is showing live addresses
         var names = _dbgViewLive ? _dbg?.LiveResult : _result;
         BreakpointList.ItemsSource = _pendingBreakpoints
-            .Select(sva => sva + slide)
-            .OrderBy(va => va)
-            .Select(va => new BreakpointItem(va, names?.NameFor(va) ?? ""))
+            .OrderBy(kv => kv.Key)
+            .Select(kv =>
+            {
+                ulong va = kv.Key + slide;
+                string name = names?.NameFor(va) ?? "";
+                string extra = kv.Value.Describe();
+                string label = extra.Length == 0 ? name
+                    : name.Length == 0 ? extra
+                    : $"{name}   {extra}";
+                return new BreakpointItem(va, label);
+            })
             .ToList();
     }
 
@@ -497,6 +551,7 @@ public partial class MainWindow : Window
     private void OnBreakpointActivate(object sender, MouseButtonEventArgs e) => NavigateToBreakpoint();
     private void OnBreakpointJump(object sender, RoutedEventArgs e) => NavigateToBreakpoint();
     private void OnBreakpointRemove(object sender, RoutedEventArgs e) { if (BreakpointList.SelectedItem is BreakpointItem b) OnBreakpointToggle(b.Va); }
+    private void OnBreakpointEditMenu(object sender, RoutedEventArgs e) { if (BreakpointList.SelectedItem is BreakpointItem b) OnEditBreakpointRequest(b.Va); }
     private void OnBreakpointListKey(object sender, KeyEventArgs e) { if (e.Key == Key.Delete && BreakpointList.SelectedItem is BreakpointItem b) { OnBreakpointToggle(b.Va); e.Handled = true; } }
 
     private void BeginDebug(Action<DebugSession> start)

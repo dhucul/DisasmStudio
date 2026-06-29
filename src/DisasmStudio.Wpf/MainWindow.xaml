@@ -230,13 +230,14 @@
                         <DockPanel>
                             <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
                                        Foreground="{StaticResource TextMuted}" FontSize="11"
-                                       Text="Breakpoints set with F2 or the gutter (before Run or during a session). Double-click to jump to it in the listing; press Delete or right-click to remove." />
+                                       Text="Breakpoints set with F2 or the gutter (before Run or during a session); right-click an instruction for a hardware breakpoint or to add a condition / hit-count. Double-click to jump; right-click here to edit or remove (Delete removes)." />
                             <ListBox x:Name="BreakpointList" MouseDoubleClick="OnBreakpointActivate"
                                      KeyDown="OnBreakpointListKey"
                                      FontFamily="Cascadia Mono, Consolas" FontSize="12">
                                 <ListBox.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="Jump to breakpoint" Click="OnBreakpointJump" />
+                                        <MenuItem Header="Edit breakpoint…" Click="OnBreakpointEditMenu" />
                                         <MenuItem Header="Remove breakpoint" Click="OnBreakpointRemove" />
                                     </ContextMenu>
                                 </ListBox.ContextMenu>

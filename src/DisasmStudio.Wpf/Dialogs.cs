@@ -7,7 +7,9 @@ using System.Windows.Data;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Debug;
 using DisasmStudio.Wpf.Services;
+using DisasmStudio.Wpf.ViewModels;
 
 namespace DisasmStudio.Wpf;
 
@@ -362,6 +364,146 @@ internal static class Dialogs
         panel.Children.Add(box);
         bool ok = ShowModal(owner, "Go to address", panel, box);
         return ok ? ParseHex(box.Text) : null;
+    }
+
+    /// <summary>Ask the kind (Execute / Write / Read-Write) and size (1/2/4/8 bytes) of a hardware breakpoint.
+    /// Execute breakpoints are forced to 1 byte. Returns null if cancelled.</summary>
+    public static (HwKind Kind, int Size)? AskHardwareBreakpoint(Window owner)
+    {
+        var kind = new ComboBox { Margin = new Thickness(0, 0, 0, 10) };
+        kind.Items.Add("Execute (code)");
+        kind.Items.Add("Write (data)");
+        kind.Items.Add("Read/Write (data)");
+        kind.SelectedIndex = 0;
+
+        var size = new ComboBox();
+        foreach (var s in new[] { "1", "2", "4", "8" }) size.Items.Add(s);
+        size.SelectedIndex = 0;
+
+        // Execute breakpoints are always 1 byte — disable the size picker when Execute is chosen.
+        void Sync() { bool exec = kind.SelectedIndex == 0; size.IsEnabled = !exec; if (exec) size.SelectedIndex = 0; }
+        kind.SelectionChanged += (_, _) => Sync();
+        Sync();
+
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label("Kind"));
+        panel.Children.Add(kind);
+        panel.Children.Add(Label("Size (bytes)"));
+        panel.Children.Add(size);
+
+        bool ok = ShowModal(owner, "Hardware breakpoint", panel, kind);
+        if (!ok) return null;
+        HwKind k = kind.SelectedIndex switch { 1 => HwKind.Write, 2 => HwKind.ReadWrite, _ => HwKind.Execute };
+        int sz = int.Parse((string)size.SelectedItem!, CultureInfo.InvariantCulture);
+        return (k, k == HwKind.Execute ? 1 : sz);
+    }
+
+    /// <summary>Edit a breakpoint's condition / hit-count / enabled state. Self-contained (not via
+    /// <see cref="ShowModal"/>) so OK can validate the condition inline and keep the dialog open on error.
+    /// Returns an updated <see cref="BpDef"/> (preserving the hardware kind/size of <paramref name="current"/>),
+    /// or null if cancelled.</summary>
+    public static BpDef? AskBreakpointEdit(Window owner, BpDef current)
+    {
+        var win = new Window
+        {
+            Title = "Edit breakpoint",
+            Owner = owner,
+            Width = 440,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            Background = Bg,
+            Foreground = Fg,
+        };
+
+        var cond = new TextBox { Text = current.Condition ?? "" };
+        var err = new TextBlock
+        {
+            Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0x6C, 0x6C)),
+            Margin = new Thickness(0, 4, 0, 0),
+            TextWrapping = TextWrapping.Wrap,
+            Visibility = Visibility.Collapsed,
+        };
+
+        var hitMode = new ComboBox { Margin = new Thickness(0, 0, 0, 10) };
+        hitMode.Items.Add("Ignore hit count");
+        hitMode.Items.Add("Break when hit count = N");
+        hitMode.Items.Add("Break when hit count ≥ N");
+        hitMode.Items.Add("Break every Nth hit");
+        hitMode.SelectedIndex = (int)current.HitMode;
+
+        var hitN = new TextBox { Text = current.HitTarget > 0 ? current.HitTarget.ToString(CultureInfo.InvariantCulture) : "" };
+        void SyncN() => hitN.IsEnabled = hitMode.SelectedIndex != 0;
+        hitMode.SelectionChanged += (_, _) => SyncN();
+        SyncN();
+
+        var enabled = new CheckBox { Content = "Enabled", IsChecked = current.Enabled, Margin = new Thickness(0, 6, 0, 0), Foreground = Fg };
+
+        string kindNote = current.Hardware
+            ? $"Hardware {current.Kind}{(current.Kind == HwKind.Execute ? "" : "/" + current.Size + "B")} breakpoint"
+            : "Software breakpoint";
+
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label(kindNote));
+        panel.Children.Add(Label("Condition (blank = always).  e.g.  rax == 5   ·   ecx < 0x10 && ZF == 1   ·   [rsp+8] == 0xDEAD"));
+        panel.Children.Add(cond);
+        panel.Children.Add(err);
+        panel.Children.Add(Label("Hit count"));
+        panel.Children.Add(hitMode);
+        panel.Children.Add(Label("N"));
+        panel.Children.Add(hitN);
+        panel.Children.Add(enabled);
+
+        BpDef? result = null;
+        var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 70, Margin = new Thickness(0, 0, 8, 0) };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 70 };
+        ok.Click += (_, _) =>
+        {
+            if (!ConditionExpr.TryParse(cond.Text, out _, out string? e))
+            {
+                err.Text = $"Condition error: {e}";
+                err.Visibility = Visibility.Visible;
+                return;   // keep the dialog open, entries preserved
+            }
+            var mode = (HitCountMode)hitMode.SelectedIndex;
+            int n = 0;
+            if (mode != HitCountMode.None && (!int.TryParse(hitN.Text, out n) || n <= 0))
+            {
+                err.Text = "Enter a positive whole number for N.";
+                err.Visibility = Visibility.Visible;
+                return;
+            }
+            result = new BpDef
+            {
+                Hardware = current.Hardware,
+                Kind = current.Kind,
+                Size = current.Size,
+                Enabled = enabled.IsChecked == true,
+                Condition = string.IsNullOrWhiteSpace(cond.Text) ? null : cond.Text.Trim(),
+                HitMode = mode,
+                HitTarget = n,
+            };
+            win.DialogResult = true;
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(16, 0, 16, 16),
+        };
+        buttons.Children.Add(ok);
+        buttons.Children.Add(cancel);
+
+        var root = new DockPanel();
+        DockPanel.SetDock(buttons, Dock.Bottom);
+        root.Children.Add(buttons);
+        root.Children.Add(panel);
+        win.Content = root;
+
+        cond.Loaded += (_, _) => cond.Focus();
+        win.ShowDialog();
+        return result;
     }
 
     private static TextBlock Label(string text) => new()

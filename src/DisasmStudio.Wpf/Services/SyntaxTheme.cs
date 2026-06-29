@@ -24,7 +24,8 @@ public static class SyntaxTheme
     public static readonly Brush Selection = B(0x24, 0x33, 0x49);
     public static readonly Brush CurrentLine = B(0x1B, 0x22, 0x30);
     public static readonly Brush CurrentIp = B(0x3A, 0x3A, 0x18);    // soft amber row — the debuggee's current instruction
-    public static readonly Brush BreakpointDot = B(0xD0, 0x4A, 0x4A); // red breakpoint marker
+    public static readonly Brush BreakpointDot = B(0xD0, 0x4A, 0x4A);   // red — software breakpoint marker
+    public static readonly Brush HwBreakpointDot = B(0x46, 0xB1, 0xC4); // soft cyan — hardware breakpoint marker
     public static readonly Brush CoveredInstr = B(0x1E, 0x2E, 0x22);  // soft dark green — an executed (covered) instruction row
 
     // Columns
