@@ -17,6 +17,7 @@
     <SolidColorBrush x:Key="AccentPressed" Color="#3A72CC" />
     <SolidColorBrush x:Key="AccentSoft"    Color="#1E2A3D" />
     <SolidColorBrush x:Key="Selection"     Color="#243349" />
+    <SolidColorBrush x:Key="StringRef"     Color="#D8A657" /><!-- referenced-at-call marker in the Strings list -->
 
     <!-- Re-point system selection brushes at the theme (lists / tree selection). -->
     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"                       Color="#243349" />

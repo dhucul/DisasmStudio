@@ -3,8 +3,13 @@ using DisasmStudio.Core.Formats;
 
 namespace DisasmStudio.Core.Analysis;
 
-/// <summary>A printable string found in the image, with the VA that locates it.</summary>
-public sealed record FoundString(ulong Va, int Length, bool Wide, string Text);
+/// <summary>A printable string found in the image, with the VA that locates it. <see cref="Referenced"/>
+/// marks a string recovered by following a live argument/register pointer at a debugger stop (so it can
+/// live on the heap, the stack, or in another module) rather than swept from a data section.</summary>
+public sealed record FoundString(ulong Va, int Length, bool Wide, string Text)
+{
+    public bool Referenced { get; init; }
+}
 
 /// <summary>
 /// Scans for printable ASCII and UTF-16LE runs in one pass over the memory-mapped backing.

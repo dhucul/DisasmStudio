@@ -24,6 +24,13 @@ public sealed class StringItem(FoundString s)
     public string Kind => s.Wide ? "wide" : "ascii";
     public string Text => s.Text;
 
+    /// <summary>True when this string was recovered from a live argument/register pointer at the current stop
+    /// (heap/stack/other module) rather than swept from a data section.</summary>
+    public bool Referenced => s.Referenced;
+
+    /// <summary>Glyph shown for a <see cref="Referenced"/> row so it stands out at the top of the live list.</summary>
+    public string Marker => s.Referenced ? "→" : "";
+
     /// <summary>Byte span of the string content (chars × 2 for wide), for range-based xref lookup.</summary>
     public int ByteLength => s.Wide ? s.Length * 2 : s.Length;
 }

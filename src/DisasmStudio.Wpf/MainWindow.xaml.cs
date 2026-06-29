@@ -399,11 +399,27 @@ public partial class MainWindow : Window
         _liveStringsScanning = true;
         _liveStringsPending = false;
         var img = live.Image;
+        var eng = _dbg.Engine;
+        var regs = eng.GetRegisters();   // captured on the UI thread; only memory reads happen off-thread below
         int gen = ++_liveStringsGen;
         Task.Run(() =>
         {
             List<FoundString>? found = null;
-            try { found = StringScanner.Scan(img, minLength: 4, maxResults: MaxStringRows, useVirtualSize: true); }
+            int refCount = 0;
+            try
+            {
+                var section = StringScanner.Scan(img, minLength: 4, maxResults: MaxStringRows, useVirtualSize: true);
+                // The strings the *current call* is actually using — recovered by dereferencing the live
+                // argument/register pointers (CDA.Modern-style). These reach heap/stack/other-module strings the
+                // section sweep above can't see. Listed first so they're visible; deduped against the section set
+                // by VA (a string that is in .rdata *and* referenced shows once, flagged referenced).
+                var refs = ArgStringScanner.Scan(eng, regs);
+                refCount = refs.Count;
+                var seen = new HashSet<ulong>(refs.Select(r => r.Va));
+                found = new List<FoundString>(refs.Count + section.Count);
+                found.AddRange(refs);
+                foreach (var s in section) if (seen.Add(s.Va)) found.Add(s);
+            }
             catch { /* a memory read raced a resume / exit */ }
             finally { _liveStringsScanning = false; }
             Dispatcher.BeginInvoke(() =>
@@ -414,9 +430,10 @@ public partial class MainWindow : Window
                     _stringsView = CollectionViewSource.GetDefaultView(_strings);
                     _stringsView.Filter = StringFilterPredicate;
                     StringList.ItemsSource = _stringsView;
-                    // A per-stop header (count + the IP it was scanned at) so it's visible that the list re-scans
-                    // on each breakpoint, even when the contents happen to be unchanged.
-                    StringHeader.Text = $"live · {_strings.Count:N0} strings · scanned @ {_dbg?.CurrentIp:X}";
+                    // A per-stop header (counts + the IP it was scanned at) so it's visible that the list re-scans
+                    // on each breakpoint; "+N ref" is how many strings the current call's pointers reached.
+                    string refPart = refCount > 0 ? $" (+{refCount} ref)" : "";
+                    StringHeader.Text = $"live · {_strings.Count:N0} strings{refPart} · scanned @ {_dbg?.CurrentIp:X}";
                 }
                 if (_liveStringsPending && StringsTabVisible) RefreshLiveStrings();   // a stop arrived during the scan
             });

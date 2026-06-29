@@ -181,6 +181,8 @@
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Marker}" Foreground="{StaticResource StringRef}" Width="14"
+                                                       ToolTip="Referenced by the current call — recovered from a live argument/register pointer (heap/stack/other module)" />
                                             <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="92" />
                                             <TextBlock Text="{Binding Text}" Foreground="{StaticResource TextPrimary}"
                                                        TextTrimming="CharacterEllipsis" />
