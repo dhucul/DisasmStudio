@@ -412,6 +412,16 @@ public sealed partial class DebuggerEngine
 
         if (code is Native.EXCEPTION_SINGLE_STEP or Native.STATUS_WX86_SINGLE_STEP)
         {
+            // SMC guard-step: a single-step we armed (in SmcHandleGuardViolation) to let a write complete
+            // through a guarded code page. Re-arm the page's breakpoints and re-apply PAGE_GUARD. This must
+            // run BEFORE the internal-step and !stepping handling below: the SMC trap flag is armed directly,
+            // without a StepState, so a guard-step during a Go has stepping == false and would otherwise be
+            // misclassified as a single-step we didn't arm and silently dropped, leaving every breakpoint on
+            // the page disarmed, the guard never restored, and _pendingGuardReeval/_guardDisarmedByPage leaked.
+            // SmcHandleGuardStep is a no-op (returns false) when this thread has no pending guard re-evaluation,
+            // so it is safe to consult first on every single-step event.
+            bool smcStep = SmcHandleGuardStep(ev.dwThreadId, out _);
+
             // A step armed only to run one instruction off an internal anti-debug hook, then re-arm it.
             if (_internalStep.Remove(ev.dwThreadId, out ulong isAddr))
             {
@@ -420,10 +430,10 @@ public sealed partial class DebuggerEngine
             }
             bool stepping = _stepping.TryGetValue(ev.dwThreadId, out var st);
             // Hardware watchpoint? Dr6 low bits identify the slot — but only when THIS thread isn't the one we
-            // armed a software single-step on (its trap #DB is indistinguishable from a watchpoint otherwise).
+            // armed a software single-step on (its trap #DB is indistinguishable from a watchpoint otherwise), nor the one completing an SMC guard-step (same trap-flag #DB).
             using (var c = new Ctx(Is32))
             {
-                if (c.Get(hThread) && (c.Dr6 & 0xF) != 0 && !stepping)
+                if (c.Get(hThread) && (c.Dr6 & 0xF) != 0 && !stepping && !smcStep)
                 {
                     c.Dr6 = 0; c.Set(hThread);
                     Stopped?.Invoke(new StopInfo(StopReason.Watchpoint, ev.dwThreadId, c.Ip, code));
@@ -432,15 +442,16 @@ public sealed partial class DebuggerEngine
             }
             if (!stepping)
             {
+                if (smcStep) return false;   // SMC guard-step during a Go: keep running (breakpoints re-armed above)
                 // ICEBP/int1 (or a debuggee-set trap flag) anti-debug: when hiding, deliver to the program's
                 // handler instead of swallowing, so its single-step SEH fires as if undebugged.
                 if (HideFromDebugger && IsProgramDebugInstruction(addr, step: true)) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
                 return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
             }
             _stepping.Remove(ev.dwThreadId);
-            // SMC guard-step: a single-step we armed to let a write complete through our guarded page.
-            if (SmcHandleGuardStep(ev.dwThreadId, out _))
-                return false;
+            // A guard-step can coincide with a user single-step when the stepped instruction itself wrote to a
+            // guarded page: SmcHandleGuardStep already re-armed the page's breakpoints, so ArmAddr below is a
+            // harmless no-op for any it already armed, and the user's StopAfter is still honored.
             if (st.ReArm != 0) ArmAddr(st.ReArm);   // re-arm the breakpoint this thread stepped off
             if (st.StopAfter) { Stopped?.Invoke(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
             return false;   // step-off of a breakpoint during a Go — keep running

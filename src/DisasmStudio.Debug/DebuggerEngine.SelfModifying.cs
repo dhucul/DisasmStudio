@@ -40,9 +40,11 @@ public sealed partial class DebuggerEngine
     {
         SmcTrackingEnabled = true;
         if (_proc == IntPtr.Zero) return;
-        Dictionary<ulong, Breakpoint> bps;
-        lock (_lock) bps = _swBps.Values.Where(b => b.Armed).ToDictionary(b => b.Address);
-        foreach (var (va, _) in bps)
+        // Snapshot the armed breakpoint addresses under the lock; GuardPageForBreakpoint re-acquires
+        // _lock internally for each page, so we don't hold it across all the VirtualProtectEx syscalls.
+        List<ulong> bps;
+        lock (_lock) bps = _swBps.Values.Where(b => b.Armed).Select(b => b.Address).ToList();
+        foreach (var va in bps)
             GuardPageForBreakpoint(va);
     }
 
@@ -56,64 +58,85 @@ public sealed partial class DebuggerEngine
     }
 
     // ---- page guard helpers (debug loop / stopped) ----
+    //
+    // All helpers below take _lock internally (Monitor is re-entrant). This keeps _codeGuards consistent
+    // whether the caller is the UI thread (breakpoint add/remove while stopped) or the debug-loop thread.
 
     private void GuardPageForBreakpoint(ulong bpVa)
     {
-        ulong page = bpVa & ~0xFFFUL;
-        if (_codeGuards.TryGetValue(page, out var g))
+        lock (_lock)
         {
-            g.Breakpoints.Add(bpVa);
-            return;
-        }
+            ulong page = bpVa & ~0xFFFUL;
+            if (_codeGuards.TryGetValue(page, out var g))
+            {
+                g.Breakpoints.Add(bpVa);
+                return;
+            }
 
-        int mbiSize = Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
-        if (Native.VirtualQueryEx(_proc, page, out var mbi, (nuint)mbiSize) == 0)
-            return;
-        if (mbi.State != Native.MEM_COMMIT) return;
-        uint prot = mbi.Protect;
-        if ((prot & 0xF0) == 0) return;        // not executable - skip
-        if ((prot & Native.PAGE_GUARD) != 0)   // already guarded (unlikely for code, but tolerate)
-        {
-            g = new CodePageGuard { OriginalProtect = prot };
+            int mbiSize = Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
+            if (Native.VirtualQueryEx(_proc, page, out var mbi, (nuint)mbiSize) == 0)
+                return;
+            if (mbi.State != Native.MEM_COMMIT) return;
+            uint prot = mbi.Protect;
+            if ((prot & 0xF0) == 0) return;        // not executable - skip
+            if ((prot & Native.PAGE_GUARD) != 0)   // already guarded (unlikely for code, but tolerate)
+            {
+                g = new CodePageGuard { OriginalProtect = prot };
+                g.Breakpoints.Add(bpVa);
+                _codeGuards[page] = g;
+                return;
+            }
+
+            // Add PAGE_GUARD on top of the current execute+read(+write) protection.
+            uint guarded = prot | Native.PAGE_GUARD;
+            if (!Native.VirtualProtectEx(_proc, page, (nuint)0x1000, guarded, out uint old))
+                return;
+
+            g = new CodePageGuard { OriginalProtect = old };
             g.Breakpoints.Add(bpVa);
             _codeGuards[page] = g;
-            return;
         }
-
-        // Add PAGE_GUARD on top of the current execute+read(+write) protection.
-        uint guarded = prot | Native.PAGE_GUARD;
-        if (!Native.VirtualProtectEx(_proc, page, (nuint)0x1000, guarded, out uint old))
-            return;
-
-        g = new CodePageGuard { OriginalProtect = old };
-        g.Breakpoints.Add(bpVa);
-        _codeGuards[page] = g;
     }
 
     private void UnguardAllPages()
     {
-        foreach (var (page, g) in _codeGuards)
-            Native.VirtualProtectEx(_proc, page, (nuint)0x1000, g.OriginalProtect, out _);
-        _codeGuards.Clear();
+        lock (_lock)
+        {
+            foreach (var (page, g) in _codeGuards)
+                Native.VirtualProtectEx(_proc, page, (nuint)0x1000, g.OriginalProtect, out _);
+            _codeGuards.Clear();
+        }
     }
 
     private void UnguardPageIfEmpty(ulong page)
     {
-        if (!_codeGuards.TryGetValue(page, out var g)) return;
-        if (g.Breakpoints.Count > 0) return;
-        Native.VirtualProtectEx(_proc, page, (nuint)0x1000, g.OriginalProtect, out _);
-        _codeGuards.Remove(page);
+        lock (_lock)
+        {
+            if (!_codeGuards.TryGetValue(page, out var g)) return;
+            if (g.Breakpoints.Count > 0) return;
+            Native.VirtualProtectEx(_proc, page, (nuint)0x1000, g.OriginalProtect, out _);
+            _codeGuards.Remove(page);
+        }
     }
 
     internal void SmcUntrackBreakpoint(ulong bpVa)
     {
-        ulong page = bpVa & ~0xFFFUL;
-        if (!_codeGuards.TryGetValue(page, out var g)) return;
-        g.Breakpoints.Remove(bpVa);
-        UnguardPageIfEmpty(page);
+        lock (_lock)
+        {
+            ulong page = bpVa & ~0xFFFUL;
+            if (!_codeGuards.TryGetValue(page, out var g)) return;
+            g.Breakpoints.Remove(bpVa);
+            UnguardPageIfEmpty(page);
+        }
     }
 
     // ---- guard-page violation: intercept the exception, run the write, re-evaluate ----
+    //
+    // Concurrency: the debug loop is single-threaded; the whole process is suspended during each event, so
+    // guard violations/steps are serialized. After lifting a page's guard, no other thread can fault on it
+    // until the guard-step re-applies it, so same-page concurrent writes are naturally serialized. The one
+    // edge case is a single instruction (e.g. rep stos) faulting on two guarded pages: the second fault
+    // supersedes the first's trap, so we drain the pending re-eval in SmcHandleGuardViolation.
 
     // Pending re-evaluation: thread id -> page that had its guard temporarily lifted.
     private readonly Dictionary<uint, ulong> _pendingGuardReeval = [];
@@ -128,6 +151,19 @@ public sealed partial class DebuggerEngine
         IntPtr hThread = ThreadHandle(tid);
         if (hThread == IntPtr.Zero) return false;
 
+        // If this thread already has a pending guard re-eval, its earlier guard-step's single-step was
+        // superseded by this new fault (a single instruction, e.g. rep stos, faulting on a second guarded
+        // page before the first's trap fired). Complete it now so the previous page's breakpoints aren't
+        // left disarmed when _pendingGuardReeval[tid] is overwritten below.
+        ulong[]? prevModified = null;
+        ulong prevPage = 0;
+        lock (_lock)
+        {
+            if (_pendingGuardReeval.Remove(tid, out prevPage))
+                prevModified = RearmAndReguard(prevPage);
+        }
+        if (prevModified is not null && prevModified.Length > 0)
+            CodeModified?.Invoke(prevPage, prevModified);
         // 1. Lift the guard so the write can complete without re-faulting.
         Native.VirtualProtectEx(_proc, page, (nuint)0x1000, guard.OriginalProtect, out _);
 
@@ -168,50 +204,48 @@ public sealed partial class DebuggerEngine
     internal bool SmcHandleGuardStep(uint tid, out ulong page)
     {
         page = 0;
+        ulong[] modified;
         lock (_lock)
         {
             if (!_pendingGuardReeval.Remove(tid, out page))
                 return false;
+            modified = RearmAndReguard(page);
         }
+        // Notify (outside the lock so handlers can call back into the engine).
+        if (modified.Length > 0)
+            CodeModified?.Invoke(page, modified);
+        return true;
+    }
 
-        // Re-arm every breakpoint we disarmed for the step. For each, read the current byte:
-        // if the write didn't touch it, the byte is still the original and we restore 0xCC;
-        // if it WAS overwritten, the live byte is the new code, so we save it and write 0xCC.
+    /// <summary>Re-arm every breakpoint disarmed on <paramref name="page"/> for a guard-step, re-apply
+    /// PAGE_GUARD, and return the VAs whose byte was changed by the write. Called under _lock.</summary>
+    private ulong[] RearmAndReguard(ulong page)
+    {
         var modified = new List<ulong>();
-        lock (_lock)
+        if (_guardDisarmedByPage.Remove(page, out var disarmed))
         {
-            if (_guardDisarmedByPage.Remove(page, out var disarmed))
+            foreach (ulong va in disarmed)
             {
-                foreach (ulong va in disarmed)
-                {
-                    if (!_swBps.TryGetValue(va, out var bp)) continue;
-                    var live = ReadMemory(va, 1);
-                    if (live.Length != 1) continue;
-                    bp.Original = live[0];
-                    WriteCodeNoLock(va, [0xCC]);
-                    bp.Armed = true;
-                    // If the byte we just read (the restored original from the write) is not 0xCC,
-                    // the write clobbered our 0xCC - report it.
-                    if (live[0] != 0xCC)
-                        modified.Add(va);
-                }
+                if (!_swBps.TryGetValue(va, out var bp)) continue;
+                var live = ReadMemory(va, 1);
+                if (live.Length != 1) continue;
+                // The write clobbered our breakpoint if the live byte differs from the original we
+                // restored before the step (an untouched address still holds bp.Original).
+                bool clobbered = live[0] != bp.Original;
+                bp.Original = live[0];
+                WriteCodeNoLock(va, [0xCC]);
+                bp.Armed = true;
+                if (clobbered)
+                    modified.Add(va);
             }
         }
-
         // Re-apply the guard.
-        CodePageGuard? guard;
-        lock (_lock) _codeGuards.TryGetValue(page, out guard);
-        if (guard is not null)
+        if (_codeGuards.TryGetValue(page, out var guard))
         {
             uint guarded = guard.OriginalProtect | Native.PAGE_GUARD;
             Native.VirtualProtectEx(_proc, page, (nuint)0x1000, guarded, out _);
         }
-
-        // Notify.
-        if (modified.Count > 0)
-            CodeModified?.Invoke(page, modified.ToArray());
-
-        return true;
+        return modified.ToArray();
     }
 
     /// <summary>Write bytes without VirtualProtect/FlushInstructionCache (callers already manage that).
