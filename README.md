@@ -93,13 +93,23 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   image (dumped from memory) so the disassembly, functions, strings and xrefs appear; with a binary open
   its static analysis is rebased onto the process instead. The disassembly shows **live process memory**
   (so packed/self-modifying code is shown as it executes), with the current instruction highlighted and
-  followed. Run/Continue (F5), Step Into (F7), Step Over (F8), Step Out (Shift+F11), Pause, Stop,
+  followed. Run/Continue (F5), Step Into (F7), Step Over (F8), Step Out (Shift+F11),
+  **Continue-to-return** (Ctrl+F9 — run on, letting calls run full-speed, and stop *on* the current
+  function's `ret`), Pause, Stop,
   **Detach** (stop debugging but leave the program running — all breakpoints and hide-layer patches are
   removed and the debug registers cleared first), and Run-to-cursor; software breakpoints (F2 / gutter)
   and hardware breakpoints + watchpoints (Dr0–3). A bottom panel shows **registers** (editable, with
   x64dbg-style **dereferencing** — `r9 → start`, `rcx → "C:\\…"`), the **stack** and a **memory dump**
   (both dereferenced), the **call stack**, and breakpoints, threads and modules. 32-bit targets are
   debugged from the 64-bit host via WOW64.
+- **Execution trace / coverage (◴ Trace):** highlights the code that actually runs. Toggle it on while
+  stopped and it plants one-shot breakpoints at every basic-block start of the loaded image; as the
+  program runs — and as you step (Into/Over/Out) — executed instructions are tinted green in the linear
+  listing. Each block records once, so it self-removes and settles to near-native speed, and the planting
+  runs on a background thread so the UI never blocks. Click **◴ Trace** again to stop tracing *without
+  pausing* (the breakpoints are lifted as the program runs on); **Clear trace** wipes the highlights,
+  which otherwise persist on the static listing for post-run inspection. (For normal debugging, not
+  packed/anti-debug targets.)
 - **Debug a DLL:** a DLL can't be launched on its own, so pressing Run on a loaded DLL opens a small
   *Debug DLL* dialog that hosts it in an EXE (the way x64dbg uses a loaddll stub). The default host is
   the bitness-matched OS `rundll32.exe`; you can browse to a custom host EXE (e.g. the real consumer

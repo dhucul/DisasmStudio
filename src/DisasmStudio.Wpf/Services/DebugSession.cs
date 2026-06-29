@@ -151,6 +151,16 @@ public sealed class DebugSession
     /// <summary>Detach the debugger but keep the debuggee running. Only meaningful while stopped.</summary>
     public void Detach() => Engine.Detach();
     public void RunToCursor(ulong va) => Engine.RunToCursor(va);
+    /// <summary>Run until any of <paramref name="targets"/> is reached (used by "Continue to return" with the
+    /// current function's ret sites). Stops at the first one hit; the function's calls run at full speed.</summary>
+    public void RunToAny(IEnumerable<ulong> targets) => Engine.RunToAny(targets);
+
+    // ---- execution coverage ----
+    public void SetCoveragePoints(IEnumerable<ulong> leaders) => Engine.SetCoveragePoints(leaders);
+    public ulong[] CoveredPoints() => Engine.CoveredPoints();
+    public void ClearCoveredPoints() => Engine.ClearCoveredPoints();
+    public void RequestStopCoverage() => Engine.RequestStopCoverage();
+    public void ClearCoverage() => Engine.ClearCoverage();
 
     public bool HasBreakpoint(ulong va) => Engine.HasBreakpoint(va);
     public void ToggleBreakpoint(ulong va) { if (Engine.HasBreakpoint(va)) Engine.RemoveBreakpoint(va); else Engine.SetBreakpoint(va); }

@@ -25,6 +25,7 @@ public static class SyntaxTheme
     public static readonly Brush CurrentLine = B(0x1B, 0x22, 0x30);
     public static readonly Brush CurrentIp = B(0x3A, 0x3A, 0x18);    // soft amber row — the debuggee's current instruction
     public static readonly Brush BreakpointDot = B(0xD0, 0x4A, 0x4A); // red breakpoint marker
+    public static readonly Brush CoveredInstr = B(0x1E, 0x2E, 0x22);  // soft dark green — an executed (covered) instruction row
 
     // Columns
     public static readonly Brush Address = B(0x6B, 0x8F, 0xD6);   // soft periwinkle

@@ -84,6 +84,9 @@ public sealed partial class DebuggerEngine
     private readonly Dictionary<ulong, Breakpoint> _swBps = [];
     private readonly List<Breakpoint> _hwBps = [];
     private readonly Dictionary<ulong, byte> _tempBps = [];
+    private readonly Dictionary<ulong, byte> _coverageBps = [];   // one-shot silent BPs at block leaders (execution coverage)
+    private readonly HashSet<ulong> _coveredPoints = [];          // block leaders that have fired (live VAs)
+    private volatile bool _clearCoverageRequested;               // UI asked to stop tracing while running; honoured at the next event
 
     private readonly BlockingCollection<(ResumeMode Mode, ulong Target)> _resume = new();
     private readonly Queue<ulong[]> _runToAnyTargets = new();
@@ -321,6 +324,25 @@ public sealed partial class DebuggerEngine
             if (_pendingReturns.ContainsKey(addr)) { HandleReturnHook(addr, hThread); return false; }
             // internal anti-anti-debug hook (ntdll query emulation) — handled silently, never surfaced
             if (_internalBps.ContainsKey(addr)) { HandleAntiDebugHook(addr, ev.dwThreadId, hThread); return false; }
+            // execution-coverage one-shot: record the block leader and drop its entry. If a temp or user
+            // breakpoint also sits here (e.g. a ret that is both a block leader and a "Continue to return"
+            // target), leave the 0xCC and fall through so that stop still surfaces below; otherwise restore the
+            // byte, rewind over the 0xCC, and continue silently — so a covered block costs nothing on re-entry.
+            if (_coverageBps.ContainsKey(addr))
+            {
+                byte covOrig; bool otherBp;
+                lock (_lock)
+                {
+                    _coverageBps.Remove(addr, out covOrig);
+                    _coveredPoints.Add(addr);
+                    otherBp = _tempBps.ContainsKey(addr) || (_swBps.TryGetValue(addr, out var ub) && ub.Armed);
+                }
+                // "Stop trace" while running: the process is frozen on this event, so remove every remaining
+                // coverage breakpoint now (safe — single-threaded w.r.t. the debug loop) and the program then
+                // runs clean at full speed. Driven off a coverage hit because the target is actively taking them.
+                if (_clearCoverageRequested) { _clearCoverageRequested = false; ClearCoverage(); }
+                if (!otherBp) { WriteCode(addr, [covOrig]); SetIp(hThread, addr); return false; }
+            }
             // temp / one-shot breakpoint
             if (RemoveTempBpIfPresent(addr))
             {
@@ -637,6 +659,9 @@ public sealed partial class DebuggerEngine
             _swBps.Clear();
             foreach (var (va, orig) in _tempBps) WriteCode(va, [orig]);
             _tempBps.Clear();
+            foreach (var (va, orig) in _coverageBps) WriteCode(va, [orig]);   // else a detached survivor keeps our 0xCCs and crashes
+            _coverageBps.Clear();
+            _coveredPoints.Clear();
             foreach (var (va, bp) in _internalBps) WriteCode(va, [bp.Original]);
             _internalBps.Clear();
             foreach (var (va, pend) in _pendingReturns) WriteCode(va, [pend.Orig]);
@@ -852,6 +877,54 @@ public sealed partial class DebuggerEngine
             WriteCode(va, [orig]);
     }
 
+    // ---- execution coverage (silent one-shot breakpoints at basic-block leaders) ----
+
+    /// <summary>Plant one-shot silent breakpoints at the given (live) basic-block leaders. Call while stopped
+    /// (the debuggee is frozen). Skips an address that already carries a software / temp / internal breakpoint.
+    /// Each fires at most once: on hit it is removed, the leader recorded, and execution continues without a
+    /// surfaced stop — so a covered block costs nothing on re-entry.</summary>
+    public void SetCoveragePoints(IEnumerable<ulong> vas)
+    {
+        _clearCoverageRequested = false;   // a fresh instrumentation supersedes any pending stop request
+        foreach (ulong va in vas)
+        {
+            bool plant = false;
+            lock (_lock)
+            {
+                if (!_coverageBps.ContainsKey(va) && !_swBps.ContainsKey(va) && !_tempBps.ContainsKey(va)
+                    && !_internalBps.ContainsKey(va))
+                {
+                    var o = ReadMemory(va, 1);
+                    if (o.Length == 1) { _coverageBps[va] = o[0]; plant = true; }
+                }
+            }
+            if (plant) WriteCode(va, [0xCC]);
+        }
+    }
+
+    /// <summary>A snapshot of the block leaders hit so far (live VAs). Cheap; safe to poll while running.</summary>
+    public ulong[] CoveredPoints() { lock (_lock) return _coveredPoints.ToArray(); }
+
+    /// <summary>Forget the recorded leaders without touching the breakpoints (no memory writes) — safe to call
+    /// while the debuggee is running. Blocks executed afterwards are recorded afresh.</summary>
+    public void ClearCoveredPoints() { lock (_lock) _coveredPoints.Clear(); }
+
+    /// <summary>Stop tracing while the debuggee keeps running: request that every remaining coverage breakpoint
+    /// be removed at the next debug event (it is unsafe to rewrite the running target's code from another
+    /// thread). The target is actively taking coverage hits, so this is honoured almost immediately and the
+    /// program then runs clean at full speed — no pause required.</summary>
+    public void RequestStopCoverage() => _clearCoverageRequested = true;
+
+    /// <summary>Remove any outstanding coverage breakpoints (restoring their bytes) and forget the recorded
+    /// leaders. Call while stopped; a no-op once the process has exited.</summary>
+    public void ClearCoverage()
+    {
+        KeyValuePair<ulong, byte>[] bps;
+        lock (_lock) { bps = _coverageBps.ToArray(); _coverageBps.Clear(); _coveredPoints.Clear(); }
+        if (_proc == IntPtr.Zero) return;
+        foreach (var (va, orig) in bps) WriteCode(va, [orig]);
+    }
+
     private void ProgramHwAllThreads() { lock (_lock) foreach (var h in _threads.Values) ProgramHwForThread(h); }
 
     private void ProgramHwForThread(IntPtr hThread)
@@ -898,6 +971,8 @@ public sealed partial class DebuggerEngine
             foreach (var bp in _swBps.Values)
                 if (bp.Armed && bp.Address >= addr && bp.Address < end) buf[bp.Address - addr] = bp.Original;
             foreach (var kv in _tempBps)
+                if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value;
+            foreach (var kv in _coverageBps)
                 if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value;
             foreach (var kv in _internalBps)
                 if (kv.Value.Armed && kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value.Original;

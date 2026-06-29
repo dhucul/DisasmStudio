@@ -63,6 +63,7 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? PatchRequested;
     public event Action<ulong>? BreakpointToggleRequested;
     public event Action<ulong>? RunToCursorRequested;
+    public event Action? RunToReturnRequested;
     public event Action<ulong>? CaptureFunctionRequested;
     /// <summary>A transient one-line status message (e.g. why "Follow target" did nothing).</summary>
     public event Action<string>? StatusRequested;
@@ -71,6 +72,8 @@ public sealed class LinearDisassemblyView : Grid
     public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va); else _surface.InvalidateVisual(); }
     /// <summary>Predicate the gutter uses to mark addresses that have a breakpoint.</summary>
     public Func<ulong, bool>? IsBreakpointAt { get; set; }
+    /// <summary>Predicate the renderer uses to tint instructions that have executed (coverage overlay).</summary>
+    public Func<ulong, bool>? IsInstrHit { get; set; }
 
     public LinearDisassemblyView()
     {
@@ -569,6 +572,9 @@ public sealed class LinearDisassemblyView : Grid
                 }
             }
 
+            // Coverage tint first, so the current-IP amber and the selection paint on top of it.
+            if (IsInstrHit?.Invoke(va) == true)
+                dc.DrawRectangle(SyntaxTheme.CoveredInstr, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
             if (_ipVa != 0 && va == _ipVa)
                 dc.DrawRectangle(SyntaxTheme.CurrentIp, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
             if (IsBreakpointAt?.Invoke(va) == true)
@@ -788,6 +794,8 @@ public sealed class LinearDisassemblyView : Grid
         toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
         var runTo = new MenuItem { Header = "Run to cursor" };
         runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
+        var runToRet = new MenuItem { Header = "Continue to return", InputGestureText = "Ctrl+F9" };
+        runToRet.Click += (_, _) => RunToReturnRequested?.Invoke();
         var captureFn = new MenuItem { Header = "Capture this function" };
         captureFn.Click += (_, _) => { if (CaretVa != 0) CaptureFunctionRequested?.Invoke(CaretVa); };
         menu.Items.Add(copy);
@@ -801,6 +809,7 @@ public sealed class LinearDisassemblyView : Grid
         menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
         menu.Items.Add(runTo);
+        menu.Items.Add(runToRet);
         menu.Items.Add(captureFn);
         menu.Items.Add(patch);
         _surface.ContextMenu = menu;
