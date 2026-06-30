@@ -162,6 +162,11 @@ public sealed class DebugSession
     public void RequestStopCoverage() => Engine.RequestStopCoverage();
     public void ClearCoverage() => Engine.ClearCoverage();
 
+    // ---- instruction trace (single-step the loaded module from the current stop) ----
+    public void StartTrace(ulong loVa, ulong hiVa) => Engine.StartTrace(loVa, hiVa);
+    public void StopTrace() => Engine.StopTrace();
+    public void RequestStopTrace() => Engine.RequestStopTrace();
+
     public bool HasBreakpoint(ulong va) => Engine.HasBreakpoint(va);
     public void ToggleBreakpoint(ulong va) { if (Engine.HasBreakpoint(va)) Engine.RemoveBreakpoint(va); else Engine.SetBreakpoint(va); }
 

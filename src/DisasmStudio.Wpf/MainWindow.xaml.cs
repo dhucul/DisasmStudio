@@ -48,16 +48,11 @@ public partial class MainWindow : Window
     private ExceptionFilter _exceptionFilter = ExceptionStore.Load();   // persisted x64dbg-style exception policy (swapped wholesale on edit)
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
-    // Execution coverage (block-level, near-native). _coveredInstrs holds executed instruction VAs in *static*
-    // space (like _pendingBreakpoints) so the tint maps cleanly during a run and persists for post-run inspection.
-    private bool _coverageEnabled;            // the ◴ Hits toggle
-    private bool _coverageInstrumented;       // coverage breakpoints planted in the current session
-    private bool _coveragePlanting;           // a background plant is writing breakpoints — resume/detach gated until done
-    private bool _coverageArming;             // enable → fully armed (CFG build + plant); resume is deferred over this whole window
-    private bool _goWhenArmed;                // user hit Continue while arming → auto-continue once the breakpoints are in
-    private bool CoverageBusy => _coverageArming || _coveragePlanting;   // resume/detach must wait while either is true
-    private List<ulong>? _coverageLeaders;    // block leaders to plant, static VAs
-    private Dictionary<ulong, ulong[]>? _leaderToInstrs;   // leader (static) -> its instruction VAs (static)
+    // Instruction trace (◴ Trace). Single-steps the loaded module from the current stop and records each executed
+    // instruction in *static* space (like _pendingBreakpoints) so the tint maps cleanly during a run and persists
+    // for post-run inspection. Calls into system DLLs run at full speed (see DebuggerEngine.StartTrace). Nothing is
+    // planted up front, so it begins recording exactly where you are — no whole-image arming.
+    private bool _coverageEnabled;            // the ◴ Trace toggle (trace active)
     private readonly HashSet<ulong> _coveredInstrs = [];
     private DispatcherTimer? _coverageTimer;  // polls the engine while running so highlights grow live
     private bool _restartPending;           // relaunch the target once the current debuggee has exited
@@ -128,7 +123,7 @@ public partial class MainWindow : Window
         // Coverage tint: _coveredInstrs holds executed instruction VAs in static space (like the breakpoint set),
         // so `va - LiveSlide` maps the shown (live) address back to it during a run and matches directly after.
         Linear.IsInstrHit = va => _coveredInstrs.Count > 0 && _coveredInstrs.Contains(va - LiveSlide);
-        Linear.RunToCursorRequested += va => { if (!CoverageBusy) _dbg?.RunToCursor(va); };
+        Linear.RunToCursorRequested += va => _dbg?.RunToCursor(va);
         Linear.RunToReturnRequested += () => OnRunToReturn(this, new RoutedEventArgs());
         Linear.CaptureFunctionRequested += CaptureFunctionAt;
         Linear.StatusRequested += msg => StatusText.Text = msg;
@@ -256,12 +251,6 @@ public partial class MainWindow : Window
     // ---- debugger ----
     private void OnDebugRun(object sender, RoutedEventArgs e)
     {
-        if (CoverageBusy)   // arming/planting — don't run into an un-instrumented target; continue automatically once armed
-        {
-            _goWhenArmed = _dbg is { IsStopped: true };
-            StatusText.Text = "Trace still arming — it will continue on its own when ready (no need to click again).";
-            return;
-        }
         if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return; }   // continue only from a stop (else it skips the next stop)
         if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
@@ -576,16 +565,16 @@ public partial class MainWindow : Window
 
     // Stepping is only valid from a stop; ignore it (button or key) while the debuggee is running, where it
     // would queue a resume that the loop consumes at the next stop — silently skipping that stop.
-    private void OnStepInto(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true } && !CoverageBusy) _dbg.StepInto(); }
-    private void OnStepOver(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true } && !CoverageBusy) _dbg.StepOver(); }
-    private void OnStepOut(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true } && !CoverageBusy) _dbg.StepOut(); }
+    private void OnStepInto(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepInto(); }
+    private void OnStepOver(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOver(); }
+    private void OnStepOut(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOut(); }
 
     /// <summary>Continue until the current function returns, stopping ON its ret (calls run at full speed). Plants
     /// one-shot breakpoints on every ret of the function the IP is in (via its CFG) and runs to whichever is hit
     /// first. Falls back to Step Out when the function or its rets can't be determined (unanalyzed/JIT code).</summary>
     private void OnRunToReturn(object sender, RoutedEventArgs e)
     {
-        if (_dbg is not { IsStopped: true } || _result is null || CoverageBusy) return;
+        if (_dbg is not { IsStopped: true } || _result is null) return;
         ulong ip = _dbg.CurrentIp;
         var fn = FindFunction(ip);
         if (fn is not null)
@@ -614,34 +603,35 @@ public partial class MainWindow : Window
 
     private void OnToggleCoverage(object sender, RoutedEventArgs e)
     {
-        if (_coveragePlanting) { CoverageToggle.IsChecked = _coverageEnabled; return; }   // ignore mid-plant; keep the visual state
         if (CoverageToggle.IsChecked == true)
         {
-            if (_dbg is not { IsStopped: true } || !_dbgViewLive || _result is null)
+            if (_dbg is not { IsStopped: true } || !_dbgViewLive || _dbg.LiveResult is not { } live)
             {
                 CoverageToggle.IsChecked = false;
                 StatusText.Text = "Trace: start debugging and pause first, then enable ◴ Trace.";
                 return;
             }
             _coverageEnabled = true;
-            _coverageArming = true;   // gate Continue/step until the breakpoints are actually in (build + plant are async)
-            // Seed with the instruction we're stopped on, so it's traced once we step off it (it shows amber as
-            // the current IP until then). Without this the very first instruction never lights up.
+            // Trace from where we are: on the next Continue/step the engine single-steps the loaded module and
+            // records each instruction; nothing is planted up front, so recording starts exactly at this point.
+            // Calls into system DLLs run at full speed and tracing resumes when they return.
+            _dbg.StartTrace(live.Image.MinVa, live.Image.MaxVa);
+            // Seed with the instruction we're stopped on so it lights up immediately (it shows amber as the
+            // current IP until we step off it).
             if (_coveredInstrs.Add(_dbg.CurrentIp - LiveSlide)) ClearCoverageBtn.IsEnabled = true;
+            StartCoverageTimer();
             Linear.Refresh();
-            StartCoverageBuild();
+            StatusText.Text = $"Trace started at {_dbg.CurrentIp:X} — Continue (F5) or step to record the instruction path.";
         }
         else
         {
-            // Stop tracing. Keep the accumulated highlights (Clear trace wipes them). Remove the engine's
-            // coverage breakpoints: directly if stopped, else ask the engine to drop them at the next hit so the
-            // running program isn't frozen and then runs clean at full speed.
+            // Stop tracing. Keep the accumulated highlights (Clear trace wipes them). Stop single-stepping:
+            // directly if stopped, else ask the engine to drop the trace at the next event so the running program
+            // isn't frozen and then runs clean at full speed.
             _coverageEnabled = false;
-            _coverageInstrumented = false;
-            _coverageArming = false; _goWhenArmed = false;   // cancel an in-flight arm
             StopCoverageTimer();
-            if (_dbg is { IsStopped: true }) _dbg.ClearCoverage();
-            else _dbg?.RequestStopCoverage();
+            if (_dbg is { IsStopped: true }) _dbg.StopTrace();
+            else _dbg?.RequestStopTrace();
             ClearCoverageBtn.IsEnabled = _coveredInstrs.Count > 0;
             StatusText.Text = "Trace stopped.";
         }
@@ -649,102 +639,23 @@ public partial class MainWindow : Window
 
     private void OnClearCoverage(object sender, RoutedEventArgs e)
     {
-        if (CoverageBusy) return;   // arming/planting in flight — don't race it
-        // Wipe the highlights and the engine's recorded leaders. While stopped, re-plant the one-shot
-        // breakpoints so coverage truly restarts from a blank slate; while running, just forget the recorded
-        // leaders (no memory writes) so the harvest timer doesn't immediately repaint them.
+        // Wipe the highlights and the engine's recorded instructions (no memory writes either way). The trace,
+        // if still on, simply starts recording afresh from wherever execution goes next.
         _coveredInstrs.Clear();
-        if (_dbg is { IsStopped: true }) { _dbg.ClearCoverage(); _coverageInstrumented = false; InstrumentCoverage(); }
-        else _dbg?.ClearCoveredPoints();
+        _dbg?.ClearCoveredPoints();
         ClearCoverageBtn.IsEnabled = false;
         Linear.Refresh();
     }
 
-    /// <summary>Build the basic-block map for the loaded image's functions off-thread (each function on a fresh
-    /// live decoder, into throwaway Function objects so shared CFG state and the graph view are untouched), then
-    /// plant the coverage breakpoints. Leaders/instructions are stored in static VA space.</summary>
-    private void StartCoverageBuild()
-    {
-        if (_result is null || _dbg is null) { _coverageArming = false; _goWhenArmed = false; return; }
-        StatusText.Text = "Trace: building control-flow map…";
-        var image = _result.Image;
-        var eng = _dbg.Engine;
-        ulong slide = LiveSlide;
-        var funcs = _result.Functions.ToArray();
-        Task.Run(() =>
-        {
-            var decoder = new LiveDisassembler(eng);   // fresh, single-thread use — not the shared UI decoder
-            var leaders = new List<ulong>();
-            var map = new Dictionary<ulong, ulong[]>();
-            foreach (var f in funcs)
-            {
-                var tmp = new Function { Va = f.Va, Name = f.Name };
-                try { CfgBuilder.Build(image, tmp, null, decoder); } catch { continue; }
-                foreach (var b in tmp.Blocks)
-                {
-                    if (b.InstrVas.Count == 0) continue;
-                    ulong leaderStatic = b.Start - slide;
-                    if (!map.TryAdd(leaderStatic, b.InstrVas.Select(v => v - slide).ToArray())) continue;
-                    leaders.Add(leaderStatic);
-                }
-            }
-            Dispatcher.BeginInvoke(() =>
-            {
-                if (!_coverageEnabled) { _coverageArming = false; _goWhenArmed = false; return; }   // toggled off while building
-                _coverageLeaders = leaders;
-                _leaderToInstrs = map;
-                _coverageInstrumented = false;
-                ClearCoverageBtn.IsEnabled = _coveredInstrs.Count > 0;
-                InstrumentCoverage();   // backgrounds the plant + owns the status; _coverageArming stays set until it completes
-                // Safety: if the plant didn't actually start (e.g. not stopped), don't leave resume gated forever —
-                // it will be planted on the next stop via OnDbgStopped.
-                if (!_coveragePlanting) { _coverageArming = false; _goWhenArmed = false; }
-            });
-        });
-    }
-
-    /// <summary>Plant the coverage breakpoints for the current session (no-op unless enabled, built, and stopped).
-    /// Writing tens of thousands of int3s is done on a background thread so the UI never blocks; this is safe
-    /// because it runs while the debuggee is stopped (the debug loop is parked) and resume/detach are gated by
-    /// <see cref="_coveragePlanting"/> until it finishes, so the target can't run into a half-instrumented state.</summary>
-    private void InstrumentCoverage()
-    {
-        if (!_coverageEnabled || _coverageInstrumented || _coveragePlanting || _coverageLeaders is null
-            || _dbg is not { IsStopped: true } || !_dbgViewLive) return;
-        _coveragePlanting = true;
-        var dbg = _dbg;
-        ulong slide = LiveSlide;
-        var leaders = _coverageLeaders;
-        StatusText.Text = $"Trace: arming {leaders.Count:N0} blocks…";
-        Task.Run(() =>
-        {
-            try { dbg.SetCoveragePoints(leaders.Select(v => v + slide)); }
-            finally
-            {
-                Dispatcher.BeginInvoke(() =>
-                {
-                    _coveragePlanting = false;
-                    _coverageArming = false;   // fully armed now (or aborted) — resume is no longer deferred
-                    if (!_coverageEnabled || dbg != _dbg) { _goWhenArmed = false; return; }   // toggled off / session changed
-                    _coverageInstrumented = true;
-                    StartCoverageTimer();
-                    StatusText.Text = $"Trace armed: {leaders.Count:N0} blocks — Continue (F5) or step to record what runs.";
-                    if (_goWhenArmed) { _goWhenArmed = false; if (_dbg is { IsStopped: true }) _dbg.Go(); }   // honour the deferred Continue
-                });
-            }
-        });
-    }
-
-    /// <summary>Pull the leaders the engine has recorded so far, expand each to its block's instructions, and
-    /// repaint. Idempotent — the covered set only grows, so re-harvesting is cheap.</summary>
+    /// <summary>Pull the instruction VAs the engine has recorded so far and repaint. In trace mode each covered
+    /// point is an executed instruction in the loaded module, mapped straight to static space; idempotent — the
+    /// covered set only grows, so re-harvesting is cheap.</summary>
     private void HarvestCoverage()
     {
-        if (_dbg is null || _leaderToInstrs is null) return;
+        if (_dbg is null) return;
         ulong slide = LiveSlide;
         int before = _coveredInstrs.Count;
-        foreach (ulong liveLeader in _dbg.CoveredPoints())
-            if (_leaderToInstrs.TryGetValue(liveLeader - slide, out var instrs))
-                foreach (ulong v in instrs) _coveredInstrs.Add(v);
+        foreach (ulong liveVa in _dbg.CoveredPoints()) _coveredInstrs.Add(liveVa - slide);
         if (_coveredInstrs.Count != before)
         {
             ClearCoverageBtn.IsEnabled = true;
@@ -763,7 +674,7 @@ public partial class MainWindow : Window
     private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
     private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
     // Detach keeps the debuggee running; only valid from a stop (so breakpoints/hooks can be cleanly removed).
-    private void OnDebugDetach(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true } && !CoverageBusy) _dbg.Detach(); }
+    private void OnDebugDetach(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.Detach(); }
 
     // The theme's MenuItem template is flat (no submenu popup), so drop the Help items via the button's
     // ContextMenu — opened on left-click, placed below the button.
@@ -1030,9 +941,8 @@ public partial class MainWindow : Window
         RefreshBreakpointList();   // now showing live (rebased) breakpoints; reflects the pre-run set just armed
         if (_coverageEnabled)
         {
-            InstrumentCoverage();
-            // Trace the instruction we stopped on too, so stepping (Into/Over/Out) and breakpoints contribute —
-            // not just the block breakpoints a free Run hits. Stored in static space like the rest.
+            // Record the instruction we stopped on, so a Step (Into/Over/Out) or a breakpoint stop contributes to
+            // the trace too — not only the continuous single-step a Continue drives. Stored in static space.
             bool added = _coveredInstrs.Add(_dbg.CurrentIp - LiveSlide);
             HarvestCoverage();   // repaints (Refresh) when it adds anything
             if (added) { ClearCoverageBtn.IsEnabled = true; Linear.Refresh(); }   // ensure the stepped row paints
@@ -1058,12 +968,11 @@ public partial class MainWindow : Window
         _dbg?.AbortCapture();   // drop capture state and close the log (the engine already removed its breakpoints)
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false; DerefCheck.IsEnabled = false;
         RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run"; DbgRunBtn.IsEnabled = true; SetStepButtons(false);   // re-enable for a fresh Run
-        // Coverage is per-session: turn it off so a Restart doesn't auto-re-instrument the whole image on the
-        // next stop (that synchronous re-plant froze the UI). Keep _coveredInstrs (static VAs) so the run's
-        // highlights persist for inspection on the static listing; the user re-enables ◴ Trace if they want more.
+        // Trace is per-session: turn it off so a Restart doesn't keep single-stepping into the next run. Keep
+        // _coveredInstrs (static VAs) so the run's highlights persist for inspection on the static listing; the
+        // user re-enables ◴ Trace if they want more. The engine's trace state is gone with the session.
         StopCoverageTimer();
-        _coverageEnabled = false; _coverageInstrumented = false; _coveragePlanting = false;
-        _coverageArming = false; _goWhenArmed = false;
+        _coverageEnabled = false;
         CoverageToggle.IsEnabled = false;
         if (CoverageToggle.IsChecked == true) CoverageToggle.IsChecked = false;   // programmatic: does not fire Click
         Linear.SetCurrentIp(0);
@@ -1637,8 +1546,8 @@ public partial class MainWindow : Window
             _result = null;
             _dllDebug = null;   // a stale DLL-host config must not leak into a later EXE's Restart
             _pendingBreakpoints.Clear();   // breakpoints belong to the old file's addresses
-            // Coverage highlights/instrumentation belong to the old image's addresses — drop them.
-            _coverageEnabled = false; _coverageInstrumented = false; _coverageLeaders = null; _leaderToInstrs = null;
+            // Trace highlights belong to the old image's addresses — drop them.
+            _coverageEnabled = false;
             _coveredInstrs.Clear(); StopCoverageTimer();
             if (CoverageToggle is not null) { CoverageToggle.IsChecked = false; CoverageToggle.IsEnabled = false; ClearCoverageBtn.IsEnabled = false; }
             _nav.Reset();

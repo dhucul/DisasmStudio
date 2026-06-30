@@ -85,8 +85,15 @@ public sealed partial class DebuggerEngine
     private readonly List<Breakpoint> _hwBps = [];
     private readonly Dictionary<ulong, byte> _tempBps = [];
     private readonly Dictionary<ulong, byte> _coverageBps = [];   // one-shot silent BPs at block leaders (execution coverage)
-    private readonly HashSet<ulong> _coveredPoints = [];          // block leaders that have fired (live VAs)
+    private readonly HashSet<ulong> _coveredPoints = [];          // executed points that have fired — block leaders (coverage) or instructions (trace), live VAs
     private volatile bool _clearCoverageRequested;               // UI asked to stop tracing while running; honoured at the next event
+
+    // ---- instruction trace (single-step the loaded module; run through foreign code) ----
+    private volatile bool _traceMode;                 // instruction trace active: single-step + record each executed instruction
+    private volatile bool _clearTraceRequested;       // UI asked to stop the trace while running; honoured at the next event
+    private ulong _traceLo, _traceHi;                 // [lo, hi): the loaded module's VA span — single-step inside it, run through outside
+    private readonly Dictionary<uint, ulong> _traceStep = [];        // thread -> user bp disarmed to take its trace step (0 = none)
+    private readonly Dictionary<ulong, byte> _traceResumeBps = [];   // run-through return addrs; on hit, silently resume tracing
 
     private readonly BlockingCollection<(ResumeMode Mode, ulong Target)> _resume = new();
     private readonly Queue<ulong[]> _runToAnyTargets = new();
@@ -100,6 +107,7 @@ public sealed partial class DebuggerEngine
     private readonly Dictionary<ulong, uint> _guarded = [];        // execute-stripped page -> original protect (unpacker OEP catch)
     private bool _seenSystemBp;
     private volatile bool _pauseRequested;   // set by the UI thread (Pause), read by the debug loop
+    private volatile bool _breakinPending;   // a deliberate DebugBreakProcess (Pause) is in flight; its int3 must be consumed once
     private volatile bool _stopping;         // set by the UI thread (Stop), read by the debug loop
     private volatile bool _detaching;        // set by the UI thread (Detach), read by the debug loop
     private bool _ended;
@@ -324,6 +332,9 @@ public sealed partial class DebuggerEngine
             if (_pendingReturns.ContainsKey(addr)) { HandleReturnHook(addr, hThread); return false; }
             // internal anti-anti-debug hook (ntdll query emulation) — handled silently, never surfaced
             if (_internalBps.ContainsKey(addr)) { HandleAntiDebugHook(addr, ev.dwThreadId, hThread); return false; }
+            // instruction-trace run-through: the return from foreign (system-DLL) code we ran at full speed.
+            // Restore the byte, rewind over the 0xCC, record the landing, and resume single-step tracing — silently.
+            if (_traceResumeBps.ContainsKey(addr)) { HandleTraceResume(addr, ev.dwThreadId, hThread); return false; }
             // execution-coverage one-shot: record the block leader and drop its entry. If a temp or user
             // breakpoint also sits here (e.g. a ret that is both a block leader and a "Continue to return"
             // target), leave the 0xCC and fall through so that stop still surfaces below; otherwise restore the
@@ -408,6 +419,16 @@ public sealed partial class DebuggerEngine
                 if (HideFromDebugger && IsProgramDebugInstruction(addr, step: false)) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
                 SetIp(hThread, addr); return false;   // stale phantom: rewind over the absent 0xCC and continue
             }
+            // Our own deliberate breakin from Pause(): consume it exactly once. If the pause was already surfaced
+            // elsewhere (a trace single-step on another thread consumed _pauseRequested first), this leftover int3
+            // would otherwise show up as a spurious Breakpoint in ntdll — swallow it. Gated on _breakinPending so a
+            // program's own __debugbreak is untouched, and handled before HideFromDebugger since this int3 is ours.
+            if (_breakinPending)
+            {
+                _breakinPending = false;
+                if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }
+                return false;   // pause already surfaced — drop the duplicate breakin
+            }
             // A genuine int3 in the program (__debugbreak / anti-debug). When hiding, pass it to the program's
             // SEH (no-debugger behaviour) instead of surfacing it.
             if (HideFromDebugger) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
@@ -434,7 +455,8 @@ public sealed partial class DebuggerEngine
                 ArmInternal(isAddr);
                 if (!_stepping.ContainsKey(ev.dwThreadId)) return false;
             }
-            bool stepping = _stepping.TryGetValue(ev.dwThreadId, out var st);
+            bool tracing = _traceStep.ContainsKey(ev.dwThreadId);
+            bool stepping = _stepping.TryGetValue(ev.dwThreadId, out var st) || tracing;   // a trace step is a step too (not a watchpoint)
             // Hardware watchpoint? Dr6 low bits identify the slot — but only when THIS thread isn't the one we
             // armed a software single-step on (its trap #DB is indistinguishable from a watchpoint otherwise), nor the one completing an SMC guard-step (same trap-flag #DB).
             using (var c = new Ctx(Is32))
@@ -465,6 +487,7 @@ public sealed partial class DebuggerEngine
                 if (HideFromDebugger && IsProgramDebugInstruction(addr, step: true)) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
                 return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
             }
+            if (tracing) return HandleTraceStep(ev, hThread, ref cont);   // continuous instruction trace: record + re-step
             _stepping.Remove(ev.dwThreadId);
             // A write-step can coincide with a user single-step when the stepped instruction itself wrote to a
             // write-protected page: SmcHandleWriteStep already re-armed the page's breakpoints, so ArmAddr below
@@ -618,8 +641,18 @@ public sealed partial class DebuggerEngine
             default: // Go, StepInto, StepOver-of-noncall
             {
                 bool single = mode is ResumeMode.StepInto || mode == ResumeMode.StepOver;
-                if (onBp) { DisarmAddr(ip); _stepping[ev.dwThreadId] = new StepState(ip, single); c.TrapFlag = true; }
-                else if (single) { _stepping[ev.dwThreadId] = new StepState(0, true); c.TrapFlag = true; }
+                if (_traceMode && mode == ResumeMode.Go)
+                {
+                    // Instruction trace: record the instruction we're on and single-step. The continuous trace is
+                    // then driven entirely from the EXCEPTION_SINGLE_STEP handler (HandleTraceStep), which records
+                    // each instruction and re-arms the trap flag without surfacing a UI stop.
+                    if (ip >= _traceLo && ip < _traceHi) lock (_lock) _coveredPoints.Add(ip);
+                    if (onBp) DisarmAddr(ip);   // step off the user bp; re-armed when this trace step completes
+                    _traceStep[tid] = onBp ? ip : 0;
+                    c.TrapFlag = true;
+                }
+                else if (onBp) { DisarmAddr(ip); _stepping[tid] = new StepState(ip, single); c.TrapFlag = true; }
+                else if (single) { _stepping[tid] = new StepState(0, true); c.TrapFlag = true; }
                 c.Set(hThread);
                 break;
             }
@@ -640,7 +673,7 @@ public sealed partial class DebuggerEngine
         lock (_lock) _runToAnyTargets.Enqueue(copy);
         _resume.Add((ResumeMode.RunToAny, 0));
     }
-    public void Pause() { _pauseRequested = true; if (_proc != IntPtr.Zero) Native.DebugBreakProcess(_proc); }
+    public void Pause() { _pauseRequested = true; if (_proc != IntPtr.Zero) { _breakinPending = true; Native.DebugBreakProcess(_proc); } }
 
     public void Stop()
     {
@@ -702,6 +735,8 @@ public sealed partial class DebuggerEngine
             _tempBps.Clear();
             foreach (var (va, orig) in _coverageBps) WriteCode(va, [orig]);   // else a detached survivor keeps our 0xCCs and crashes
             _coverageBps.Clear();
+            foreach (var (va, orig) in _traceResumeBps) WriteCode(va, [orig]);   // run-through return bps (if any survived a stop)
+            _traceResumeBps.Clear();
             _coveredPoints.Clear();
             foreach (var (va, bp) in _internalBps) WriteCode(va, [bp.Original]);
             _internalBps.Clear();
@@ -1054,6 +1089,143 @@ public sealed partial class DebuggerEngine
         foreach (var (va, orig) in bps) WriteCode(va, [orig]);
     }
 
+    // ---- instruction trace (single-step the loaded module; run through foreign code at full speed) ----
+
+    /// <summary>Begin an instruction trace from the current stop: on the next Continue, single-step every
+    /// instruction whose address is in [<paramref name="loVa"/>, <paramref name="hiVa"/>) (the loaded module),
+    /// recording each into the covered set (live VAs); when execution leaves that range — a call into a system
+    /// DLL — run it at full speed and resume single-stepping the instant it returns, rather than stepping
+    /// through tens of thousands of library instructions. Call while stopped; nothing is planted up front.</summary>
+    public void StartTrace(ulong loVa, ulong hiVa)
+    {
+        _traceLo = loVa; _traceHi = hiVa;
+        _clearTraceRequested = false;
+        _traceMode = true;
+    }
+
+    /// <summary>Stop the instruction trace (call while stopped). Removes any outstanding run-through
+    /// breakpoints; the recorded set (<see cref="CoveredPoints"/>) is left intact for inspection.</summary>
+    public void StopTrace()
+    {
+        _traceMode = false;
+        _clearTraceRequested = false;
+        ClearTraceResumeBps();
+    }
+
+    /// <summary>Stop the trace while the debuggee keeps running: honoured at the next debug event (it is unsafe
+    /// to rewrite the running target from another thread). The in-flight single-step then becomes a free run and
+    /// the program continues at full speed.</summary>
+    public void RequestStopTrace() => _clearTraceRequested = true;
+
+    private void ClearTraceResumeBps()
+    {
+        KeyValuePair<ulong, byte>[] bps;
+        lock (_lock) { bps = _traceResumeBps.ToArray(); _traceResumeBps.Clear(); }
+        if (_proc == IntPtr.Zero) return;
+        foreach (var (va, orig) in bps) WriteCode(va, [orig]);
+    }
+
+    /// <summary>A trace single-step completed on a debuggee thread. Record the instruction now at the IP and
+    /// decide what next: surface a stop (pause / a user breakpoint on the path), run foreign code at full speed
+    /// (a call left the loaded module — set a one-shot return bp and free-run), or keep single-stepping. Returns
+    /// true to surface a UI stop; false to continue (the loop calls ContinueDebugEvent).</summary>
+    private bool HandleTraceStep(in Native.DEBUG_EVENT ev, IntPtr hThread, ref uint cont)
+    {
+        uint tid = ev.dwThreadId;
+        _traceStep.Remove(tid, out ulong reArm);
+        if (reArm != 0) ArmAddr(reArm);   // re-arm the user bp we stepped off to begin this trace
+
+        // Trace turned off (toggle while running): stop single-stepping and let the program run free.
+        if (!_traceMode || _clearTraceRequested) { _clearTraceRequested = false; _traceMode = false; ClearTraceResumeBps(); return false; }
+
+        using var c = new Ctx(Is32);
+        if (!c.Get(hThread)) return false;
+        ulong ip = c.Ip;
+
+        // Pause requested: surface it at the instruction we're about to execute.
+        if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, tid, ip, 0)); return true; }
+
+        // A user breakpoint at the next instruction → stop here (its int3 hasn't executed; IP already points at it).
+        Breakpoint? ub; lock (_lock) _swBps.TryGetValue(ip, out ub);
+        bool ubArmed = ub is { Armed: true };
+        if (ubArmed && ShouldStop(ub!, tid)) { Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, tid, ip, 0)); return true; }
+
+        // Left the loaded module (a call/jump into a system DLL): run the foreign code at full speed and resume
+        // tracing when it returns to our module, instead of single-stepping through the whole library.
+        if (ip < _traceLo || ip >= _traceHi)
+        {
+            ulong ret = ModuleReturnAddress(c.Sp);
+            if (ret != 0 && AddTraceResumeBp(ret)) return false;   // free-run (trap flag is auto-cleared) to the return
+            // No sane in-module return found: fall back to single-stepping through it (records nothing until we
+            // re-enter the module). Slow for that stretch, but bounded and never wedges.
+            _traceStep[tid] = 0;
+            c.TrapFlag = true; c.Set(hThread);
+            return false;
+        }
+
+        // Inside the module: record this instruction and keep single-stepping.
+        lock (_lock) _coveredPoints.Add(ip);
+        if (ubArmed) DisarmAddr(ip);            // a not-taken conditional bp on the path — step off it, re-arm after
+        _traceStep[tid] = ubArmed ? ip : 0;
+        c.TrapFlag = true; c.Set(hThread);
+        return false;
+    }
+
+    /// <summary>Hit a run-through return breakpoint: restore the byte, rewind RIP over the 0xCC, record the
+    /// landing and resume single-step tracing (or, if the trace was turned off meanwhile, just remove it).</summary>
+    private void HandleTraceResume(ulong addr, uint tid, IntPtr hThread)
+    {
+        byte orig; lock (_lock) _traceResumeBps.Remove(addr, out orig);
+        WriteCode(addr, [orig]);
+        SetIp(hThread, addr);   // rewind over the 0xCC so the instruction re-executes
+        if (_traceMode && !_clearTraceRequested)
+        {
+            if (addr >= _traceLo && addr < _traceHi) lock (_lock) _coveredPoints.Add(addr);
+            ArmTraceStep(tid, hThread);
+        }
+        else { _clearTraceRequested = false; _traceMode = false; ClearTraceResumeBps(); }
+    }
+
+    /// <summary>Mark <paramref name="tid"/> as trace-stepping and set its trap flag so the next instruction
+    /// single-steps back into <see cref="HandleTraceStep"/>.</summary>
+    private void ArmTraceStep(uint tid, IntPtr hThread)
+    {
+        _traceStep[tid] = 0;
+        using var c = new Ctx(Is32);
+        if (c.Get(hThread)) { c.TrapFlag = true; c.Set(hThread); }
+    }
+
+    /// <summary>Plant a one-shot run-through return breakpoint (silent; resumes tracing on hit). Skips an address
+    /// that already carries any breakpoint, except a run-through bp already there (recursion into the same
+    /// return) which is reused. Returns false if it could not be planted.</summary>
+    private bool AddTraceResumeBp(ulong va)
+    {
+        lock (_lock)
+        {
+            if (_traceResumeBps.ContainsKey(va)) return true;   // already planted (recursive/repeated call) — free-run to it
+            if (_swBps.ContainsKey(va) || _tempBps.ContainsKey(va) || _coverageBps.ContainsKey(va) || _internalBps.ContainsKey(va))
+                return false;
+            var o = ReadMemory(va, 1);
+            if (o.Length < 1) return false;
+            _traceResumeBps[va] = o[0];
+        }
+        return WriteCode(va, [0xCC]);
+    }
+
+    /// <summary>The first stack slot (from SP up) holding a plausible return address into the loaded module —
+    /// i.e. <c>[SP]</c> right after a call, else the nearest in-module return frame. 0 if none is found.</summary>
+    private ulong ModuleReturnAddress(ulong sp)
+    {
+        var stack = ReadMemory(sp, 0x400);
+        int ptr = Is32 ? 4 : 8;
+        for (int i = 0; i + ptr <= stack.Length; i += ptr)
+        {
+            ulong v = ptr == 8 ? BitConverter.ToUInt64(stack, i) : BitConverter.ToUInt32(stack, i);
+            if (v >= _traceLo && v < _traceHi && IsReturnAddress(v)) return v;
+        }
+        return 0;
+    }
+
     private void ProgramHwAllThreads() { lock (_lock) foreach (var h in _threads.Values) ProgramHwForThread(h); }
 
     private void ProgramHwForThread(IntPtr hThread)
@@ -1102,6 +1274,8 @@ public sealed partial class DebuggerEngine
             foreach (var kv in _tempBps)
                 if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value;
             foreach (var kv in _coverageBps)
+                if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value;
+            foreach (var kv in _traceResumeBps)
                 if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value;
             foreach (var kv in _internalBps)
                 if (kv.Value.Armed && kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value.Original;
