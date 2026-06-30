@@ -12,11 +12,11 @@ namespace DisasmStudio.Wpf;
 /// pass-to-program. Edits the supplied <see cref="ExceptionFilter"/> in place when the user clicks OK.</summary>
 internal static class ExceptionDialog
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x16, 0x1B, 0x22));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xE6, 0xEA, 0xF0));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xAE, 0xB7, 0xC4));
-    private static readonly Brush RowBg = new SolidColorBrush(Color.FromRgb(0x1B, 0x21, 0x2A));
-    private static readonly Brush HdrBg = new SolidColorBrush(Color.FromRgb(0x22, 0x2A, 0x35));
+    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x27, 0x2D, 0x37));
+    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF0, 0xF3, 0xF8));
+    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xDC, 0xE2, 0xEC));
+    private static readonly Brush RowBg = new SolidColorBrush(Color.FromRgb(0x34, 0x3C, 0x4A));
+    private static readonly Brush HdrBg = new SolidColorBrush(Color.FromRgb(0x40, 0x49, 0x59));
 
     private sealed class Row
     {

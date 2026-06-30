@@ -17,9 +17,9 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 internal sealed class NonInvasiveDumpDialog : Window
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x16, 0x1B, 0x22));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xE6, 0xEA, 0xF0));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xAE, 0xB7, 0xC4));
+    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x27, 0x2D, 0x37));
+    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF0, 0xF3, 0xF8));
+    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xDC, 0xE2, 0xEC));
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     private readonly ulong _preferredImageBase;
@@ -137,7 +137,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         {
             Text = "Process-level containment only — it does NOT block network or filesystem access. " +
                    "Run truly untrusted samples in a disposable VM.",
-            Foreground = new SolidColorBrush(Color.FromRgb(0xF0, 0xB6, 0x4D)),
+            Foreground = new SolidColorBrush(Color.FromRgb(0xF2, 0xD0, 0x8A)),
             FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(20, 0, 0, 4),
         });
         opt.Children.Add(_launchPanel);
@@ -192,7 +192,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         _log = new TextBox
         {
             IsReadOnly = true, FontFamily = Mono, FontSize = 11,
-            Background = new SolidColorBrush(Color.FromRgb(0x0E, 0x11, 0x16)), Foreground = Sub,
+            Background = new SolidColorBrush(Color.FromRgb(0x1B, 0x20, 0x28)), Foreground = Sub,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             TextWrapping = TextWrapping.NoWrap, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Margin = new Thickness(0, 4, 0, 8), AcceptsReturn = true,

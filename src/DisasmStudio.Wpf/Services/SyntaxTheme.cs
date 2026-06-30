@@ -17,43 +17,43 @@ public static class SyntaxTheme
         return br;
     }
 
-    // Surfaces / structure
-    public static readonly Brush Background = B(0x0E, 0x11, 0x16);
-    public static readonly Brush GutterBg = B(0x12, 0x16, 0x1D);
-    public static readonly Brush Separator = B(0x29, 0x31, 0x3D);
-    public static readonly Brush Selection = B(0x24, 0x33, 0x49);
-    public static readonly Brush CurrentLine = B(0x1B, 0x22, 0x30);
-    public static readonly Brush CurrentIp = B(0x3A, 0x3A, 0x18);    // soft amber row — the debuggee's current instruction
-    public static readonly Brush BreakpointDot = B(0xD0, 0x4A, 0x4A);   // red — software breakpoint marker
-    public static readonly Brush HwBreakpointDot = B(0x46, 0xB1, 0xC4); // soft cyan — hardware breakpoint marker
-    public static readonly Brush CoveredInstr = B(0x1E, 0x2E, 0x22);  // soft dark green — an executed (covered) instruction row
+    // Surfaces / structure (deepest Polar Night)
+    public static readonly Brush Background = B(0x1B, 0x20, 0x28);   // deepest — view bg (matches the window)
+    public static readonly Brush GutterBg = B(0x21, 0x27, 0x2F);     // line-number gutter
+    public static readonly Brush Separator = B(0x40, 0x49, 0x59);    // column / function rules
+    public static readonly Brush Selection = B(0x36, 0x49, 0x6A);    // blue-tinted selected row
+    public static readonly Brush CurrentLine = B(0x27, 0x2D, 0x37);  // current-line band
+    public static readonly Brush CurrentIp = B(0x52, 0x4B, 0x33);    // amber row — the debuggee's current instruction
+    public static readonly Brush BreakpointDot = B(0xD8, 0x5F, 0x6A);   // bright red — software breakpoint marker
+    public static readonly Brush HwBreakpointDot = B(0x93, 0xDC, 0xEE); // bright frost cyan — hardware breakpoint marker
+    public static readonly Brush CoveredInstr = B(0x3C, 0x4D, 0x30);  // green — an executed (covered) instruction row
 
     // Columns
-    public static readonly Brush Address = B(0x6B, 0x8F, 0xD6);   // soft periwinkle
-    public static readonly Brush Bytes = B(0x5E, 0x6B, 0x7A);     // dim grey
-    public static readonly Brush FuncName = B(0xD7, 0xBA, 0x7D);  // soft gold (function headers)
+    public static readonly Brush Address = B(0x88, 0xAE, 0xDE);   // bright frost blue
+    public static readonly Brush Bytes = B(0x6E, 0x7C, 0x97);     // dim grey-blue
+    public static readonly Brush FuncName = B(0xF2, 0xD0, 0x8A);  // bright gold (function headers)
 
-    // Token kinds (gentle, distinct hues)
-    public static readonly Brush Mnemonic = B(0x9C, 0xB4, 0xE8);  // soft periwinkle-blue
-    public static readonly Brush Register = B(0x8F, 0xBC, 0xBB);  // soft teal
-    public static readonly Brush Number = B(0xD8, 0xB9, 0x89);    // muted gold
-    public static readonly Brush Symbol = B(0x9B, 0xC9, 0x95);    // soft green (named targets)
-    public static readonly Brush Keyword = B(0xC9, 0x9F, 0xD9);   // soft mauve
-    public static readonly Brush Prefix = B(0xC9, 0x9F, 0xD9);
-    public static readonly Brush Punctuation = B(0x79, 0x82, 0x8F); // muted grey
-    public static readonly Brush Text = B(0xE6, 0xEA, 0xF0);      // primary text
-    public static readonly Brush Comment = B(0x5E, 0x6B, 0x7A);   // dim grey-blue
-    public static readonly Brush TypeName = B(0x6F, 0xB3, 0xA8);  // soft cyan-green (C types)
-    public static readonly Brush Variable = B(0xC9, 0xD2, 0xDE);  // light slate (recovered vars)
+    // Token kinds (peak-vivid aurora / frost, distinct hues)
+    public static readonly Brush Mnemonic = B(0x9C, 0xBE, 0xF2);  // bright blue
+    public static readonly Brush Register = B(0x9B, 0xDA, 0xD7);  // bright teal
+    public static readonly Brush Number = B(0xD4, 0x9A, 0xCE);    // bright purple
+    public static readonly Brush Symbol = B(0xB9, 0xD9, 0x98);    // bright green (named targets)
+    public static readonly Brush Keyword = B(0x93, 0xDC, 0xEE);   // bright frost cyan
+    public static readonly Brush Prefix = B(0x93, 0xDC, 0xEE);
+    public static readonly Brush Punctuation = B(0x78, 0x86, 0xA2); // muted grey-blue
+    public static readonly Brush Text = B(0xF2, 0xF5, 0xFA);      // bright — primary text
+    public static readonly Brush Comment = B(0x6B, 0x78, 0x94);   // dim grey-blue
+    public static readonly Brush TypeName = B(0x90, 0xD6, 0xC9);  // bright cyan-green (C types)
+    public static readonly Brush Variable = B(0xE4, 0xEA, 0xF3);  // light slate (recovered vars)
 
-    // Edge colours for the graph view (muted)
-    public static readonly Brush EdgeTaken = B(0x7F, 0xA8, 0x7B);    // soft green (branch taken)
-    public static readonly Brush EdgeFall = B(0x79, 0x82, 0x8F);     // grey (fall-through)
-    public static readonly Brush EdgeJump = B(0x6B, 0x8F, 0xD6);     // blue (unconditional)
-    public static readonly Brush EdgeSwitch = B(0xB4, 0x8E, 0xAD);   // soft violet (switch/jump-table case)
-    public static readonly Brush BlockBg = B(0x16, 0x1B, 0x22);
-    public static readonly Brush BlockBorder = B(0x3A, 0x44, 0x52);
-    public static readonly Brush BlockHeader = B(0x1B, 0x22, 0x30);
+    // Edge colours for the graph view (peak-vivid aurora)
+    public static readonly Brush EdgeTaken = B(0xB4, 0xDC, 0x90);    // bright green (branch taken)
+    public static readonly Brush EdgeFall = B(0x78, 0x86, 0xA2);     // grey-blue (fall-through)
+    public static readonly Brush EdgeJump = B(0x8A, 0xAE, 0xEC);     // bright blue (unconditional)
+    public static readonly Brush EdgeSwitch = B(0xCD, 0x96, 0xC4);   // bright violet (switch/jump-table case)
+    public static readonly Brush BlockBg = B(0x27, 0x2D, 0x37);
+    public static readonly Brush BlockBorder = B(0x4F, 0x59, 0x6B);
+    public static readonly Brush BlockHeader = B(0x34, 0x3C, 0x4A);
 
     public static Brush BrushFor(AsmTokenKind kind) => kind switch
     {

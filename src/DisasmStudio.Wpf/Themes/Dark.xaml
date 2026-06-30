@@ -1,29 +1,29 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <!-- A cohesive slate-dark palette (after CDA.Modern): clear text tiers, soft accent,
-         high body contrast for long disassembly-reading sessions. -->
-    <SolidColorBrush x:Key="Background"    Color="#0E1116" />
-    <SolidColorBrush x:Key="Surface"       Color="#161B22" />
-    <SolidColorBrush x:Key="Surface2"      Color="#1B2230" />
-    <SolidColorBrush x:Key="SurfaceAlt"    Color="#12161D" />
-    <SolidColorBrush x:Key="Outline"       Color="#29313D" />
-    <SolidColorBrush x:Key="OutlineStrong" Color="#3A4452" />
-    <SolidColorBrush x:Key="TextPrimary"   Color="#E6EAF0" />
-    <SolidColorBrush x:Key="TextSecondary" Color="#AEB7C4" />
-    <SolidColorBrush x:Key="TextMuted"     Color="#79828F" />
-    <SolidColorBrush x:Key="Accent"        Color="#4D8DF7" />
-    <SolidColorBrush x:Key="AccentHover"   Color="#6BA2FF" />
-    <SolidColorBrush x:Key="AccentPressed" Color="#3A72CC" />
-    <SolidColorBrush x:Key="AccentSoft"    Color="#1E2A3D" />
-    <SolidColorBrush x:Key="Selection"     Color="#243349" />
-    <SolidColorBrush x:Key="StringRef"     Color="#D8A657" /><!-- referenced-at-call marker in the Strings list -->
+    <!-- Nord variant ("nord3"): deepest Polar Night surfaces, a brighter saturated-blue chrome
+         accent, and the most vivid aurora/frost syntax — high body contrast for long reading. -->
+    <SolidColorBrush x:Key="Background"    Color="#1B2028" />
+    <SolidColorBrush x:Key="Surface"       Color="#272D37" />
+    <SolidColorBrush x:Key="Surface2"      Color="#343C4A" />
+    <SolidColorBrush x:Key="SurfaceAlt"    Color="#21272F" />
+    <SolidColorBrush x:Key="Outline"       Color="#404959" />
+    <SolidColorBrush x:Key="OutlineStrong" Color="#4F596B" />
+    <SolidColorBrush x:Key="TextPrimary"   Color="#F0F3F8" />
+    <SolidColorBrush x:Key="TextSecondary" Color="#DCE2EC" />
+    <SolidColorBrush x:Key="TextMuted"     Color="#8A95A9" />
+    <SolidColorBrush x:Key="Accent"        Color="#6090D4" />
+    <SolidColorBrush x:Key="AccentHover"   Color="#84AEEC" />
+    <SolidColorBrush x:Key="AccentPressed" Color="#4A78B8" />
+    <SolidColorBrush x:Key="AccentSoft"    Color="#2C3C55" />
+    <SolidColorBrush x:Key="Selection"     Color="#36496A" />
+    <SolidColorBrush x:Key="StringRef"     Color="#F2D08A" /><!-- referenced-at-call marker in the Strings list -->
 
     <!-- Re-point system selection brushes at the theme (lists / tree selection). -->
-    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"                       Color="#243349" />
-    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                   Color="#E6EAF0" />
-    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"      Color="#243349" />
-    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"  Color="#E6EAF0" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"                       Color="#36496A" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                   Color="#F0F3F8" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"      Color="#36496A" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"  Color="#F0F3F8" />
 
     <Style TargetType="{x:Type Window}">
         <Setter Property="Background" Value="{StaticResource Background}" />
@@ -122,7 +122,7 @@
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource Accent}" />
                             <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Accent}" />
-                            <Setter Property="Foreground" Value="#FFFFFF" />
+                            <Setter Property="Foreground" Value="#F0F3F8" />
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Accent}" />
@@ -150,7 +150,7 @@
                         <Border x:Name="box" Width="16" Height="16" CornerRadius="3" VerticalAlignment="Center"
                                 Background="{StaticResource Surface2}" BorderBrush="{StaticResource OutlineStrong}" BorderThickness="1">
                             <Path x:Name="check" Visibility="Collapsed" Stretch="Uniform" Margin="3"
-                                  Stroke="#FFFFFF" StrokeThickness="1.8" StrokeEndLineCap="Round" StrokeStartLineCap="Round"
+                                  Stroke="#F0F3F8" StrokeThickness="1.8" StrokeEndLineCap="Round" StrokeStartLineCap="Round"
                                   Data="M 0,5 L 4,9 L 11,1" />
                         </Border>
                         <ContentPresenter Margin="6,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True" />
