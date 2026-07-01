@@ -12,53 +12,53 @@
                 BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1" Padding="8,6">
             <!-- WrapPanel so a narrow window flows buttons onto another row instead of clipping them. -->
             <WrapPanel>
-                <Button x:Name="OpenBtn" Content="Open…" Click="OnOpen" />
-                <Button Content="Open Project…" Click="OnOpenProject" Margin="6,0,0,0" />
-                <Button Content="Save Project…" Click="OnSaveProject" Margin="6,0,0,0" />
-                <Button x:Name="UndoBtn" Content="↶ Undo" Click="OnUndoPatch" Margin="6,0,0,0" IsEnabled="False" ToolTip="Undo last edit (Ctrl+Z)" />
-                <Button x:Name="SavePatchedBtn" Content="Save Patched As…" Click="OnSavePatched" Margin="6,0,0,0" IsEnabled="False" />
+                <Button x:Name="OpenBtn" Content="Open…" Click="OnOpen" Margin="0,3,0,3" />
+                <Button Content="Open Project…" Click="OnOpenProject" Margin="6,3,0,3" />
+                <Button Content="Save Project…" Click="OnSaveProject" Margin="6,3,0,3" />
+                <Button x:Name="UndoBtn" Content="↶ Undo" Click="OnUndoPatch" Margin="6,3,0,3" IsEnabled="False" ToolTip="Undo last edit (Ctrl+Z)" />
+                <Button x:Name="SavePatchedBtn" Content="Save Patched As…" Click="OnSavePatched" Margin="6,3,0,3" IsEnabled="False" />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button Content="Save ASM…" Click="OnSaveAsm" ToolTip="Export the full disassembly listing to a .asm file" />
-                <Button Content="Save C…" Click="OnSaveC" Margin="6,0,0,0" ToolTip="Export the decompiled Pseudo-C of all functions to a .c file" />
+                <Button Content="Save ASM…" Click="OnSaveAsm" Margin="0,3,0,3" ToolTip="Export the full disassembly listing to a .asm file" />
+                <Button Content="Save C…" Click="OnSaveC" Margin="6,3,0,3" ToolTip="Export the decompiled Pseudo-C of all functions to a .c file" />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button x:Name="DbgRunBtn" Style="{StaticResource RunButton}" Content="▶ Run" Click="OnDebugRun" ToolTip="Run / continue (F5)" />
-                <Button x:Name="StepIntoBtn" Style="{StaticResource StepButton}" Content="⤓ Into" Click="OnStepInto" Margin="6,0,0,0" IsEnabled="False" ToolTip="Step into (F7)" />
-                <Button x:Name="StepOverBtn" Style="{StaticResource StepButton}" Content="⤵ Over" Click="OnStepOver" Margin="6,0,0,0" IsEnabled="False" ToolTip="Step over (F8)" />
-                <Button x:Name="StepOutBtn" Style="{StaticResource StepButton}" Content="⤴ Out" Click="OnStepOut" Margin="6,0,0,0" IsEnabled="False" ToolTip="Step out (Shift+F11)" />
-                <Button x:Name="RunToRetBtn" Style="{StaticResource StepButton}" Content="⤴▸ To Ret" Click="OnRunToReturn" Margin="6,0,0,0" IsEnabled="False" ToolTip="Continue until the current function returns — stop ON its ret, with calls running at full speed (Ctrl+F9). Falls back to Step Out in unanalyzed code." />
-                <Button Style="{StaticResource WarnButton}" Content="⏸ Pause" Click="OnDebugPause" Margin="6,0,0,0" />
-                <Button Style="{StaticResource DangerButton}" Content="⏹ Stop" Click="OnDebugStop" Margin="6,0,0,0" />
-                <Button x:Name="DetachBtn" Style="{StaticResource DangerButton}" Content="⏏ Detach" Click="OnDebugDetach" Margin="6,0,0,0" IsEnabled="False" ToolTip="Detach the debugger but leave the program running. Restores all breakpoints and hide-layer code patches to the original bytes, clears the debug registers, releases job containment, and stops debugging — the process keeps running. Available only while stopped." />
-                <Button x:Name="RestartBtn" Style="{StaticResource RunButton}" Content="⟳ Restart" Click="OnDebugRestart" Margin="6,0,0,0" IsEnabled="False" ToolTip="Terminate the debuggee and launch it again from the start" />
-                <ToggleButton x:Name="CoverageToggle" Content="◴ Trace" Click="OnToggleCoverage" Margin="6,0,0,0" IsEnabled="False" ToolTip="Instruction trace from here: starts recording exactly where you're stopped — nothing is planted up front, so there's no whole-image arming. On Continue (F5) it single-steps the loaded module and tints each executed instruction green in the listing; a call into a system DLL runs at full speed and tracing resumes when it returns. Step Into/Over/Out also contribute. Enable while stopped, then Continue or step. Click again to stop tracing (no need to pause). Exact but slower than a free run over long loops." />
-                <Button x:Name="ClearCoverageBtn" Content="Clear trace" Click="OnClearCoverage" Margin="6,0,0,0" IsEnabled="False" ToolTip="Clear the execution-trace highlights." />
-                <Button Content="Attach…" Click="OnAttach" Margin="6,0,0,0" ToolTip="Attach the debugger to a running process" />
-                <Button x:Name="UnpackBtn" Content="Unpack…" Click="OnUnpack" Margin="6,0,0,0" ToolTip="Generic unpacker: run a packed PE under the debugger, stop at the original entry point, dump it, rebuild the IAT and write a clean, re-analyzable EXE." />
-                <Button x:Name="DumpProcBtn" Content="Dump Process…" Click="OnDumpProcess" Margin="6,0,0,0" ToolTip="Non-invasive dump: snapshot a process's image to a clean PE WITHOUT debugging it, so an anti-debug protector decrypts itself normally and can't detect us. Attach to a separately-run target, or Launch and watch it from t=0; the Auto watch dumps the moment its image settles, then rebuilds the IAT." />
-                <Button x:Name="DevirtBtn" Content="Devirt..." Click="OnDevirt" Margin="6,0,0,0" ToolTip="Experimental VM devirtualizer: analyze a decrypted PE/memory image for a VM dispatcher, handler table and bytecode stream." />
-                <Button Content="Exceptions…" Click="OnExceptions" Margin="6,0,0,0" ToolTip="Configure which exceptions break vs pass straight to the program (first/second chance), x64dbg-style. Persisted across sessions and applied live." />
-                <CheckBox x:Name="LoaderBreakCheck" Content="Break at loader" Margin="12,0,0,0" ToolTip="When you Run, stop at the loader breakpoint (before the entry point) instead of at the entry point — so a capture started there can include TLS callbacks and static DLL DllMains. Set this before Run." />
-                <CheckBox x:Name="HideDebuggerCheck" Content="Hide debugger" Margin="12,0,0,0" ToolTip="Anti-anti-debug (ScyllaHide-style): before the entry point, clears the PEB BeingDebugged/NtGlobalFlag/heap-debug flags and hooks ntdll's NtQueryInformationProcess / NtSetInformationThread / NtQuerySystemInformation to report 'not debugged', and defeats the invalid-handle trick. Set this before Run; always on during Unpack." />
+                <Button x:Name="DbgRunBtn" Style="{StaticResource RunButton}" Content="▶ Run" Click="OnDebugRun" Margin="0,3,0,3" ToolTip="Run / continue (F5)" />
+                <Button x:Name="StepIntoBtn" Style="{StaticResource StepButton}" Content="⤓ Into" Click="OnStepInto" Margin="6,3,0,3" IsEnabled="False" ToolTip="Step into (F7)" />
+                <Button x:Name="StepOverBtn" Style="{StaticResource StepButton}" Content="⤵ Over" Click="OnStepOver" Margin="6,3,0,3" IsEnabled="False" ToolTip="Step over (F8)" />
+                <Button x:Name="StepOutBtn" Style="{StaticResource StepButton}" Content="⤴ Out" Click="OnStepOut" Margin="6,3,0,3" IsEnabled="False" ToolTip="Step out (Shift+F11)" />
+                <Button x:Name="RunToRetBtn" Style="{StaticResource StepButton}" Content="⤴▸ To Ret" Click="OnRunToReturn" Margin="6,3,0,3" IsEnabled="False" ToolTip="Continue until the current function returns — stop ON its ret, with calls running at full speed (Ctrl+F9). Falls back to Step Out in unanalyzed code." />
+                <Button Style="{StaticResource WarnButton}" Content="⏸ Pause" Click="OnDebugPause" Margin="6,3,0,3" />
+                <Button Style="{StaticResource DangerButton}" Content="⏹ Stop" Click="OnDebugStop" Margin="6,3,0,3" />
+                <Button x:Name="DetachBtn" Style="{StaticResource DangerButton}" Content="⏏ Detach" Click="OnDebugDetach" Margin="6,3,0,3" IsEnabled="False" ToolTip="Detach the debugger but leave the program running. Restores all breakpoints and hide-layer code patches to the original bytes, clears the debug registers, releases job containment, and stops debugging — the process keeps running. Available only while stopped." />
+                <Button x:Name="RestartBtn" Style="{StaticResource RunButton}" Content="⟳ Restart" Click="OnDebugRestart" Margin="6,3,0,3" IsEnabled="False" ToolTip="Terminate the debuggee and launch it again from the start" />
+                <ToggleButton x:Name="CoverageToggle" Content="◴ Trace" Click="OnToggleCoverage" Margin="6,3,0,3" IsEnabled="False" ToolTip="Instruction trace from here: starts recording exactly where you're stopped — nothing is planted up front, so there's no whole-image arming. On Continue (F5) it single-steps the loaded module and tints each executed instruction green in the listing; a call into a system DLL runs at full speed and tracing resumes when it returns. Step Into/Over/Out also contribute. Enable while stopped, then Continue or step. Click again to stop tracing (no need to pause). Exact but slower than a free run over long loops." />
+                <Button x:Name="ClearCoverageBtn" Content="Clear trace" Click="OnClearCoverage" Margin="6,3,0,3" IsEnabled="False" ToolTip="Clear the execution-trace highlights." />
+                <Button Content="Attach…" Click="OnAttach" Margin="6,3,0,3" ToolTip="Attach the debugger to a running process" />
+                <Button x:Name="UnpackBtn" Content="Unpack…" Click="OnUnpack" Margin="6,3,0,3" ToolTip="Generic unpacker: run a packed PE under the debugger, stop at the original entry point, dump it, rebuild the IAT and write a clean, re-analyzable EXE." />
+                <Button x:Name="DumpProcBtn" Content="Dump Process…" Click="OnDumpProcess" Margin="6,3,0,3" ToolTip="Non-invasive dump: snapshot a process's image to a clean PE WITHOUT debugging it, so an anti-debug protector decrypts itself normally and can't detect us. Attach to a separately-run target, or Launch and watch it from t=0; the Auto watch dumps the moment its image settles, then rebuilds the IAT." />
+                <Button x:Name="DevirtBtn" Content="Devirt..." Click="OnDevirt" Margin="6,3,0,3" ToolTip="Experimental VM devirtualizer: analyze a decrypted PE/memory image for a VM dispatcher, handler table and bytecode stream." />
+                <Button Content="Exceptions…" Click="OnExceptions" Margin="6,3,0,3" ToolTip="Configure which exceptions break vs pass straight to the program (first/second chance), x64dbg-style. Persisted across sessions and applied live." />
+                <CheckBox x:Name="LoaderBreakCheck" Content="Break at loader" Margin="12,3,0,3" ToolTip="When you Run, stop at the loader breakpoint (before the entry point) instead of at the entry point — so a capture started there can include TLS callbacks and static DLL DllMains. Set this before Run." />
+                <CheckBox x:Name="HideDebuggerCheck" Content="Hide debugger" Margin="12,3,0,3" ToolTip="Anti-anti-debug (ScyllaHide-style): before the entry point, clears the PEB BeingDebugged/NtGlobalFlag/heap-debug flags and hooks ntdll's NtQueryInformationProcess / NtSetInformationThread / NtQuerySystemInformation to report 'not debugged', and defeats the invalid-handle trick. Set this before Run; always on during Unpack." />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button x:Name="CaptureBtn" Content="⦿ Capture" Click="OnCaptureAll" IsEnabled="False" ToolTip="FunCap: log each function's arguments + return value on its first call, then stop intercepting it (fast for large programs)" />
-                <Button x:Name="CaptureFnBtn" Content="Capture Fn" Click="OnCaptureFunc" Margin="6,0,0,0" IsEnabled="False" ToolTip="Capture every call of the function at the current address" />
-                <CheckBox x:Name="OnceCheck" Content="First call only" IsChecked="True" Margin="12,0,0,0" IsEnabled="False" ToolTip="Capture each function once, then let it run at full speed (fast for large programs). Uncheck to capture every call (detailed but much slower)." />
-                <CheckBox x:Name="RetCheck" Content="Capture returns" IsChecked="True" Margin="12,0,0,0" IsEnabled="False" ToolTip="Also capture each function's return value (sets a return breakpoint). Uncheck for args-only: about half the events, faster." />
-                <CheckBox x:Name="DerefCheck" Content="Dereference args" IsChecked="True" Margin="12,0,0,0" IsEnabled="False" ToolTip="Annotate values with the string/symbol they point to (e.g. rcx → &quot;C:\…&quot;). This per-argument lookup is the main per-hit cost — uncheck to log raw hex values only, which is faster for dense captures." />
+                <Button x:Name="CaptureBtn" Content="⦿ Capture" Click="OnCaptureAll" Margin="0,3,0,3" IsEnabled="False" ToolTip="FunCap: log each function's arguments + return value on its first call, then stop intercepting it (fast for large programs)" />
+                <Button x:Name="CaptureFnBtn" Content="Capture Fn" Click="OnCaptureFunc" Margin="6,3,0,3" IsEnabled="False" ToolTip="Capture every call of the function at the current address" />
+                <CheckBox x:Name="OnceCheck" Content="First call only" IsChecked="True" Margin="12,3,0,3" IsEnabled="False" ToolTip="Capture each function once, then let it run at full speed (fast for large programs). Uncheck to capture every call (detailed but much slower)." />
+                <CheckBox x:Name="RetCheck" Content="Capture returns" IsChecked="True" Margin="12,3,0,3" IsEnabled="False" ToolTip="Also capture each function's return value (sets a return breakpoint). Uncheck for args-only: about half the events, faster." />
+                <CheckBox x:Name="DerefCheck" Content="Dereference args" IsChecked="True" Margin="12,3,0,3" IsEnabled="False" ToolTip="Annotate values with the string/symbol they point to (e.g. rcx → &quot;C:\…&quot;). This per-argument lookup is the main per-hit cost — uncheck to log raw hex values only, which is faster for dense captures." />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" />
-                <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,0,0,0" />
+                <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" Margin="0,3,0,3" />
+                <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,3,0,3" />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <TextBlock Text="Address" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}" Margin="0,0,6,0" />
-                <TextBox x:Name="AddrBox" Width="160" FontFamily="Cascadia Mono, Consolas"
+                <TextBlock Text="Address" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}" Margin="0,3,6,3" />
+                <TextBox x:Name="AddrBox" Width="160" Margin="0,3,0,3" FontFamily="Cascadia Mono, Consolas"
                          KeyDown="OnAddrKeyDown" />
-                <Button Content="Go" Click="OnGo" Margin="6,0,0,0" />
-                <Button x:Name="SectionsBtn" Content="Sections ▾" Click="OnSectionsMenu" Margin="6,0,0,0"
+                <Button Content="Go" Click="OnGo" Margin="6,3,0,3" />
+                <Button x:Name="SectionsBtn" Content="Sections ▾" Click="OnSectionsMenu" Margin="6,3,0,3"
                         ToolTip="Jump to the start of a section (or the PE header) in the linear view — loads a data section into the listing if needed" />
-                <TextBlock x:Name="FileInfo" VerticalAlignment="Center" Margin="16,0,0,0"
+                <TextBlock x:Name="FileInfo" VerticalAlignment="Center" Margin="16,3,0,3"
                            Foreground="{StaticResource TextSecondary}" />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button x:Name="HelpBtn" Content="Help ▾" Click="OnHelpMenu" ToolTip="Help (F1)">
+                <Button x:Name="HelpBtn" Content="Help ▾" Click="OnHelpMenu" Margin="0,3,0,3" ToolTip="Help (F1)">
                     <Button.ContextMenu>
                         <ContextMenu>
                             <MenuItem Header="Keyboard Shortcuts" InputGestureText="F1" Click="OnHelpShortcuts" />
@@ -173,7 +173,7 @@
                         <DockPanel>
                             <DockPanel DockPanel.Dock="Top" Margin="8,6,8,2">
                                 <Button x:Name="StringRefreshBtn" DockPanel.Dock="Right" Content="⟳ Refresh"
-                                        Padding="6,1" Margin="6,0,0,0" Click="OnRefreshStrings"
+                                        Padding="6,1" Margin="6,3,0,3" Click="OnRefreshStrings"
                                         ToolTip="Rebuild the strings list. While stopped in a live session this re-scans the debuggee's process memory (so decrypted/unpacked strings appear); otherwise it rebuilds from the file's static strings." />
                                 <TextBlock x:Name="StringHeader" VerticalAlignment="Center" Margin="2,0,0,0"
                                            Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
