@@ -6,15 +6,16 @@ using System.Windows.Media;
 using DisasmStudio.Core.Devirt;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf;
 
 /// <summary>Small report window for the experimental devirtualizer.</summary>
 internal sealed class DevirtReportDialog : Window
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x38, 0x3C, 0x4A));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xC0, 0xC7, 0xD1));
+    private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
+    private static readonly Brush Fg = Palette.TextBrush;   // text
+    private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     private readonly string _report;
@@ -53,7 +54,7 @@ internal sealed class DevirtReportDialog : Window
             AcceptsReturn = true,
             FontFamily = Mono,
             FontSize = 12,
-            Background = new SolidColorBrush(Color.FromRgb(0x2B, 0x2E, 0x39)),
+            Background = Palette.BaseBrush,
             Foreground = Sub,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,

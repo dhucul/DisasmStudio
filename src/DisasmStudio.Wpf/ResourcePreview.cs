@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf;
 
@@ -16,7 +17,7 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 internal static class ResourcePreview
 {
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
+    private static readonly Brush Fg = Palette.TextBrush; // text
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     public static UIElement Build(byte[] data, uint? typeId)

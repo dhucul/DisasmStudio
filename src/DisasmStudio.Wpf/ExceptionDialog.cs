@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using DisasmStudio.Debug;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf;
 
@@ -12,11 +13,11 @@ namespace DisasmStudio.Wpf;
 /// pass-to-program. Edits the supplied <see cref="ExceptionFilter"/> in place when the user clicks OK.</summary>
 internal static class ExceptionDialog
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x38, 0x3C, 0x4A));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xC0, 0xC7, 0xD1));
-    private static readonly Brush RowBg = new SolidColorBrush(Color.FromRgb(0x40, 0x45, 0x52));
-    private static readonly Brush HdrBg = new SolidColorBrush(Color.FromRgb(0x45, 0x4C, 0x5C));
+    private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
+    private static readonly Brush Fg = Palette.TextBrush;   // text
+    private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
+    private static readonly Brush RowBg = Palette.Surface1Brush; // surface1
+    private static readonly Brush HdrBg = Palette.Surface1Brush; // surface1
 
     private sealed class Row
     {

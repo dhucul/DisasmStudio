@@ -1,39 +1,41 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:svc="clr-namespace:DisasmStudio.Wpf.Services">
 
-    <!-- Arc-Dark (Kvantum "arc-dark"): flat, cool-grey surfaces built on the signature Arc blue
-         (#5294E2). Muted borders, subtle hover/press surfaces, and a harmonized syntax palette. -->
-    <SolidColorBrush x:Key="Background"    Color="#2B2E39" />
-    <SolidColorBrush x:Key="Surface"       Color="#383C4A" />
-    <SolidColorBrush x:Key="Surface2"      Color="#404552" />
-    <SolidColorBrush x:Key="SurfaceAlt"    Color="#33373F" />
-    <SolidColorBrush x:Key="SurfaceHover"  Color="#474D5C" /><!-- button hover fill (lighter than Surface2) -->
-    <SolidColorBrush x:Key="SurfacePressed" Color="#31353F" /><!-- button press fill (darker) -->
-    <SolidColorBrush x:Key="Outline"       Color="#454C5C" />
-    <SolidColorBrush x:Key="OutlineStrong" Color="#565E70" />
-    <SolidColorBrush x:Key="TextPrimary"   Color="#D3DAE3" />
-    <SolidColorBrush x:Key="TextSecondary" Color="#C0C7D1" />
-    <SolidColorBrush x:Key="TextMuted"     Color="#8A929E" />
-    <SolidColorBrush x:Key="Accent"        Color="#5294E2" />
-    <SolidColorBrush x:Key="AccentHover"   Color="#6FA8E8" />
-    <SolidColorBrush x:Key="AccentPressed" Color="#4180CE" />
-    <SolidColorBrush x:Key="AccentSoft"    Color="#37455C" />
-    <SolidColorBrush x:Key="Selection"     Color="#3A5678" />
-    <SolidColorBrush x:Key="StringRef"     Color="#E8A25A" /><!-- referenced-at-call marker in the Strings list -->
+    <!-- Colours come from the single-source Services/Palette.cs (Catppuccin Frappé) via x:Static,
+         so a flavour swap is one file. This dictionary only maps chrome ROLES → palette tokens.
+         Pastel accents carry DARK text (Palette.CrustBrush), never white. -->
+    <SolidColorBrush x:Key="Background"    Color="{x:Static svc:Palette.Base}" />
+    <SolidColorBrush x:Key="Surface"       Color="{x:Static svc:Palette.Surface0}" />
+    <SolidColorBrush x:Key="Surface2"      Color="{x:Static svc:Palette.Surface1}" />
+    <SolidColorBrush x:Key="SurfaceAlt"    Color="{x:Static svc:Palette.Mantle}" />
+    <SolidColorBrush x:Key="SurfaceHover"  Color="{x:Static svc:Palette.Surface2}" /><!-- button hover fill -->
+    <SolidColorBrush x:Key="SurfacePressed" Color="{x:Static svc:Palette.Crust}" /><!-- button press fill -->
+    <SolidColorBrush x:Key="Outline"       Color="{x:Static svc:Palette.Surface1}" />
+    <SolidColorBrush x:Key="OutlineStrong" Color="{x:Static svc:Palette.Surface2}" />
+    <SolidColorBrush x:Key="TextPrimary"   Color="{x:Static svc:Palette.Text}" />
+    <SolidColorBrush x:Key="TextSecondary" Color="{x:Static svc:Palette.Subtext1}" />
+    <SolidColorBrush x:Key="TextMuted"     Color="{x:Static svc:Palette.Overlay1}" />
+    <SolidColorBrush x:Key="Accent"        Color="{x:Static svc:Palette.Accent}" />
+    <SolidColorBrush x:Key="AccentHover"   Color="{x:Static svc:Palette.AccentHover}" />
+    <SolidColorBrush x:Key="AccentPressed" Color="{x:Static svc:Palette.AccentPressed}" />
+    <SolidColorBrush x:Key="AccentSoft"    Color="{x:Static svc:Palette.AccentSoft}" />
+    <SolidColorBrush x:Key="Selection"     Color="{x:Static svc:Palette.Selection}" />
+    <SolidColorBrush x:Key="StringRef"     Color="{x:Static svc:Palette.Peach}" /><!-- referenced-at-call marker in the Strings list -->
 
-    <!-- Arc action accents for the semantic toolbar buttons (Run/Pause/Stop). -->
-    <SolidColorBrush x:Key="Success"     Color="#5BC8A5" /><!-- arc green/teal    -->
-    <SolidColorBrush x:Key="SuccessSoft" Color="#243D38" /><!-- green hover wash  -->
-    <SolidColorBrush x:Key="Warn"        Color="#F0883E" /><!-- arc orange       -->
-    <SolidColorBrush x:Key="WarnSoft"    Color="#3E3327" /><!-- amber hover wash  -->
-    <SolidColorBrush x:Key="Danger"      Color="#E24C56" /><!-- arc red          -->
-    <SolidColorBrush x:Key="DangerSoft"  Color="#3D2A2D" /><!-- red hover wash    -->
+    <!-- Semantic toolbar buttons (Run/Pause/Stop). -->
+    <SolidColorBrush x:Key="Success"     Color="{x:Static svc:Palette.Green}" />
+    <SolidColorBrush x:Key="SuccessSoft" Color="{x:Static svc:Palette.SuccessSoft}" />
+    <SolidColorBrush x:Key="Warn"        Color="{x:Static svc:Palette.Peach}" />
+    <SolidColorBrush x:Key="WarnSoft"    Color="{x:Static svc:Palette.WarnSoft}" />
+    <SolidColorBrush x:Key="Danger"      Color="{x:Static svc:Palette.Red}" />
+    <SolidColorBrush x:Key="DangerSoft"  Color="{x:Static svc:Palette.DangerSoft}" />
 
     <!-- Re-point system selection brushes at the theme (lists / tree selection). -->
-    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"                       Color="#3A5678" />
-    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                   Color="#D3DAE3" />
-    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"      Color="#3A5678" />
-    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"  Color="#D3DAE3" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"                       Color="{x:Static svc:Palette.Selection}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                   Color="{x:Static svc:Palette.Text}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"      Color="{x:Static svc:Palette.Selection}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"  Color="{x:Static svc:Palette.Text}" />
 
     <Style TargetType="{x:Type Window}">
         <Setter Property="Background" Value="{StaticResource Background}" />
@@ -137,7 +139,7 @@
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource Success}" />
-                            <Setter Property="Foreground" Value="#2B2E39" />
+                            <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="bd" Property="Opacity" Value="0.45" />
@@ -169,7 +171,7 @@
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource AccentPressed}" />
-                            <Setter Property="Foreground" Value="#FFFFFF" />
+                            <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="bd" Property="Opacity" Value="0.45" />
@@ -201,7 +203,7 @@
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource Warn}" />
-                            <Setter Property="Foreground" Value="#2B2E39" />
+                            <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="bd" Property="Opacity" Value="0.45" />
@@ -233,7 +235,7 @@
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource Danger}" />
-                            <Setter Property="Foreground" Value="#2B2E39" />
+                            <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="bd" Property="Opacity" Value="0.45" />
@@ -269,7 +271,7 @@
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource Accent}" />
                             <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Accent}" />
-                            <Setter Property="Foreground" Value="#FFFFFF" />
+                            <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Accent}" />
@@ -297,7 +299,7 @@
                         <Border x:Name="box" Width="16" Height="16" CornerRadius="3" VerticalAlignment="Center"
                                 Background="{StaticResource Surface2}" BorderBrush="{StaticResource OutlineStrong}" BorderThickness="1">
                             <Path x:Name="check" Visibility="Collapsed" Stretch="Uniform" Margin="3"
-                                  Stroke="#FFFFFF" StrokeThickness="1.8" StrokeEndLineCap="Round" StrokeStartLineCap="Round"
+                                  Stroke="{x:Static svc:Palette.CrustBrush}" StrokeThickness="1.8" StrokeEndLineCap="Round" StrokeStartLineCap="Round"
                                   Data="M 0,5 L 4,9 L 11,1" />
                         </Border>
                         <ContentPresenter Margin="6,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True" />

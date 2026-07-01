@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using DisasmStudio.Debug.Unpacking;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf;
 
@@ -17,9 +18,9 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 internal sealed class NonInvasiveDumpDialog : Window
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x38, 0x3C, 0x4A));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xC0, 0xC7, 0xD1));
+    private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
+    private static readonly Brush Fg = Palette.TextBrush;   // text
+    private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     private readonly ulong _preferredImageBase;
@@ -137,7 +138,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         {
             Text = "Process-level containment only — it does NOT block network or filesystem access. " +
                    "Run truly untrusted samples in a disposable VM.",
-            Foreground = new SolidColorBrush(Color.FromRgb(0xF0, 0x88, 0x3E)),
+            Foreground = Palette.PeachBrush,
             FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(20, 0, 0, 4),
         });
         opt.Children.Add(_launchPanel);
@@ -192,7 +193,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         _log = new TextBox
         {
             IsReadOnly = true, FontFamily = Mono, FontSize = 11,
-            Background = new SolidColorBrush(Color.FromRgb(0x2B, 0x2E, 0x39)), Foreground = Sub,
+            Background = Palette.BaseBrush, Foreground = Sub,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             TextWrapping = TextWrapping.NoWrap, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Margin = new Thickness(0, 4, 0, 8), AcceptsReturn = true,

@@ -7,6 +7,7 @@ using DisasmStudio.Core.Devirt;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug.Unpacking;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf;
 
@@ -18,10 +19,10 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 internal sealed class UnpackerDialog : Window
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x38, 0x3C, 0x4A));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xC0, 0xC7, 0xD1));
-    private static readonly Brush Warn = new SolidColorBrush(Color.FromRgb(0xF0, 0x88, 0x3E));
+    private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
+    private static readonly Brush Fg = Palette.TextBrush;   // text
+    private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
+    private static readonly Brush Warn = Palette.PeachBrush; // peach
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     private readonly string _target;
@@ -149,7 +150,7 @@ internal sealed class UnpackerDialog : Window
         _log = new TextBox
         {
             IsReadOnly = true, FontFamily = Mono, FontSize = 11,
-            Background = new SolidColorBrush(Color.FromRgb(0x2B, 0x2E, 0x39)), Foreground = Sub,
+            Background = Palette.BaseBrush, Foreground = Sub,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             TextWrapping = TextWrapping.NoWrap, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Margin = new Thickness(0, 4, 0, 8), AcceptsReturn = true,

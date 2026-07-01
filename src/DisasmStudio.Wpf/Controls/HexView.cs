@@ -6,6 +6,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf.Controls;
 
@@ -42,13 +43,13 @@ public sealed class HexView : Grid
     /// memory) instead of the file-offset patch path — which can't address a live 64-bit process.</summary>
     public Func<ulong, byte, bool>? WriteByteAt { get; set; }
 
-    private static readonly Brush BgBrush = Frozen(0x2B, 0x2E, 0x39);     // Arc-Dark deepest
-    private static readonly Brush AddrBrush = Frozen(0x7F, 0xB0, 0xEA);   // arc blue
-    private static readonly Brush HexBrush = Frozen(0xD3, 0xDA, 0xE3);    // arc fg
-    private static readonly Brush AsciiBrush = Frozen(0x9F, 0xD0, 0x7A);  // green
-    private static readonly Brush DimBrush = Frozen(0x56, 0x5E, 0x70);    // unreadable/zero bytes
-    private static readonly Brush SelBrush = FrozenA(0x66, 0x52, 0x94, 0xE2);  // arc blue @ 0x66 alpha
-    private static readonly Brush PatchBrush = Frozen(0xF0, 0x88, 0x3E);   // arc orange = edited byte
+    private static readonly Brush BgBrush = Palette.BaseBrush;
+    private static readonly Brush AddrBrush = Palette.BlueBrush;
+    private static readonly Brush HexBrush = Palette.TextBrush;
+    private static readonly Brush AsciiBrush = Palette.GreenBrush;
+    private static readonly Brush DimBrush = Palette.Surface2Brush;      // unreadable/zero bytes
+    private static readonly Brush SelBrush = Palette.SelOverlayBrush;    // lavender @ 0x66 alpha
+    private static readonly Brush PatchBrush = Palette.PeachBrush;       // edited byte
 
     public HexView()
     {
@@ -356,8 +357,6 @@ public sealed class HexView : Grid
         dc.DrawText(ft, new Point(x, y));
     }
 
-    private static Brush Frozen(byte r, byte g, byte b) { var x = new SolidColorBrush(Color.FromRgb(r, g, b)); x.Freeze(); return x; }
-    private static Brush FrozenA(byte a, byte r, byte g, byte b) { var x = new SolidColorBrush(Color.FromArgb(a, r, g, b)); x.Freeze(); return x; }
 
     private sealed class Surface : FrameworkElement
     {
