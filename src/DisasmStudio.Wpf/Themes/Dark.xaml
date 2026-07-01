@@ -463,10 +463,31 @@
         </Setter>
     </Style>
 
-    <!-- TabControl / TabItem -->
+    <!-- TabControl / TabItem. Re-templated so the tab-strip row (the area beside the tabs) is themed
+         dark — the default template leaves it the light system colour. -->
     <Style TargetType="TabControl">
         <Setter Property="Background" Value="{StaticResource Surface}" />
         <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabControl">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <!-- Header strip: fill the whole row dark so no light gap shows past the last tab. -->
+                        <Border Grid.Row="0" Background="{TemplateBinding Background}">
+                            <TabPanel IsItemsHost="True" Margin="0" KeyboardNavigation.TabIndex="1" Panel.ZIndex="1" />
+                        </Border>
+                        <Border Grid.Row="1" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                            <ContentPresenter ContentSource="SelectedContent" SnapsToDevicePixels="True" />
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
     <Style TargetType="TabItem">
         <Setter Property="Foreground" Value="{StaticResource TextSecondary}" />
