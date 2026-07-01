@@ -50,6 +50,10 @@ public static class Palette
     // Hand-tuned debugger bands (warm amber / green over the dark base; retune per flavour).
     public static readonly Color CurrentIpBand = C(0x4E, 0x4A, 0x35);
     public static readonly Color CoveredBand   = C(0x38, 0x4A, 0x3C);
+    // Brighter variants for the graph view, where rows sit over the lighter block surface (Surface0)
+    // instead of Base — the base bands are near-invisible there, so these lift the luminance/chroma.
+    public static readonly Color CurrentIpBandGraph = C(0x5E, 0x57, 0x3E);
+    public static readonly Color CoveredBandGraph   = C(0x46, 0x66, 0x4C);
 
     // The single UI accent (re-point here for a non-Lavender accent).
     public static readonly Color Accent = Lavender;
@@ -96,6 +100,8 @@ public static class Palette
     public static readonly SolidColorBrush SelectionBrush = F(Selection);
     public static readonly SolidColorBrush CurrentIpBrush = F(CurrentIpBand);
     public static readonly SolidColorBrush CoveredBrush  = F(CoveredBand);
+    public static readonly SolidColorBrush CurrentIpGraphBrush = F(CurrentIpBandGraph);
+    public static readonly SolidColorBrush CoveredGraphBrush   = F(CoveredBandGraph);
 
     /// <summary>Hex-view selection wash — the accent at ~40% alpha.</summary>
     public static readonly SolidColorBrush SelOverlayBrush =

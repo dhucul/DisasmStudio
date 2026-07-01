@@ -48,6 +48,16 @@
         <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
     </Style>
 
+    <!-- The implicit TextBlock style above pins EVERY TextBlock to TextPrimary — including the one a
+         ContentPresenter generates for a button's string content. That silently overrides the control's
+         own Foreground, so accent glyphs never show and the dark text intended over a pressed/checked
+         accent fill stays light (invisible). Drop this as an implicit TextBlock style inside a button's
+         ContentPresenter to re-point the glyph back at the control's Foreground. -->
+    <Style x:Key="ButtonGlyphText" TargetType="TextBlock">
+        <Setter Property="Foreground"
+                Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type ButtonBase}}}" />
+    </Style>
+
     <Style TargetType="Label">
         <Setter Property="Foreground" Value="{StaticResource TextSecondary}" />
     </Style>
@@ -89,7 +99,11 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True" />
+                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <!-- Arc flat: hover is a subtly lighter surface, press a darker one; the blue
@@ -130,7 +144,11 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True" />
+                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -162,7 +180,11 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True" />
+                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -194,7 +216,11 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True" />
+                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -226,7 +252,11 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True" />
+                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -264,8 +294,14 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True" />
+                        <ContentPresenter x:Name="cp" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
+                            <!-- Re-point the glyph at the control's Foreground so the checked-state dark colour
+                                 below shows over the light accent fill (see ButtonGlyphText for the why). -->
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsChecked" Value="True">

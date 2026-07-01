@@ -123,6 +123,7 @@ public partial class MainWindow : Window
         // Coverage tint: _coveredInstrs holds executed instruction VAs in static space (like the breakpoint set),
         // so `va - LiveSlide` maps the shown (live) address back to it during a run and matches directly after.
         Linear.IsInstrHit = va => _coveredInstrs.Count > 0 && _coveredInstrs.Contains(va - LiveSlide);
+        Graph.IsInstrHit = Linear.IsInstrHit;   // the graph shares the same trace overlay (same VA space)
         Linear.RunToCursorRequested += va => _dbg?.RunToCursor(va);
         Linear.RunToReturnRequested += () => OnRunToReturn(this, new RoutedEventArgs());
         Linear.CaptureFunctionRequested += CaptureFunctionAt;
@@ -621,6 +622,7 @@ public partial class MainWindow : Window
             if (_coveredInstrs.Add(_dbg.CurrentIp - LiveSlide)) ClearCoverageBtn.IsEnabled = true;
             StartCoverageTimer();
             Linear.Refresh();
+            Graph.Refresh();
             StatusText.Text = $"Trace started at {_dbg.CurrentIp:X} — Continue (F5) or step to record the instruction path.";
         }
         else
@@ -645,6 +647,7 @@ public partial class MainWindow : Window
         _dbg?.ClearCoveredPoints();
         ClearCoverageBtn.IsEnabled = false;
         Linear.Refresh();
+        Graph.Refresh();
     }
 
     /// <summary>Pull the instruction VAs the engine has recorded so far and repaint. In trace mode each covered
@@ -660,6 +663,7 @@ public partial class MainWindow : Window
         {
             ClearCoverageBtn.IsEnabled = true;
             Linear.Refresh();
+            Graph.Refresh();   // the graph carries the same trace overlay; repaint it as coverage grows
         }
     }
 

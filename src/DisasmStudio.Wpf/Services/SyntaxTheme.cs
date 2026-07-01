@@ -40,6 +40,12 @@ public static class SyntaxTheme
     public static readonly Brush TypeName = Palette.SkyBrush;         // C types
     public static readonly Brush Variable = Palette.Subtext1Brush;    // recovered vars
 
+    // Graph view: the debugger bands are brightened (rows sit over the lighter block surface), and the
+    // current-IP row also gets a bright warm outline so it can't be missed against a covered run of rows.
+    public static readonly Brush CurrentIpGraph = Palette.CurrentIpGraphBrush;
+    public static readonly Brush CoveredInstrGraph = Palette.CoveredGraphBrush;
+    public static readonly Pen CurrentIpGraphOutline = FrozenPen(Palette.PeachBrush, 1.5);
+
     // Edge colours for the graph view
     public static readonly Brush EdgeTaken = Palette.GreenBrush;     // branch taken
     public static readonly Brush EdgeFall = Palette.Overlay1Brush;   // fall-through
@@ -48,6 +54,13 @@ public static class SyntaxTheme
     public static readonly Brush BlockBg = Palette.Surface0Brush;
     public static readonly Brush BlockBorder = Palette.Surface2Brush;
     public static readonly Brush BlockHeader = Palette.Surface1Brush;
+
+    private static Pen FrozenPen(Brush brush, double thickness)
+    {
+        var p = new Pen(brush, thickness);
+        p.Freeze();
+        return p;
+    }
 
     public static Brush BrushFor(AsmTokenKind kind) => kind switch
     {

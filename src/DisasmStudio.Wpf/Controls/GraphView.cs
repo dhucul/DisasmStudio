@@ -47,6 +47,13 @@ public sealed class GraphView : FrameworkElement
 
     public event Action<ulong>? BlockSelected;
 
+    /// <summary>Predicate the renderer uses to tint executed (traced) instruction rows — mirrors the
+    /// linear view's coverage overlay so the graph shows the same trace highlights.</summary>
+    public Func<ulong, bool>? IsInstrHit { get; set; }
+
+    /// <summary>Repaint without rebuilding layout — e.g. when the coverage/trace set grows during a run.</summary>
+    public void Refresh() => InvalidateVisual();
+
     private sealed record Line(ulong Va, string Text, AsmToken[] Tokens, double Width, string? Comment);
 
     public GraphView()
@@ -285,8 +292,14 @@ public sealed class GraphView : FrameworkElement
         double y = b.Y + HeaderH + 1;
         foreach (var line in _lines[b.Start])
         {
+            var row = new Rect(b.X + 1, y, b.Width - 2, _rowHeight);
+            // Coverage tint first, so the current-IP band paints on top of it (matches the linear view).
+            if (IsInstrHit?.Invoke(line.Va) == true)
+                dc.DrawRectangle(SyntaxTheme.CoveredInstrGraph, null, row);
+            // Current instruction: a brighter amber band plus a warm outline — the plain band is near-
+            // invisible over the block's lighter surface, so the outline makes the row unmistakable.
             if (_ipVa != 0 && line.Va == _ipVa)
-                dc.DrawRectangle(SyntaxTheme.CurrentIp, null, new Rect(b.X + 1, y, b.Width - 2, _rowHeight));
+                dc.DrawRectangle(SyntaxTheme.CurrentIpGraph, SyntaxTheme.CurrentIpGraphOutline, row);
             double x = b.X + Pad;
             // Address prefix.
             int split = line.Text.IndexOf("  ", StringComparison.Ordinal);
