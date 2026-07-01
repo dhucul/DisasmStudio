@@ -18,10 +18,10 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 internal sealed class UnpackerDialog : Window
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x27, 0x2D, 0x37));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF0, 0xF3, 0xF8));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xDC, 0xE2, 0xEC));
-    private static readonly Brush Warn = new SolidColorBrush(Color.FromRgb(0xF2, 0xD0, 0x8A));
+    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x38, 0x3C, 0x4A));
+    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
+    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xC0, 0xC7, 0xD1));
+    private static readonly Brush Warn = new SolidColorBrush(Color.FromRgb(0xF0, 0x88, 0x3E));
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     private readonly string _target;
@@ -149,7 +149,7 @@ internal sealed class UnpackerDialog : Window
         _log = new TextBox
         {
             IsReadOnly = true, FontFamily = Mono, FontSize = 11,
-            Background = new SolidColorBrush(Color.FromRgb(0x1B, 0x20, 0x28)), Foreground = Sub,
+            Background = new SolidColorBrush(Color.FromRgb(0x2B, 0x2E, 0x39)), Foreground = Sub,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             TextWrapping = TextWrapping.NoWrap, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Margin = new Thickness(0, 4, 0, 8), AcceptsReturn = true,

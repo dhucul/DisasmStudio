@@ -9,10 +9,10 @@ namespace DisasmStudio.Wpf;
 /// the app, same pattern as <see cref="Dialogs"/> / <see cref="ExceptionDialog"/>.</summary>
 internal static class HelpDialog
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x27, 0x2D, 0x37));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF0, 0xF3, 0xF8));
-    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xDC, 0xE2, 0xEC));
-    private static readonly Brush Accent = new SolidColorBrush(Color.FromRgb(0x60, 0x90, 0xD4));
+    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x38, 0x3C, 0x4A));
+    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
+    private static readonly Brush Sub = new SolidColorBrush(Color.FromRgb(0xC0, 0xC7, 0xD1));
+    private static readonly Brush Accent = new SolidColorBrush(Color.FromRgb(0x52, 0x94, 0xE2));
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     private static readonly (string Title, (string Key, string Desc)[] Items)[] Groups =
@@ -98,7 +98,7 @@ internal static class HelpDialog
         }
         stack.Children.Add(new TextBlock
         {
-            Text = "Press F1 to reopen this.", Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x95, 0xA9)),
+            Text = "Press F1 to reopen this.", Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x92, 0x9E)),
             FontStyle = FontStyles.Italic, Margin = new Thickness(0, 16, 0, 0),
         });
 
@@ -129,7 +129,7 @@ internal static class HelpDialog
         panel.Children.Add(new TextBlock
         {
             Text = $".NET {Environment.Version}  ·  {(Environment.Is64BitProcess ? "x64" : "x86")}",
-            Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x95, 0xA9)), FontFamily = Mono, FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x92, 0x9E)), FontFamily = Mono, FontSize = 11,
         });
         Show(owner, "About DisasmStudio", panel, width: 440, height: 0, resizable: false);
     }

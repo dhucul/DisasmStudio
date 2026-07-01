@@ -42,13 +42,13 @@ public sealed class HexView : Grid
     /// memory) instead of the file-offset patch path — which can't address a live 64-bit process.</summary>
     public Func<ulong, byte, bool>? WriteByteAt { get; set; }
 
-    private static readonly Brush BgBrush = Frozen(0x1B, 0x20, 0x28);     // deepest Polar Night
-    private static readonly Brush AddrBrush = Frozen(0x88, 0xAE, 0xDE);   // bright frost blue
-    private static readonly Brush HexBrush = Frozen(0xF2, 0xF5, 0xFA);    // bright
-    private static readonly Brush AsciiBrush = Frozen(0xB4, 0xDC, 0x90);  // bright green
-    private static readonly Brush DimBrush = Frozen(0x4F, 0x59, 0x6B);    // unreadable/zero bytes
-    private static readonly Brush SelBrush = FrozenA(0x66, 0x60, 0x90, 0xD4);  // bright blue @ 0x66 alpha
-    private static readonly Brush PatchBrush = Frozen(0xE0, 0x92, 0x6F);   // bright orange = edited byte
+    private static readonly Brush BgBrush = Frozen(0x2B, 0x2E, 0x39);     // Arc-Dark deepest
+    private static readonly Brush AddrBrush = Frozen(0x7F, 0xB0, 0xEA);   // arc blue
+    private static readonly Brush HexBrush = Frozen(0xD3, 0xDA, 0xE3);    // arc fg
+    private static readonly Brush AsciiBrush = Frozen(0x9F, 0xD0, 0x7A);  // green
+    private static readonly Brush DimBrush = Frozen(0x56, 0x5E, 0x70);    // unreadable/zero bytes
+    private static readonly Brush SelBrush = FrozenA(0x66, 0x52, 0x94, 0xE2);  // arc blue @ 0x66 alpha
+    private static readonly Brush PatchBrush = Frozen(0xF0, 0x88, 0x3E);   // arc orange = edited byte
 
     public HexView()
     {

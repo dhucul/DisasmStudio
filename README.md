@@ -219,7 +219,7 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
 src/
   DisasmStudio.Core/     engine (no WPF): Formats/, Disasm/, Analysis/, IL/, Export/
   DisasmStudio.Debug/    live debugger: Win32 debug-loop interop, breakpoints, live image/disasm, dereference
-  DisasmStudio.Wpf/      UI: custom controls, soft slate theme, view-models
+  DisasmStudio.Wpf/      UI: custom controls, Arc-Dark theme, view-models
 ```
 
 The analysis runs on a background thread: scan strings → one linear sweep building the instruction

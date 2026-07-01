@@ -16,9 +16,9 @@ namespace DisasmStudio.Wpf;
 /// <summary>Small, code-built modal prompts (raw-load options, go-to-address) styled to the theme.</summary>
 internal static class Dialogs
 {
-    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x27, 0x2D, 0x37));
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF0, 0xF3, 0xF8));
-    private static readonly Brush Muted = new SolidColorBrush(Color.FromRgb(0x8A, 0x95, 0xA9));
+    private static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x38, 0x3C, 0x4A));
+    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
+    private static readonly Brush Muted = new SolidColorBrush(Color.FromRgb(0x8A, 0x92, 0x9E));
 
     /// <summary>How to host a DLL under the debugger: the host EXE that loads it, the full command line
     /// (incl. argv0), the working directory, and the chosen export's static VA to break at (null = "just
@@ -126,7 +126,7 @@ internal static class Dialogs
     {
         var mono = new FontFamily("Cascadia Mono, Consolas");
         var info = new TextBlock { Text = $"{va:X}   {currentText}", Foreground = Fg, FontFamily = mono, Margin = new Thickness(0, 0, 0, 2) };
-        var bytes = new TextBlock { Text = currentBytes, Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x95, 0xA9)), FontFamily = mono, Margin = new Thickness(0, 0, 0, 10) };
+        var bytes = new TextBlock { Text = currentBytes, Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x92, 0x9E)), FontFamily = mono, Margin = new Thickness(0, 0, 0, 10) };
         var box = new TextBox { Text = prefill, FontFamily = mono, AcceptsReturn = true, MinLines = 2, MaxLines = 8 };
         box.SelectAll();
         var nop = new CheckBox { Content = "Replace with NOPs", Foreground = Fg, Margin = new Thickness(0, 10, 0, 0) };
@@ -419,7 +419,7 @@ internal static class Dialogs
         var cond = new TextBox { Text = current.Condition ?? "" };
         var err = new TextBlock
         {
-            Foreground = new SolidColorBrush(Color.FromRgb(0xD8, 0x5F, 0x6A)),
+            Foreground = new SolidColorBrush(Color.FromRgb(0xE2, 0x4C, 0x56)),
             Margin = new Thickness(0, 4, 0, 0),
             TextWrapping = TextWrapping.Wrap,
             Visibility = Visibility.Collapsed,
@@ -509,7 +509,7 @@ internal static class Dialogs
     private static TextBlock Label(string text) => new()
     {
         Text = text,
-        Foreground = new SolidColorBrush(Color.FromRgb(0xDC, 0xE2, 0xEC)),
+        Foreground = new SolidColorBrush(Color.FromRgb(0xC0, 0xC7, 0xD1)),
         Margin = new Thickness(0, 0, 0, 4),
     };
 

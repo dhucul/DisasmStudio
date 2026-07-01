@@ -16,7 +16,7 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 internal static class ResourcePreview
 {
-    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF0, 0xF3, 0xF8));
+    private static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xD3, 0xDA, 0xE3));
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
 
     public static UIElement Build(byte[] data, uint? typeId)
