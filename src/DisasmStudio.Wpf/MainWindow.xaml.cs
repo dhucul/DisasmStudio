@@ -1309,7 +1309,8 @@ public partial class MainWindow : Window
         try
         {
             image = proj.Format == "Raw"
-                ? RawImage.Load(proj.BinaryPath, proj.RawBaseVa, proj.RawBitness)
+                ? RawImage.Load(proj.BinaryPath, proj.RawBaseVa, proj.RawBitness,
+                                proj.RawEntryVa != 0 ? proj.RawEntryVa : proj.RawBaseVa, null)
                 : proj.Format == "PE memory"
                 ? PeMemoryImage.Load(proj.BinaryPath, proj.RawBaseVa)
                 : BinaryLoader.Load(proj.BinaryPath);
@@ -1358,6 +1359,7 @@ public partial class MainWindow : Window
             Format = _image.FormatName,
             RawBaseVa = _image.Format == BinaryFormat.Raw || _image.FormatName == "PE memory" ? _image.ImageBase : 0,
             RawBitness = _image.Format == BinaryFormat.Raw ? _image.Bitness : 0,
+            RawEntryVa = _image.Format == BinaryFormat.Raw ? _image.EntryVa : 0,
             CurrentVa = _nav.Current ?? _image.EntryVa,
             CenterTab = CenterTabs.SelectedIndex,
             LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
@@ -1484,14 +1486,23 @@ public partial class MainWindow : Window
     {
         _projectPath = null; // opening a binary directly starts an unsaved session
         IBinaryImage image;
+        FirmwareScan? firmware = null;
         try
         {
             var fmt = BinaryLoader.Detect(path);
             if (fmt == BinaryFormat.Unknown)
             {
-                var opt = Dialogs.AskRawOptions(this);
+                // A headerless blob: sniff it for a firmware layout so the base/bitness/entry can be suggested,
+                // then let the user confirm or override. Detection is best-effort — fall back to a plain raw load.
+                FirmwareScan scan;
+                try { scan = FirmwareScanner.Scan(path); }
+                catch { scan = FirmwareScan.NotFirmware; }
+                long fileLength = new FileInfo(path).Length;
+                var opt = Dialogs.AskRawOptions(this, scan, fileLength);
                 if (opt is null) return;
-                image = RawImage.Load(path, opt.Value.BaseVa, opt.Value.Bitness);
+                image = RawImage.Load(path, opt.Value.BaseVa, opt.Value.Bitness, opt.Value.EntryVa,
+                                      scan.IsFirmware ? scan.Symbols : null);
+                if (scan.IsFirmware) firmware = scan;
             }
             else if (fmt == BinaryFormat.Pe && LooksLikeMemoryDumpPath(path) && PeMemoryImage.TryLoad(path, out var mem))
             {
@@ -1510,6 +1521,9 @@ public partial class MainWindow : Window
         if (opts is null) { (image as IDisposable)?.Dispose(); return; }   // cancelled
         _loadOptions = opts;
         await StartAnalysis(image);
+
+        // Report what the firmware sniffer found (and where the entry landed) once analysis has settled.
+        if (firmware is not null) StatusText.Text = firmware.Summary;
 
         // Nudge toward the unpacker when the freshly-loaded PE looks packed.
         if (image.Format == BinaryFormat.Pe)

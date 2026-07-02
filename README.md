@@ -9,6 +9,15 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
 
 - **Formats:** PE (`.exe`/`.dll`), ELF (32/64-bit, x86/x64), and raw/flat blobs (shellcode, dumps)
   at a chosen base address — all behind one `IBinaryImage` abstraction.
+- **Firmware images:** opening a headerless blob sniffs it for x86 firmware layouts and, crucially,
+  finds the **entry point** (which is almost never offset 0). A BIOS / UEFI SPI-flash image is
+  recognised by its **reset vector** — execution begins 16 bytes below the top of the image
+  (`0xFFFFFFF0`, or `0xFFFF0` for a small legacy BIOS shadowed into the F-segment) — and the image is
+  mapped so that lands at its architectural address; a PCI **option ROM** (`55 AA`) enters its INIT
+  routine at offset 3. The reset/init jump is decoded in 16-bit real mode to resolve the boot entry,
+  corroborated by Intel Flash Descriptor and UEFI firmware-volume (`_FVH`) signatures, and the open
+  dialog pre-fills the base, bitness (now incl. 16-bit real mode) and entry — all editable. Detected
+  landmarks (`reset_vector`, `boot_entry`, firmware-volume bases) seed analysis and name the listing.
 - **Linear view:** a custom, virtualized listing that decodes and formats only the rows on screen,
   so it scrolls smoothly over multi-million-instruction images. Soft syntax colouring, named branch
   targets (`sub_`/`loc_`/imports/exports), inline string comments, and a branch-arrow gutter.

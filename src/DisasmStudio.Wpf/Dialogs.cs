@@ -31,26 +31,66 @@ internal static class Dialogs
     // rundll32 LoadLibrary's the DLL (DllMain runs → the debugger breaks) and never calls a real export.
     private const string DllLoadProbe = "DisasmStudioLoadProbe";
 
-    /// <summary>Ask the base VA and bitness for opening a flat/raw blob.</summary>
-    public static (ulong BaseVa, int Bitness)? AskRawOptions(Window owner)
+    /// <summary>Ask the base VA, bitness and entry point for opening a flat/raw blob. When
+    /// <paramref name="scan"/> detected a firmware layout, the fields are pre-filled with its suggestion and a
+    /// summary of what was found is shown; the entry box tracks the base (preserving the detected offset) until
+    /// the user edits it. <paramref name="fileLength"/> is the blob size, used to keep the entry pinned relative
+    /// to the base. Returns the chosen base, bitness (16/32/64) and entry VA, or null if cancelled.</summary>
+    public static (ulong BaseVa, int Bitness, ulong EntryVa)? AskRawOptions(Window owner, FirmwareScan scan, long fileLength)
     {
+        var mono = new FontFamily("Cascadia Mono, Consolas");
+
         var bits = new ComboBox { Margin = new Thickness(0, 0, 0, 10) };
         bits.Items.Add("x64 (64-bit)");
         bits.Items.Add("x86 (32-bit)");
-        bits.SelectedIndex = 0;
-        var baseBox = new TextBox { Text = "140000000" };
+        bits.Items.Add("x86-16 (16-bit real mode)");
+        bits.SelectedIndex = scan.IsFirmware
+            ? scan.Bitness switch { 16 => 2, 32 => 1, _ => 0 }
+            : 0;
+
+        ulong defaultBase = scan.IsFirmware ? scan.BaseVa : 0x140000000UL;
+        ulong defaultEntry = scan.IsFirmware ? scan.EntryVa : defaultBase;
+        var baseBox = new TextBox { Text = defaultBase.ToString("X"), FontFamily = mono };
+        var entryBox = new TextBox { Text = defaultEntry.ToString("X"), FontFamily = mono };
+
+        // The entry keeps a fixed offset from the base (for firmware, the reset vector sits 16 bytes below the
+        // top of the image) until the user takes over the entry field, so re-basing still lands on the reset vector.
+        long entryOffset = (long)defaultEntry - (long)defaultBase;
+        bool userTouchedEntry = false, syncing = false;
+        baseBox.TextChanged += (_, _) =>
+        {
+            if (userTouchedEntry || ParseHex(baseBox.Text) is not ulong b) return;
+            syncing = true;
+            entryBox.Text = ((ulong)((long)b + entryOffset)).ToString("X");
+            syncing = false;
+        };
+        entryBox.TextChanged += (_, _) => { if (!syncing) userTouchedEntry = true; };
 
         var panel = new StackPanel { Margin = new Thickness(16) };
+        if (scan.IsFirmware)
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = scan.Summary,
+                Foreground = Palette.GreenBrush,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 12),
+            });
+        }
         panel.Children.Add(Label("Architecture"));
         panel.Children.Add(bits);
         panel.Children.Add(Label("Base address (hex)"));
         panel.Children.Add(baseBox);
+        panel.Children.Add(Label(scan.IsFirmware ? "Entry point (hex) — where the CPU starts" : "Entry point (hex)"));
+        panel.Children.Add(entryBox);
 
-        bool ok = ShowModal(owner, "Open as raw", panel, baseBox);
+        bool ok = ShowModal(owner, scan.IsFirmware ? "Open firmware" : "Open as raw", panel,
+                            scan.IsFirmware ? entryBox : baseBox, scan.IsFirmware ? 460 : 340);
         if (!ok) return null;
-        int bitness = bits.SelectedIndex == 0 ? 64 : 32;
+        int bitness = bits.SelectedIndex switch { 2 => 16, 1 => 32, _ => 64 };
         ulong baseVa = ParseHex(baseBox.Text) ?? (bitness == 64 ? 0x140000000UL : 0x400000UL);
-        return (baseVa, bitness);
+        ulong entryVa = ParseHex(entryBox.Text) ?? baseVa;
+        return (baseVa, bitness, entryVa);
     }
 
     /// <summary>Show every section in the image and let the user fold optional ones into the listing as data.

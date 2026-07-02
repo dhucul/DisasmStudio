@@ -3,6 +3,9 @@ namespace DisasmStudio.Core.Formats;
 /// <summary>
 /// A flat blob mapped 1:1 at a user-chosen base VA with a chosen bitness — for shellcode,
 /// memory dumps, or firmware. The whole file is one read+execute "section", so VA = base + offset.
+/// The entry point is separate from the base (firmware begins at a reset vector near the top of the
+/// image, not at offset 0), and any firmware markers found by <see cref="FirmwareScanner"/> are exposed
+/// as <see cref="Symbols"/> so they seed analysis and name the listing.
 /// </summary>
 public sealed class RawImage : IBinaryImage, IDisposable
 {
@@ -15,12 +18,12 @@ public sealed class RawImage : IBinaryImage, IDisposable
     public BinaryFormat Format => BinaryFormat.Raw;
     public string FormatName => "Raw";
     public int Bitness { get; }
-    public string ArchName => Bitness == 64 ? "x64" : "x86";
+    public string ArchName => Bitness switch { 64 => "x64", 16 => "x86-16", _ => "x86" };
     public ulong ImageBase { get; }
-    public ulong EntryVa => ImageBase;
+    public ulong EntryVa { get; }
     public bool IsDll => false;
     public IReadOnlyList<Section> Sections { get; }
-    public IReadOnlyList<NamedSymbol> Symbols => [];
+    public IReadOnlyList<NamedSymbol> Symbols { get; }
     public IReadOnlyList<ImportEntry> Imports => [];
     public Section? HeaderRegion => null;       // a flat blob has no header region
     public ResourceTree? Resources => null;     // and no resource directory
@@ -28,12 +31,20 @@ public sealed class RawImage : IBinaryImage, IDisposable
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa { get; } = new Dictionary<ulong, ImportEntry>();
     public int BackingLength => _f.Length;
 
-    private RawImage(MappedFile f, string path, ulong baseVa, int bitness)
+    private RawImage(MappedFile f, string path, ulong baseVa, int bitness, ulong entryVa,
+                     IReadOnlyList<NamedSymbol>? symbols)
     {
         _f = f;
         FilePath = path;
         ImageBase = baseVa;
-        Bitness = bitness == 64 ? 64 : 32;
+        Bitness = bitness switch { 64 => 64, 16 => 16, _ => 32 };
+        EntryVa = entryVa;
+        // Keep only markers that land inside the mapped blob, so a seed can never point analysis at an
+        // unmapped VA (e.g. a legacy reset vector's far jump into low memory that this mapping doesn't cover).
+        ulong end = baseVa + (ulong)f.Length;
+        Symbols = symbols is null || symbols.Count == 0
+            ? []
+            : symbols.Where(s => s.Va >= baseVa && s.Va < end).ToArray();
         _section = new Section
         {
             Name = ".raw",
@@ -48,8 +59,15 @@ public sealed class RawImage : IBinaryImage, IDisposable
         Sections = [_section];
     }
 
+    /// <summary>Map a flat blob at <paramref name="baseVa"/> with the entry at the base (shellcode / dumps).</summary>
     public static RawImage Load(string path, ulong baseVa, int bitness) =>
-        new(MappedFile.Open(path), path, baseVa, bitness);
+        new(MappedFile.Open(path), path, baseVa, bitness, baseVa, null);
+
+    /// <summary>Map a flat blob with an explicit entry point and optional firmware markers (see
+    /// <see cref="FirmwareScanner"/>). Used for firmware, whose entry is a reset vector near the top of the image.</summary>
+    public static RawImage Load(string path, ulong baseVa, int bitness, ulong entryVa,
+                                IReadOnlyList<NamedSymbol>? symbols) =>
+        new(MappedFile.Open(path), path, baseVa, bitness, entryVa, symbols);
 
     public ulong MinVa => ImageBase;
     public ulong MaxVa => ImageBase + (ulong)_f.Length;
