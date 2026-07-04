@@ -1386,7 +1386,7 @@ public partial class MainWindow : Window
         // Works on _result (the live analysis when fileless-attached), so only that is required — the default
         // filename comes from _result.Image (the file, or the attached process's module path).
         if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save ASM", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (NotForArm("Save ASM")) return;
+        // ASM export works for ARM too — it streams the same linear listing the view shows (Capstone-backed).
         var dlg = new SaveFileDialog { Title = "Save disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
             FileName = ExportBaseName() + ".asm" };
         if (dlg.ShowDialog(this) != true) return;
@@ -1397,7 +1397,6 @@ public partial class MainWindow : Window
     private async void OnSaveC(object sender, RoutedEventArgs e)
     {
         if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (NotForArm("Save C")) return;
         var dlg = new SaveFileDialog
         {
             Title = "Save C",
@@ -1452,7 +1451,6 @@ public partial class MainWindow : Window
     {
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
-        if (NotForArm("Save ASM")) return;
         var dlg = new SaveFileDialog { Title = "Save function disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
             FileName = SafeFileName(fn.Name) + ".asm" };
         if (dlg.ShowDialog(this) != true) return;
@@ -1469,7 +1467,6 @@ public partial class MainWindow : Window
     {
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
-        if (NotForArm("Save C")) return;
         var dlg = new SaveFileDialog
         {
             Title = "Save function C",
@@ -1493,14 +1490,15 @@ public partial class MainWindow : Window
         return s.Length > 80 ? s[..80] : s;
     }
 
-    /// <summary>The IL decompiler, C/ASM export, devirtualizer and debugger are x86/x64-only (they depend on
-    /// Iced semantics / the Win64 ABI). Returns true — after telling the user — when the loaded image is an
-    /// ARM-family raw blob, so the caller bails. ARM images still have linear disassembly, graph, hex and xrefs.</summary>
+    /// <summary>The devirtualizer and debugger are x86/x64-only (they depend on Iced semantics / the Win64
+    /// ABI). Returns true — after telling the user — when the loaded image is an ARM-family raw blob, so the
+    /// caller bails. ARM images still have linear disassembly, the CFG graph, the hex view, cross-references
+    /// and ASM export.</summary>
     private bool NotForArm(string feature)
     {
         if (_result?.Image.IsArm != true) return false;
         MessageBox.Show(this, $"{feature} is available for x86/x64 targets only — this is an ARM image. " +
-            "Linear disassembly, the CFG graph, the hex view and cross-references all work for ARM.",
+            "Linear disassembly, the CFG graph, the hex view, cross-references and ASM export all work for ARM.",
             feature, MessageBoxButton.OK, MessageBoxImage.Information);
         return true;
     }
@@ -1788,12 +1786,8 @@ public partial class MainWindow : Window
 
     private void OpenDecompiler(ulong va)
     {
-        // The IL/pseudo-C decompiler is x86/x64-only (Iced-based); ARM images use the linear + graph views.
-        if (_result?.Image.IsArm == true)
-        {
-            StatusText.Text = "Decompiler is x86/x64 only — this ARM image shows linear + graph disassembly.";
-            return;
-        }
+        // The decompiler now covers x86/x64 (Iced) and the whole ARM family — AArch64, 32-bit ARM and
+        // Thumb (Capstone). No architecture gate remains.
         var fn = FindFunction(va);
         if (fn is not null && _result is not null) Decompiler.SetFunction(_result, fn);
     }
@@ -1895,6 +1889,15 @@ public partial class MainWindow : Window
             XrefList.ItemsSource = refs.Select(x => new XrefItem(x)).ToList();
             string preview = si.Text.Length > 40 ? si.Text[..40] + "…" : si.Text;
             XrefHeader.Text = $"{si.Va:X}  \"{preview}\" — {refs.Count} ref(s)";
+        }
+        else if (_result.Image.IsArm)
+        {
+            // ARM analysis records no data xrefs, so every string is "unreferenced" here. Rather than
+            // dropping to hex, show the string itself in the linear listing — its VA is a data line that
+            // renders as db "…", so the click lands on the code view at the string. (ARM images are raw
+            // blobs whose one section is executable, so OnNavigated's hex-redirect guard won't fire.)
+            CenterTabs.SelectedIndex = 0;          // Linear
+            _nav.Navigate(si.Va);
         }
         else
         {

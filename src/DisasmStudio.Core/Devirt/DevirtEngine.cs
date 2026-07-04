@@ -91,7 +91,7 @@ public static class DevirtEngine
 
         var lifted = VmLifter.Lift(entry, program);
         var (root, labels) = Structurer.Structure(lifted);
-        var pseudoC = StructEmitter.Emit(lifted, root, labels, pseudoC: true, comments: null);
+        var pseudoC = StructEmitter.Emit(lifted, root, labels, pseudoC: true, comments: null, model: ArchModel.For(image));
 
         return new DevirtResult
         {

@@ -3,6 +3,13 @@ using DisasmStudio.Core.Disasm;
 
 namespace DisasmStudio.Core.IL;
 
+/// <summary>Lifts a function's instructions to Low IL. Implemented by the x86/x64 <see cref="Lifter"/>
+/// (Iced) and the ARM-family <see cref="ArmLifter"/> (Capstone); both produce the same neutral IL.</summary>
+public interface ILifter
+{
+    LiftedFunction Lift(Function fn);
+}
+
 /// <summary>
 /// The decompiler entry point: turns one function into its four rendered levels (Low IL, Medium IL,
 /// High IL, Pseudo-C). It wires the stages together — build the CFG, lift to Low IL, raise to Medium
@@ -12,6 +19,17 @@ namespace DisasmStudio.Core.IL;
 public static class Decompiler
 {
     private const int MaxBlocks = 6000;
+
+    /// <summary>Lift to Low IL with the right front-end for the image's architecture.</summary>
+    private static LiftedFunction LiftLow(Function fn, AnalysisResult result)
+    {
+        if (result.Image.IsArm)
+        {
+            using var arm = new ArmLifter(result.Image, result.Names, result.JumpTables);
+            return arm.Lift(fn);
+        }
+        return new Lifter(result.Image, result.Names, result.JumpTables).Lift(fn);
+    }
 
     public static DecompiledFunction Decompile(Function fn, AnalysisResult result)
     {
@@ -27,19 +45,19 @@ public static class Decompiler
             if (fn.Blocks.Count == 0) return Note(fn.Va, "// no code recovered for this function");
             if (fn.Blocks.Count > MaxBlocks) return Note(fn.Va, $"// function too large to decompile ({fn.Blocks.Count} blocks)");
 
-            var lifter = new Lifter(result.Image, result.Names, result.JumpTables);
-            var low = lifter.Lift(fn);
-            var mid = MediumLifter.Transform(low, result.Image);
+            var low = LiftLow(fn, result);
+            var model = ArchModel.For(result.Image);
+            var mid = MediumLifter.Transform(low, result.Image, model);
             var (root, labels) = Structurer.Structure(mid);
             var comments = result.Comments;
 
             return new DecompiledFunction
             {
                 Va = fn.Va,
-                LowIl = BlockEmitter.Emit(low, comments),
-                MediumIl = BlockEmitter.Emit(mid, comments),
-                HighIl = StructEmitter.Emit(mid, root, labels, pseudoC: false, comments),
-                PseudoC = StructEmitter.Emit(mid, root, labels, pseudoC: true, comments),
+                LowIl = BlockEmitter.Emit(low, comments, model),
+                MediumIl = BlockEmitter.Emit(mid, comments, model),
+                HighIl = StructEmitter.Emit(mid, root, labels, pseudoC: false, comments, model),
+                PseudoC = StructEmitter.Emit(mid, root, labels, pseudoC: true, comments, model),
             };
         }
         catch (Exception ex)
@@ -75,10 +93,11 @@ public static class Decompiler
             if (fn.Blocks.Count == 0) return NoteLines(fn.Va, "/* no code recovered */");
             if (fn.Blocks.Count > MaxBlocks) return NoteLines(fn.Va, $"/* function too large to decompile ({fn.Blocks.Count} blocks) */");
 
-            var low = new Lifter(result.Image, result.Names, result.JumpTables).Lift(fn);
-            var mid = MediumLifter.Transform(low, result.Image);
+            var low = LiftLow(fn, result);
+            var model = ArchModel.For(result.Image);
+            var mid = MediumLifter.Transform(low, result.Image, model);
             var (root, labels) = Structurer.Structure(mid);
-            return StructEmitter.Emit(mid, root, labels, pseudoC: true, result.Comments, compilable: true);
+            return StructEmitter.Emit(mid, root, labels, pseudoC: true, result.Comments, model, compilable: true);
         }
         catch (Exception ex)
         {

@@ -9,6 +9,10 @@ internal sealed class IlWriter
     public readonly List<DecompLine> Lines = [];
     private List<AsmToken> _cur = [];
 
+    /// <summary>The architecture model in effect — supplies the return-register name (and any other
+    /// arch-specific rendering). Defaults to x86-64 so note/error writers never need to set it.</summary>
+    public ArchModel Model = ArchModel.Default;
+
     public void T(string s, AsmTokenKind k) => _cur.Add(new AsmToken(s, k));
     public void Kw(string s) => T(s, AsmTokenKind.Keyword);
     public void Op(string s) => T(s, AsmTokenKind.Punctuation);
@@ -33,7 +37,7 @@ internal static class ExprWriter
         switch (e)
         {
             case Const k: { var (s, _) = Num(k.Value); w.Num(s); break; }
-            case RegExpr r: w.T(r.Reg.ToString().ToLowerInvariant(), AsmTokenKind.Register); break;
+            case RegExpr r: w.T(r.Reg.Name, AsmTokenKind.Register); break;
             case VarExpr v: w.Var(v.Var.Name); break;
             case SymExpr sy: if (comp) w.Num($"0x{sy.Va:X}"); else w.Sym(sy.Name); break;
             case RawExpr rx: if (comp) WriteRaw(w, rx.Text); else w.Txt(rx.Text); break;
@@ -136,7 +140,7 @@ internal static class ExprWriter
             case ReturnStmt r:
                 w.Kw("return");
                 if (r.Value is not null) { w.Sp(); Write(w, r.Value, c, comp); }
-                else if (comp) { w.Sp(); w.T("rax", AsmTokenKind.Register); }   // x64 return register, always declared
+                else if (comp) { w.Sp(); w.T(w.Model.ReturnReg.Name, AsmTokenKind.Register); }   // return register, always declared
                 return true;
             case GotoStmt g:
                 w.Kw("goto"); w.Sp(); w.Sym($"loc_{g.Target:X}"); return true;
@@ -196,9 +200,9 @@ internal static class ExprWriter
 /// <summary>Emits Low / Medium IL: every basic block as a labelled list of statements.</summary>
 internal static class BlockEmitter
 {
-    public static List<DecompLine> Emit(LiftedFunction fn, IReadOnlyDictionary<ulong, string>? comments)
+    public static List<DecompLine> Emit(LiftedFunction fn, IReadOnlyDictionary<ulong, string>? comments, ArchModel model)
     {
-        var w = new IlWriter();
+        var w = new IlWriter { Model = model };
         var seen = new HashSet<ulong>();
         // header comment
         w.T($"// {fn.Name}", AsmTokenKind.Comment);
@@ -232,15 +236,16 @@ internal sealed class StructEmitter
     private readonly HashSet<ulong> _annotated = [];
 
     private StructEmitter(LiftedFunction fn, IReadOnlySet<ulong> labels, bool pseudoC, bool compilable,
-        IReadOnlyDictionary<ulong, string>? comments)
+        IReadOnlyDictionary<ulong, string>? comments, ArchModel model)
     {
         _fn = fn; _labels = labels; _c = pseudoC; _comp = compilable; _comments = comments;
+        _w.Model = model;
     }
 
     public static List<DecompLine> Emit(LiftedFunction fn, Stmt root, IReadOnlySet<ulong> labels, bool pseudoC,
-        IReadOnlyDictionary<ulong, string>? comments, bool compilable = false)
+        IReadOnlyDictionary<ulong, string>? comments, ArchModel model, bool compilable = false)
     {
-        var e = new StructEmitter(fn, labels, pseudoC, compilable, comments);
+        var e = new StructEmitter(fn, labels, pseudoC, compilable, comments, model);
         e.Signature();
         e.EmitStmt(root, 1);
         e._w.Op("}"); e._w.Flush(0, 0);

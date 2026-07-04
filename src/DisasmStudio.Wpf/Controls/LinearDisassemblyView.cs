@@ -673,7 +673,10 @@ public sealed class LinearDisassemblyView : Grid
         if (Array.TrueForAll(bytes, b => b == 0xCC))   // int3 alignment padding
             return ("int3", bytes.Length > 1 ? $"  × {bytes.Length}" : "", SyntaxTheme.Comment);
 
-        if (TryFormatString(bytes, out string str)) return ("db ", str, SyntaxTheme.Symbol);
+        // ARM firmware is full of numeric tables whose bytes fall in the printable range; requiring a run
+        // longer than a word keeps a lone printable dword rendering as dd instead of a spurious 4-char string.
+        int minStr = _result!.Image.IsArm ? 5 : 3;
+        if (TryFormatString(bytes, minStr, out string str)) return ("db ", str, SyntaxTheme.Symbol);
 
         // A 1/2/4/8-byte run renders as a sized scalar; 4/8-byte values that point into the image are named.
         switch (bytes.Length)
@@ -695,15 +698,15 @@ public sealed class LinearDisassemblyView : Grid
         return ("db ", sb.ToString(), SyntaxTheme.Bytes);
     }
 
-    private static bool TryFormatString(byte[] b, out string text)
+    private static bool TryFormatString(byte[] b, int minLen, out string text)
     {
         text = "";
-        bool ascii = b.Length >= 3;
+        bool ascii = b.Length >= minLen;
         for (int i = 0; ascii && i < b.Length; i++)
             if (b[i] is not (>= 0x20 and < 0x7F or 0x09) && !(b[i] == 0 && i == b.Length - 1)) ascii = false;
         if (ascii) { text = Quote(b, wide: false); return true; }
 
-        if (b.Length >= 6 && b.Length % 2 == 0)
+        if (b.Length >= Math.Max(6, minLen * 2) && b.Length % 2 == 0)
         {
             bool wide = true;
             for (int i = 0; wide && i < b.Length; i += 2)

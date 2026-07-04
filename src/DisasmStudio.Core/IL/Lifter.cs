@@ -14,7 +14,7 @@ namespace DisasmStudio.Core.IL;
 /// "definition" (compare / test / result-vs-zero) that the following <c>jcc</c>/<c>setcc</c>/
 /// <c>cmovcc</c> turns into a real comparison expression — the standard decompiler trick.
 /// </summary>
-public sealed class Lifter
+public sealed class Lifter : ILifter
 {
     private enum FlagSource { None, Compare, Test, Result }
     private readonly record struct FlagDef(FlagSource Source, Expr Left, Expr Right);
@@ -47,6 +47,9 @@ public sealed class Lifter
     // 32-bit div reads as eax = eax / … instead of rax = rax / ….
     private static Register AxW(int w) => w switch { 1 => Register.AL, 2 => Register.AX, 4 => Register.EAX, _ => Register.RAX };
     private static Register DxW(int w) => w switch { 1 => Register.AH, 2 => Register.DX, 4 => Register.EDX, _ => Register.RDX };
+
+    // Build a neutral register node from an Iced register (name/width/tag preserved via the x86 model).
+    private static RegExpr R(Register r) => new(X86Model.FromIced(r));
 
     /// <summary>Lift a function (its CFG must already be built) into Low IL form.</summary>
     public LiftedFunction Lift(Function fn)
@@ -86,15 +89,15 @@ public sealed class Lifter
 
             case Mnemonic.Push:
                 // Store the operand at [sp - Ptr] BEFORE adjusting sp, so `push rsp` pushes the original sp.
-                Emit(new AssignStmt { Dest = new LoadExpr(new BinExpr(BinOp.Sub, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr), Ptr), Src = Operand(ins, 0, Ptr) });
-                Emit(new AssignStmt { Dest = new RegExpr(Sp), Src = new BinExpr(BinOp.Sub, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr) });
+                Emit(new AssignStmt { Dest = new LoadExpr(new BinExpr(BinOp.Sub, R(Sp), new Const(Ptr, Ptr), Ptr), Ptr), Src = Operand(ins, 0, Ptr) });
+                Emit(new AssignStmt { Dest = R(Sp), Src = new BinExpr(BinOp.Sub, R(Sp), new Const(Ptr, Ptr), Ptr) });
                 break;
 
             case Mnemonic.Pop:
-                Emit(new AssignStmt { Dest = Operand(ins, 0, Ptr), Src = new LoadExpr(new RegExpr(Sp), Ptr) });
+                Emit(new AssignStmt { Dest = Operand(ins, 0, Ptr), Src = new LoadExpr(R(Sp), Ptr) });
                 // `pop rsp` loads rsp directly — the +Ptr is overridden; only adjust sp when popping another reg.
                 if (!(ins.Op0Kind == OpKind.Register && ins.Op0Register == Sp))
-                    Emit(new AssignStmt { Dest = new RegExpr(Sp), Src = new BinExpr(BinOp.Add, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr) });
+                    Emit(new AssignStmt { Dest = R(Sp), Src = new BinExpr(BinOp.Add, R(Sp), new Const(Ptr, Ptr), Ptr) });
                 break;
 
             case Mnemonic.Add: Arith(BinOp.Add, ins, Emit); break;
@@ -165,7 +168,7 @@ public sealed class Lifter
             case Mnemonic.Imul or Mnemonic.Mul:   // one-operand: {a}x = {a}x * src at the operand width (high half dropped)
             {
                 int w = DestWidth(ins);
-                Emit(new AssignStmt { Dest = new RegExpr(AxW(w)), Src = new BinExpr(ins.Mnemonic == Mnemonic.Mul ? BinOp.UMul : BinOp.Mul, new RegExpr(AxW(w)), Operand(ins, 0, w), w) });
+                Emit(new AssignStmt { Dest = R(AxW(w)), Src = new BinExpr(ins.Mnemonic == Mnemonic.Mul ? BinOp.UMul : BinOp.Mul, R(AxW(w)), Operand(ins, 0, w), w) });
                 _flag = default;
                 break;
             }
@@ -175,8 +178,8 @@ public sealed class Lifter
                 bool s = ins.Mnemonic == Mnemonic.Idiv;
                 int w = DestWidth(ins);                 // operand width: byte/word/dword/qword
                 var src = Operand(ins, 0, w);           // dividend modelled as {a}x; the high half in {d}x is ignored
-                Emit(new AssignStmt { Dest = new RegExpr(DxW(w)), Src = new BinExpr(s ? BinOp.SMod : BinOp.UMod, new RegExpr(AxW(w)), src, w) });
-                Emit(new AssignStmt { Dest = new RegExpr(AxW(w)), Src = new BinExpr(s ? BinOp.SDiv : BinOp.UDiv, new RegExpr(AxW(w)), src, w) });
+                Emit(new AssignStmt { Dest = R(DxW(w)), Src = new BinExpr(s ? BinOp.SMod : BinOp.UMod, R(AxW(w)), src, w) });
+                Emit(new AssignStmt { Dest = R(AxW(w)), Src = new BinExpr(s ? BinOp.SDiv : BinOp.UDiv, R(AxW(w)), src, w) });
                 _flag = default;
                 break;
             }
@@ -193,15 +196,15 @@ public sealed class Lifter
                 break;
 
             case Mnemonic.Leave:
-                Emit(new AssignStmt { Dest = new RegExpr(Sp), Src = new RegExpr(_is64 ? Register.RBP : Register.EBP) });
-                Emit(new AssignStmt { Dest = new RegExpr(_is64 ? Register.RBP : Register.EBP), Src = new LoadExpr(new RegExpr(Sp), Ptr) });
-                Emit(new AssignStmt { Dest = new RegExpr(Sp), Src = new BinExpr(BinOp.Add, new RegExpr(Sp), new Const(Ptr, Ptr), Ptr) });
+                Emit(new AssignStmt { Dest = R(Sp), Src = R(_is64 ? Register.RBP : Register.EBP) });
+                Emit(new AssignStmt { Dest = R(_is64 ? Register.RBP : Register.EBP), Src = new LoadExpr(R(Sp), Ptr) });
+                Emit(new AssignStmt { Dest = R(Sp), Src = new BinExpr(BinOp.Add, R(Sp), new Const(Ptr, Ptr), Ptr) });
                 break;
 
             case Mnemonic.Call:
             {
                 var call = MakeCall(ins);
-                Emit(new AssignStmt { Dest = new RegExpr(Ax), Src = call });
+                Emit(new AssignStmt { Dest = R(Ax), Src = call });
                 _flag = default;   // a call clobbers flags
                 break;
             }
@@ -296,7 +299,7 @@ public sealed class Lifter
         switch (kind)
         {
             case OpKind.Register:
-                return new RegExpr(ins.GetOpRegister(i));
+                return R(ins.GetOpRegister(i));
             case OpKind.Memory:
                 return new LoadExpr(MemAddr(ins), MemWidth(ins));
             case OpKind.NearBranch16 or OpKind.NearBranch64 or OpKind.NearBranch32:
@@ -334,10 +337,10 @@ public sealed class Lifter
         if (bas == Register.None && idx == Register.None)
             return _names.TryGetValue(disp, out var n) ? new SymExpr(disp, n) : new Const((long)disp, Ptr);
 
-        Expr? acc = bas != Register.None && bas != Register.RIP && bas != Register.EIP ? new RegExpr(bas) : null;
+        Expr? acc = bas != Register.None && bas != Register.RIP && bas != Register.EIP ? R(bas) : null;
         if (idx != Register.None)
         {
-            Expr ix = new RegExpr(idx);
+            Expr ix = R(idx);
             int scale = ins.MemoryIndexScale;
             if (scale > 1) ix = new BinExpr(BinOp.Mul, ix, new Const(scale, Ptr), Ptr);
             acc = acc is null ? ix : new BinExpr(BinOp.Add, acc, ix, Ptr);

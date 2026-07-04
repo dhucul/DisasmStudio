@@ -192,6 +192,9 @@ public static class ArmAnalyzer
         IReadOnlyDictionary<ulong, FoundString> stringByVa, CancellationToken token)
     {
         var index = new LinearIndex();
+        // Sorted string starts so a data run can stop exactly at the next string (which may begin at any
+        // alignment) instead of a 4-byte-aligned step jumping over it and fragmenting the string.
+        var stringStarts = stringByVa.Keys.OrderBy(k => k).ToArray();
         foreach (var sec in image.Sections.Where(s => s.FileSize > 0).OrderBy(s => s.StartVa))
         {
             ulong end = sec.StartVa + (sec.VirtualSize > 0 ? Math.Min(sec.VirtualSize, (ulong)sec.FileSize) : (ulong)sec.FileSize);
@@ -208,16 +211,17 @@ public static class ArmAnalyzer
                 }
 
                 ulong gapEnd = sec.IsExecutable ? code.NextCode(va, end) : end;
-                EmitData(index, stringByVa, ref va, gapEnd);
+                EmitData(index, stringByVa, stringStarts, ref va, gapEnd);
             }
         }
         return index;
     }
 
-    /// <summary>Emit a data run as lines: a referenced string is one line; otherwise word-aligned 4-byte <c>dd</c>
-    /// rows (ARM literal pools are 4-byte words), falling to a single byte to re-align.</summary>
+    /// <summary>Emit a data run as lines: a scanned string is emitted as one line at its exact VA (at any
+    /// alignment — never chopped up); the bytes around it are aligned <c>dd</c>/<c>dw</c>/<c>db</c> rows. A
+    /// chunk is stopped at the next string start so a non-word-aligned string is not skipped over.</summary>
     private static void EmitData(LinearIndex index, IReadOnlyDictionary<ulong, FoundString> stringByVa,
-        ref ulong va, ulong end)
+        ulong[] stringStarts, ref ulong va, ulong end)
     {
         while (va < end)
         {
@@ -226,14 +230,23 @@ public static class ArmAnalyzer
                 ulong slen = (ulong)Math.Max(1, fs.Wide ? fs.Length * 2 : fs.Length);
                 index.Add(va, isData: true);
                 va += Math.Min(slen, end - va);
+                continue;
             }
-            else
-            {
-                ulong chunk = va % 4 == 0 && end - va >= 4 ? 4UL : 1UL;
-                index.Add(va, isData: true);
-                va += chunk;
-            }
+            ulong stop = NextStringStart(stringStarts, va, end);
+            ulong rem = stop - va;
+            ulong chunk = va % 4 == 0 && rem >= 4 ? 4UL : va % 2 == 0 && rem >= 2 ? 2UL : 1UL;
+            index.Add(va, isData: true);
+            va += chunk;
         }
+    }
+
+    /// <summary>The smallest string start strictly greater than <paramref name="after"/>, clamped to
+    /// <paramref name="end"/> (binary search over the sorted starts).</summary>
+    private static ulong NextStringStart(ulong[] starts, ulong after, ulong end)
+    {
+        int lo = 0, hi = starts.Length;
+        while (lo < hi) { int mid = (lo + hi) >> 1; if (starts[mid] <= after) lo = mid + 1; else hi = mid; }
+        return lo < starts.Length && starts[lo] < end ? starts[lo] : end;
     }
 
     private static string Preview(FoundString fs)

@@ -1,5 +1,4 @@
 using DisasmStudio.Core.Analysis;
-using Iced.Intel;
 
 namespace DisasmStudio.Core.IL;
 
@@ -46,10 +45,19 @@ public abstract record Expr
 /// <summary>An integer constant of a given width.</summary>
 public sealed record Const(long Value, int Width) : Expr { public override int Size => Width; }
 
-/// <summary>A physical CPU register (Low IL). Promoted to a <see cref="VarExpr"/> at medium level.</summary>
-public sealed record RegExpr(Register Reg) : Expr
+/// <summary>Architecture-neutral physical-register identity: lowercase name, byte width, and an opaque
+/// arch-private tag. The x86 path stores the Iced <c>Register</c> enum value in <see cref="Tag"/> so its
+/// <see cref="ArchModel"/> can delegate sub-register canonicalization to Iced; ARM leaves the tag 0 and
+/// identifies purely by name + width.</summary>
+public readonly record struct RegId(string Name, int Width, int Tag = 0)
 {
-    public override int Size => Reg.GetSize();
+    public static readonly RegId None = new("", 0, 0);
+}
+
+/// <summary>A physical CPU register (Low IL). Promoted to a <see cref="VarExpr"/> at medium level.</summary>
+public sealed record RegExpr(RegId Reg) : Expr
+{
+    public override int Size => Reg.Width;
 }
 
 /// <summary>A recovered variable (medium level and above).</summary>

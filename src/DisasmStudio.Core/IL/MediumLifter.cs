@@ -1,5 +1,4 @@
 using DisasmStudio.Core.Formats;
-using Iced.Intel;
 
 namespace DisasmStudio.Core.IL;
 
@@ -8,17 +7,25 @@ namespace DisasmStudio.Core.IL;
 /// (<c>[rbp-0x10]</c>) become named locals/arguments; prologue/epilogue and stack-pointer bookkeeping
 /// is elided; expressions are forward-substituted and constant-folded, and assignments whose result
 /// is never read are dropped (dead-store elimination via a backward liveness pass over the CFG). Call
-/// arguments are recovered from the register values reaching the call (x64). The result is a new
+/// arguments are recovered from the register values reaching the call. The result is a new
 /// <see cref="LiftedFunction"/> — the Low IL form is left untouched so both can be shown.
+/// All architecture-specific register roles / ABI come from the injected <see cref="ArchModel"/>.
 /// </summary>
-public static class MediumLifter
+public sealed class MediumLifter
 {
-    private readonly record struct Loc(Register Reg, Variable? Var);
+    private readonly record struct Loc(RegId Reg, Variable? Var);
 
-    public static LiftedFunction Transform(LiftedFunction low, IBinaryImage image)
+    private readonly ArchModel _model;
+    private readonly bool _is64;
+
+    private MediumLifter(ArchModel model, bool is64) { _model = model; _is64 = is64; }
+
+    public static LiftedFunction Transform(LiftedFunction low, IBinaryImage image, ArchModel model) =>
+        new MediumLifter(model, image.Bitness == 64).Run(low);
+
+    private LiftedFunction Run(LiftedFunction low)
     {
-        bool is64 = image.Bitness == 64;
-        var slots = new Dictionary<(Register Base, long Disp), Variable>();
+        var slots = new Dictionary<(RegId Base, long Disp), Variable>();
 
         // 1+2: drop frame bookkeeping, then map constant stack slots to variables.
         var blocks = new List<LiftedBlock>();
@@ -36,7 +43,7 @@ public static class MediumLifter
         // 3: per-block forward substitution / folding + call-argument recovery.
         foreach (var b in blocks)
         {
-            var p = Propagate(b.Stmts, is64);
+            var p = Propagate(b.Stmts);
             b.Stmts.Clear();
             b.Stmts.AddRange(p);
         }
@@ -59,33 +66,28 @@ public static class MediumLifter
 
     // ---- frame bookkeeping ----
 
-    private static bool IsFrameBookkeeping(AssignStmt a)
+    private bool IsFrameBookkeeping(AssignStmt a)
     {
-        // rsp adjustments and `mov rbp, rsp`.
+        // stack-pointer adjustments and `mov <framebase>, <sp>`.
         if (a.Dest is RegExpr d)
         {
-            var c = Canon(d.Reg);
-            if (c == Register.RSP) return true;
-            if (c == Register.RBP && a.Src is RegExpr sr && Canon(sr.Reg) == Register.RSP) return true;
-            // pop of a callee-saved register: `reg = [rsp/rbp ...]`.
-            if (IsCalleeSaved(c) && a.Src is LoadExpr ld && IsFrameRelative(ld.Addr)) return true;
+            var c = _model.Canon(d.Reg);
+            if (_model.IsStackPtr(c)) return true;
+            if (_model.IsFrameBase(c) && !_model.IsStackPtr(c) && a.Src is RegExpr sr && _model.IsStackPtr(_model.Canon(sr.Reg))) return true;
+            // pop of a callee-saved register: `reg = [sp/frame ...]`.
+            if (_model.IsCalleeSaved(c) && a.Src is LoadExpr ld && IsFrameRelative(ld.Addr)) return true;
         }
-        // push of a callee-saved register: `[rsp/rbp ...] = reg`.
-        if (a.Dest is LoadExpr sd && IsFrameRelative(sd.Addr) && a.Src is RegExpr sv && IsCalleeSaved(Canon(sv.Reg)))
+        // push of a callee-saved register: `[sp/frame ...] = reg`.
+        if (a.Dest is LoadExpr sd && IsFrameRelative(sd.Addr) && a.Src is RegExpr sv && _model.IsCalleeSaved(_model.Canon(sv.Reg)))
             return true;
         return false;
     }
 
-    private static bool IsFrameRelative(Expr addr) =>
-        TryMatchSlot(addr, out _, out _);
-
-    private static bool IsCalleeSaved(Register r) => r is
-        Register.RBX or Register.RBP or Register.RSI or Register.RDI or Register.RSP
-        or Register.R12 or Register.R13 or Register.R14 or Register.R15;
+    private bool IsFrameRelative(Expr addr) => TryMatchSlot(addr, out _, out _);
 
     // ---- stack-slot → variable mapping ----
 
-    private static Stmt MapSlots(Stmt s, Dictionary<(Register, long), Variable> slots)
+    private Stmt MapSlots(Stmt s, Dictionary<(RegId, long), Variable> slots)
     {
         switch (s)
         {
@@ -104,7 +106,7 @@ public static class MediumLifter
         }
     }
 
-    private static Expr MapExpr(Expr e, Dictionary<(Register, long), Variable> slots, bool dest = false)
+    private Expr MapExpr(Expr e, Dictionary<(RegId, long), Variable> slots, bool dest = false)
     {
         switch (e)
         {
@@ -127,11 +129,11 @@ public static class MediumLifter
         }
     }
 
-    private static Variable SlotVar(Dictionary<(Register, long), Variable> slots, Register bas, long disp, int width)
+    private Variable SlotVar(Dictionary<(RegId, long), Variable> slots, RegId bas, long disp, int width)
     {
         var key = (bas, disp);
         if (slots.TryGetValue(key, out var v)) { if (v.Size == 0 && width > 0) v.Size = width; return v; }
-        bool arg = bas == Register.RBP && disp > 0;
+        bool arg = _model.IsArgSlot(bas, disp);
         string baseName = arg ? $"arg_{disp:X}" : $"var_{Math.Abs(disp):X}";
         // Distinct slots can map to the same base name (e.g. [rbp-0x20] and [rsp+0x20]); keep them unique
         // so declarations don't collide.
@@ -142,20 +144,18 @@ public static class MediumLifter
         return v;
     }
 
-    private static bool TryMatchSlot(Expr addr, out Register bas, out long disp)
+    private bool TryMatchSlot(Expr addr, out RegId bas, out long disp)
     {
-        bas = Register.None; disp = 0;
-        if (addr is RegExpr r && Canon(r.Reg) is Register.RBP or Register.RSP) { bas = Canon(r.Reg); return true; }
-        if (addr is BinExpr { Op: BinOp.Add, L: RegExpr br, R: Const c } && Canon(br.Reg) is Register.RBP or Register.RSP)
-        { bas = Canon(br.Reg); disp = c.Value; return true; }
+        bas = RegId.None; disp = 0;
+        if (addr is RegExpr r && _model.IsFrameBase(_model.Canon(r.Reg))) { bas = _model.Canon(r.Reg); return true; }
+        if (addr is BinExpr { Op: BinOp.Add, L: RegExpr br, R: Const c } && _model.IsFrameBase(_model.Canon(br.Reg)))
+        { bas = _model.Canon(br.Reg); disp = c.Value; return true; }
         return false;
     }
 
-    // ---- forward propagation + constant folding + x64 arg recovery ----
+    // ---- forward propagation + constant folding + call arg recovery ----
 
-    private static readonly Register[] X64ArgRegs = [Register.RCX, Register.RDX, Register.R8, Register.R9];
-
-    private static List<Stmt> Propagate(List<Stmt> stmts, bool is64)
+    private List<Stmt> Propagate(List<Stmt> stmts)
     {
         var env = new Dictionary<Loc, Expr>();
         var outp = new List<Stmt>(stmts.Count);
@@ -172,8 +172,8 @@ public static class MediumLifter
                 case AssignStmt a:
                 {
                     var src = Subst(a.Src, env);
-                    // Recover call arguments from the values currently reaching the call (x64).
-                    if (src is CallExpr ce) src = WithArgs(ce, env, is64);
+                    // Recover call arguments from the values currently reaching the call.
+                    if (src is CallExpr ce) src = WithArgs(ce, env);
                     var dest = a.Dest is LoadExpr ld ? new LoadExpr(Subst(ld.Addr, env), ld.Width) : a.Dest;
 
                     if (dest is LoadExpr) { InvalidateMemory(); }
@@ -202,7 +202,7 @@ public static class MediumLifter
                     break;
                 case CallStmt cs:
                 {
-                    var ce = WithArgs((CallExpr)Subst(cs.Call, env), env, is64);
+                    var ce = WithArgs((CallExpr)Subst(cs.Call, env), env);
                     env.Clear();
                     outp.Add(new CallStmt { Va = cs.Va, Call = ce });
                     break;
@@ -215,23 +215,24 @@ public static class MediumLifter
         return outp;
     }
 
-    private static CallExpr WithArgs(CallExpr ce, Dictionary<Loc, Expr> env, bool is64)
+    private CallExpr WithArgs(CallExpr ce, Dictionary<Loc, Expr> env)
     {
-        if (ce.Args.Count > 0 || !is64) return ce;
+        var argRegs = _model.ArgRegs;
+        if (ce.Args.Count > 0 || argRegs.Count == 0) return ce;
         // Don't stop at the first register we couldn't recover: a real call often sets rcx and r8 but loads
         // rdx from memory we didn't track. Collect all slots, then trim trailing unknowns and fill interior
         // gaps with the register name, so e.g. f(a, rdx, c) is recovered instead of truncating to f(a).
-        var slots = new List<Expr?>(X64ArgRegs.Length);
-        foreach (var r in X64ArgRegs)
-            slots.Add(env.TryGetValue(new Loc(r, null), out var v) ? v : null);
+        var slots = new List<Expr?>(argRegs.Count);
+        foreach (var r in argRegs)
+            slots.Add(env.TryGetValue(new Loc(_model.Canon(r), null), out var v) ? v : null);
         int last = slots.FindLastIndex(a => a is not null);
         if (last < 0) return ce;
         var args = new List<Expr>(last + 1);
-        for (int i = 0; i <= last; i++) args.Add(slots[i] ?? new RegExpr(X64ArgRegs[i]));
+        for (int i = 0; i <= last; i++) args.Add(slots[i] ?? new RegExpr(argRegs[i]));
         return ce with { Args = args };
     }
 
-    private static Expr Subst(Expr e, Dictionary<Loc, Expr> env)
+    private Expr Subst(Expr e, Dictionary<Loc, Expr> env)
     {
         switch (e)
         {
@@ -276,7 +277,7 @@ public static class MediumLifter
 
     // ---- dead-store elimination ----
 
-    private static List<Stmt> Dce(List<Stmt> stmts, HashSet<Loc> liveOut)
+    private List<Stmt> Dce(List<Stmt> stmts, HashSet<Loc> liveOut)
     {
         var live = new HashSet<Loc>(liveOut);
         var rev = new List<Stmt>(stmts.Count);
@@ -287,11 +288,11 @@ public static class MediumLifter
             {
                 // Only a full-width write that is never read again is safe to drop. A partial write
                 // (al/ax) preserves the rest of the register, so it is never dead on its own.
-                if (!live.Contains(LocOf(a.Dest)) && IsFullDef(a.Dest)) continue;
+                if (!live.Contains(LocOf(a.Dest)) && _model.IsFullDef(a.Dest)) continue;
             }
             // A dead `reg = call(...)` keeps the call but discards the result.
-            if (s is AssignStmt ca && ca.Dest is RegExpr cr && ca.Src is CallExpr ce
-                && cr.Reg.GetSize() >= 4 && !live.Contains(LocOf(ca.Dest)))
+            if (s is AssignStmt ca && ca.Dest is RegExpr && ca.Src is CallExpr ce
+                && _model.IsFullDef(ca.Dest) && !live.Contains(LocOf(ca.Dest)))
             {
                 rev.Add(new CallStmt { Va = ca.Va, Call = ce });
                 AddReads(ce, live);
@@ -301,7 +302,7 @@ public static class MediumLifter
             // Update liveness: a full write kills the location; a partial write reads (and preserves) it.
             if (s is AssignStmt da && da.Dest is RegExpr or VarExpr && da.Dest is not LoadExpr)
             {
-                if (IsFullDef(da.Dest)) live.Remove(LocOf(da.Dest)); else live.Add(LocOf(da.Dest));
+                if (_model.IsFullDef(da.Dest)) live.Remove(LocOf(da.Dest)); else live.Add(LocOf(da.Dest));
                 AddReads(da.Src, live);
             }
             else
@@ -315,7 +316,7 @@ public static class MediumLifter
         return rev.Where(s => s is not NopStmt && !(s is AssignStmt sa && sa.Dest.Equals(sa.Src))).ToList();
     }
 
-    private static Dictionary<ulong, HashSet<Loc>> ComputeLiveOut(List<LiftedBlock> blocks, Dictionary<ulong, LiftedBlock> byStart)
+    private Dictionary<ulong, HashSet<Loc>> ComputeLiveOut(List<LiftedBlock> blocks, Dictionary<ulong, LiftedBlock> byStart)
     {
         var use = new Dictionary<ulong, HashSet<Loc>>();
         var def = new Dictionary<ulong, HashSet<Loc>>();
@@ -331,7 +332,7 @@ public static class MediumLifter
                 if (s is AssignStmt a && a.Dest is RegExpr or VarExpr && a.Dest is not LoadExpr)
                 {
                     var loc = LocOf(a.Dest);
-                    if (IsFullDef(a.Dest)) d.Add(loc);
+                    if (_model.IsFullDef(a.Dest)) d.Add(loc);
                     else if (!d.Contains(loc)) u.Add(loc);   // partial write uses the old value
                 }
             }
@@ -362,18 +363,14 @@ public static class MediumLifter
 
     // ---- expression utilities ----
 
-    private static Loc LocOf(Expr e) => e switch
+    private Loc LocOf(Expr e) => e switch
     {
-        RegExpr r => new Loc(Canon(r.Reg), null),
-        VarExpr v => new Loc(Register.None, v.Var),
-        _ => default,
+        RegExpr r => new Loc(_model.Canon(r.Reg), null),
+        VarExpr v => new Loc(RegId.None, v.Var),
+        _ => new Loc(RegId.None, null),
     };
 
-    /// <summary>A full-width define that wholly overwrites the location (so a dead one can be dropped).
-    /// A sub-register write (al/ax) preserves the rest, so it is treated as read-modify, not a kill.</summary>
-    private static bool IsFullDef(Expr dest) => dest is VarExpr || (dest is RegExpr re && re.Reg.GetSize() >= 4);
-
-    private static void AddStmtReads(Stmt s, HashSet<Loc> set)
+    private void AddStmtReads(Stmt s, HashSet<Loc> set)
     {
         switch (s)
         {
@@ -388,12 +385,12 @@ public static class MediumLifter
         }
     }
 
-    private static void AddReads(Expr e, HashSet<Loc> set)
+    private void AddReads(Expr e, HashSet<Loc> set)
     {
         switch (e)
         {
-            case RegExpr r: set.Add(new Loc(Canon(r.Reg), null)); break;
-            case VarExpr v: set.Add(new Loc(Register.None, v.Var)); break;
+            case RegExpr r: set.Add(new Loc(_model.Canon(r.Reg), null)); break;
+            case VarExpr v: set.Add(new Loc(RegId.None, v.Var)); break;
             case LoadExpr ld: AddReads(ld.Addr, set); break;
             case UnaryExpr u: AddReads(u.E, set); break;
             case BinExpr b: AddReads(b.L, set); AddReads(b.R, set); break;
@@ -403,7 +400,7 @@ public static class MediumLifter
         }
     }
 
-    private static bool Mentions(Expr e, Loc loc)
+    private bool Mentions(Expr e, Loc loc)
     {
         var set = new HashSet<Loc>();
         AddReads(e, set);
@@ -451,6 +448,4 @@ public static class MediumLifter
         TernaryExpr t => 1 + NodeCount(t.Cond) + NodeCount(t.T) + NodeCount(t.F),
         _ => 1,
     };
-
-    private static Register Canon(Register r) => r.IsGPR() ? r.GetFullRegister() : r;
 }

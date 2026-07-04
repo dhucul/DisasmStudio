@@ -16,47 +16,54 @@ public static class SourceExporter
 {
     // ---- disassembly (.asm) ----
 
-    /// <summary>Write the entire linear listing.</summary>
+    /// <summary>Write the entire linear listing. Routes through the architecture-neutral decoder seam, so it
+    /// handles both x86/x64 (Iced) and ARM/Thumb/AArch64 (Capstone) images with identical output.</summary>
     public static void WriteAsm(TextWriter w, AnalysisResult r, IProgress<int>? progress = null, CancellationToken ct = default)
     {
-        var dis = new Disassembler(r.Image);
-        var fmt = new AsmFormatter(r.Names);
-        int digits = AddrDigits(r);
-        WriteAsmHeader(w, r);
-
-        long count = r.Linear.Count;
-        for (long i = 0; i < count; i++)
+        var dis = NeutralDisasm.For(r.Image, r.Names);
+        try
         {
-            if ((i & 0xFFFF) == 0) { ct.ThrowIfCancellationRequested(); progress?.Report((int)(i * 100 / Math.Max(1, count))); }
-            ulong va = r.Linear.VaAt(i);
-            MaybeLabel(w, r, va, digits);
-            WriteAsmLine(w, r, dis, fmt, i, va, digits);
+            int digits = AddrDigits(r);
+            WriteAsmHeader(w, r);
+
+            long count = r.Linear.Count;
+            for (long i = 0; i < count; i++)
+            {
+                if ((i & 0xFFFF) == 0) { ct.ThrowIfCancellationRequested(); progress?.Report((int)(i * 100 / Math.Max(1, count))); }
+                ulong va = r.Linear.VaAt(i);
+                MaybeLabel(w, r, va, digits);
+                WriteAsmLine(w, r, dis, i, va, digits);
+            }
         }
+        finally { (dis as IDisposable)?.Dispose(); }   // the ARM (Capstone) decoder is disposable; the Iced one is not
     }
 
     /// <summary>Write only the instructions belonging to one function (up to the next function start).</summary>
     public static void WriteAsmFunction(TextWriter w, AnalysisResult r, Function fn)
     {
-        var dis = new Disassembler(r.Image);
-        var fmt = new AsmFormatter(r.Names);
-        int digits = AddrDigits(r);
-
-        // Bound the listing to the function's own reachable extent — not the rest of the image (which
-        // is what an unbounded "next function start" would do for the highest-address function).
-        CfgBuilder.Build(r.Image, fn, r.JumpTables);
-        ulong end = fn.Va + 1;
-        foreach (var bb in fn.Blocks) if (bb.End > end) end = bb.End;
-        foreach (var f in r.Functions) if (f.Va > fn.Va && f.Va < end) end = f.Va;   // stop early if functions overlap
-
-        w.WriteLine($"; {fn.Name}  @ {fn.Va:X}");
-        long start = r.Linear.IndexOf(fn.Va);
-        for (long i = start; i < r.Linear.Count; i++)
+        var dis = NeutralDisasm.For(r.Image, r.Names);
+        try
         {
-            ulong va = r.Linear.VaAt(i);
-            if (va >= end) break;
-            if (i != start) MaybeLabel(w, r, va, digits);
-            WriteAsmLine(w, r, dis, fmt, i, va, digits);
+            int digits = AddrDigits(r);
+
+            // Bound the listing to the function's own reachable extent — not the rest of the image (which
+            // is what an unbounded "next function start" would do for the highest-address function).
+            CfgBuilder.Build(r.Image, fn, r.JumpTables);
+            ulong end = fn.Va + 1;
+            foreach (var bb in fn.Blocks) if (bb.End > end) end = bb.End;
+            foreach (var f in r.Functions) if (f.Va > fn.Va && f.Va < end) end = f.Va;   // stop early if functions overlap
+
+            w.WriteLine($"; {fn.Name}  @ {fn.Va:X}");
+            long start = r.Linear.IndexOf(fn.Va);
+            for (long i = start; i < r.Linear.Count; i++)
+            {
+                ulong va = r.Linear.VaAt(i);
+                if (va >= end) break;
+                if (i != start) MaybeLabel(w, r, va, digits);
+                WriteAsmLine(w, r, dis, i, va, digits);
+            }
         }
+        finally { (dis as IDisposable)?.Dispose(); }
     }
 
     private static void WriteAsmHeader(TextWriter w, AnalysisResult r)
@@ -72,35 +79,36 @@ public static class SourceExporter
             w.WriteLine($"\n{name}:");
     }
 
-    private static void WriteAsmLine(TextWriter w, AnalysisResult r, Disassembler dis, AsmFormatter fmt, long line, ulong va, int digits)
+    private static void WriteAsmLine(TextWriter w, AnalysisResult r, INeutralDisassembler dis, long line, ulong va, int digits)
     {
         string addr = va.ToString("X" + digits);
         if (r.Linear.IsDataAt(line))
         {
             long len = line + 1 < r.Linear.Count ? (long)(r.Linear.VaAt(line + 1) - va) : 1;
             var bytes = r.Image.ReadBytesAtVa(va, (int)Math.Clamp(len, 1, 256));
-            w.WriteLine($"{addr}    {DataText(bytes)}");
+            // ARM firmware holds numeric tables in the printable range; require a run longer than a word
+            // before quoting one as a string, so a lone printable dword stays bytes. x86/x64 keeps min 3.
+            w.WriteLine($"{addr}    {DataText(bytes, r.Image.IsArm ? 5 : 3)}");
+            return;
         }
-        else if (dis.TryDecodeAt(va, out var ins))
-        {
-            string text = fmt.FormatText(ins);
-            if (r.Comments.TryGetValue(va, out var c)) text += "   ; " + c;
-            w.WriteLine($"{addr}    {text}");
-        }
-        else w.WriteLine($"{addr}    ??");
+        var toks = dis.Format(va);   // reused between calls — concatenate now, before the next Format
+        if (toks.Count == 0) { w.WriteLine($"{addr}    ??"); return; }
+        string text = string.Concat(toks.Select(t => t.Text));
+        if (r.Comments.TryGetValue(va, out var c)) text += "   ; " + c;
+        w.WriteLine($"{addr}    {text}");
     }
 
-    private static string DataText(byte[] b)
+    private static string DataText(byte[] b, int minLen = 3)
     {
-        if (TryString(b, out var s)) return $"db {s}";
+        if (TryString(b, minLen, out var s)) return $"db {s}";
         var parts = b.Take(16).Select(x => $"0x{x:X2}");
         return "db " + string.Join(", ", parts) + (b.Length > 16 ? ", …" : "");
     }
 
-    private static bool TryString(byte[] b, out string text)
+    private static bool TryString(byte[] b, int minLen, out string text)
     {
         text = "";
-        if (b.Length < 3) return false;
+        if (b.Length < minLen) return false;
         bool ascii = true;
         for (int i = 0; i < b.Length; i++)
             if (b[i] is not (>= 0x20 and < 0x7F or 0x09) && !(b[i] == 0 && i == b.Length - 1)) { ascii = false; break; }
