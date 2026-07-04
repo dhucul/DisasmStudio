@@ -103,6 +103,36 @@ public sealed class XrefItem(Xref x)
     public string Kind => x.Kind.ToString().ToLowerInvariant();
 }
 
+/// <summary>Row in the unified Search panel — a function, import, export or string that matched the query.
+/// <see cref="ByteLength"/> is the span used for range-based reference lookup: 1 for a point target (a
+/// function/import/export entry), or the string's byte length so a reference into the middle of a merged
+/// literal is still found.</summary>
+public sealed class SearchResultItem(ulong va, string kind, string text, int byteLength = 1)
+{
+    public ulong Va => va;
+    public string Address => va.ToString("X");
+
+    /// <summary>Short category tag shown in the list: "fn", "imp", "exp" or "str".</summary>
+    public string Kind => kind;
+
+    /// <summary>The function/symbol name, or the string's content.</summary>
+    public string Text => text;
+
+    /// <summary>Byte span of the target, for range-based xref lookup (≥ 1).</summary>
+    public int ByteLength => Math.Max(1, byteLength);
+}
+
+/// <summary>Row in the Search panel's references list — a site that references the selected result, with the
+/// enclosing function (or section) for orientation. <see cref="Va"/> is the referencing address, so a
+/// double-click navigates straight to the call/branch/access site.</summary>
+public sealed class ReferenceItem(Xref x, string context)
+{
+    public ulong Va => x.From;
+    public string From => x.From.ToString("X");
+    public string Kind => x.Kind.ToString().ToLowerInvariant();
+    public string Context => context;
+}
+
 /// <summary>Node in the Resources tree. Carries the top-level resource <see cref="TypeId"/> down to every
 /// descendant so a selected leaf knows which preview renderer to use.</summary>
 public sealed class ResourceNodeVm

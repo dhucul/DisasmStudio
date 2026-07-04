@@ -74,6 +74,8 @@ public partial class MainWindow : Window
     private ObservableCollection<FunctionItem> _functions = [];
     private ObservableCollection<StringItem> _strings = [];
     private ObservableCollection<ExportItem> _exports = [];
+    private List<SearchResultItem> _searchIndex = [];   // all searchable items (functions/imports/exports/strings), built on load
+    private const int MaxSearchRows = 500;              // cap the rendered result list; the header notes when a query matched more
     private ICollectionView? _functionsView;
     private ICollectionView? _stringsView;
     private ICollectionView? _exportsView;
@@ -1690,6 +1692,8 @@ public partial class MainWindow : Window
 
         ImportList.ItemsSource = result.Image.Imports.Select(i => new ImportItem(i)).ToList();
 
+        BuildSearchIndex(result);
+
         var sectionRows = new List<SectionItem>();
         if (result.Image.HeaderRegion is { } hdr)
             sectionRows.Add(new SectionItem(hdr, _loadOptions.IncludeHeader, isHeader: true));
@@ -1722,6 +1726,12 @@ public partial class MainWindow : Window
         ResHeader.Text = "Select a resource";
         XrefList.ItemsSource = null;
         BreakpointList.ItemsSource = null;
+        _searchIndex = [];
+        SearchResults.ItemsSource = null;
+        SearchRefs.ItemsSource = null;
+        SearchBox.Text = "";
+        SearchHeader.Text = "";
+        SearchRefHeader.Text = "Select a result to list references";
         Graph.Clear();
         _graphFn = null;
         Decompiler.Clear();
@@ -1904,6 +1914,107 @@ public partial class MainWindow : Window
             CenterTabs.SelectedIndex = 2;          // genuinely unreferenced data — show in hex
             _nav.Navigate(si.Va);
         }
+    }
+
+    // ---- unified Search / find-references panel ----
+
+    /// <summary>Build the flat search index from the static analysis: discovered functions, imports (at their IAT
+    /// slot), exports, and every scanned string. Strings carry their byte length so a reference into the middle of
+    /// a merged literal is still found. Rebuilt on each load; the list stays static across a debug session (like
+    /// the Functions/Exports lists), so it always reflects the file's addresses.</summary>
+    private void BuildSearchIndex(AnalysisResult result)
+    {
+        var items = new List<SearchResultItem>(
+            result.Functions.Count + result.Image.Imports.Count + result.Strings.Count + 16);
+        foreach (var f in result.Functions)
+            items.Add(new SearchResultItem(f.Va, "fn", f.Name));
+        foreach (var i in result.Image.Imports)
+            items.Add(new SearchResultItem(i.IatVa, "imp", Demangler.Demangle(i.Name)));
+        foreach (var s in result.Image.Symbols.Where(s => s.Kind == NamedSymbolKind.Export))
+            items.Add(new SearchResultItem(s.Va, "exp", Demangler.Demangle(s.Name)));
+        foreach (var s in result.Strings)
+            items.Add(new SearchResultItem(s.Va, "str", s.Text, s.Wide ? s.Length * 2 : s.Length));
+
+        _searchIndex = items;
+        SearchResults.ItemsSource = null;
+        SearchRefs.ItemsSource = null;
+        SearchHeader.Text = items.Count > 0 ? $"{items.Count:N0} searchable — type to filter" : "";
+        SearchRefHeader.Text = "Select a result to list references";
+    }
+
+    private void OnSearchFilter(object sender, TextChangedEventArgs e)
+    {
+        string q = SearchBox.Text.Trim();
+        if (q.Length == 0)
+        {
+            SearchResults.ItemsSource = null;
+            SearchHeader.Text = _searchIndex.Count > 0 ? $"{_searchIndex.Count:N0} searchable — type to filter" : "";
+            return;
+        }
+
+        // Match name/string text or the hex address. Take one extra to detect (and report) the cap without
+        // rendering an unbounded list on a broad query.
+        var matches = _searchIndex
+            .Where(it => it.Text.Contains(q, StringComparison.OrdinalIgnoreCase)
+                      || it.Address.Contains(q, StringComparison.OrdinalIgnoreCase))
+            .Take(MaxSearchRows + 1)
+            .ToList();
+        bool capped = matches.Count > MaxSearchRows;
+        if (capped) matches.RemoveAt(matches.Count - 1);
+        SearchResults.ItemsSource = matches;
+        SearchHeader.Text = capped
+            ? $"showing first {MaxSearchRows:N0} matches — narrow the query"
+            : $"{matches.Count:N0} match(es)";
+    }
+
+    private void OnSearchResultSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (SearchResults.SelectedItem is SearchResultItem it) ShowReferences(it);
+    }
+
+    /// <summary>List every reference to the selected result in the lower pane, with the enclosing function for
+    /// context. Uses the same range + pointer-slot resolution as the Strings panel, so a reference into the
+    /// middle of a string, or one reached only through a pointer table, is still found.</summary>
+    private void ShowReferences(SearchResultItem it)
+    {
+        if (_result is null) return;
+
+        ulong end = it.Va + (ulong)it.ByteLength;                 // point targets have ByteLength 1 ⇒ To(Va)
+        var refs = _result.Xrefs.ToRange(it.Va, end);
+        if (refs.Count == 0 && _result.StringPointerSlots.TryGetValue(it.Va, out var slot))
+            refs = _result.Xrefs.To(slot).ToList();
+
+        SearchRefs.ItemsSource = refs.Select(x => new ReferenceItem(x, ContextFor(x.From))).ToList();
+        string preview = it.Text.Length > 32 ? it.Text[..32] + "…" : it.Text;
+        SearchRefHeader.Text = $"{it.Va:X}  {preview} — {refs.Count} ref(s)";
+    }
+
+    /// <summary>Human-readable orientation for a referencing address: its enclosing function, else its section.</summary>
+    private string ContextFor(ulong va)
+    {
+        if (FindFunction(va) is { } fn) return fn.Name;
+        return _result?.Image.SectionAt(va)?.Name ?? "";
+    }
+
+    private void OnSearchResultActivate(object sender, MouseButtonEventArgs e)
+    {
+        if (SearchResults.SelectedItem is not SearchResultItem it || _result is null) return;
+        // An import has no code at its IAT slot (navigating there just drops into hex) — jump to the first
+        // caller instead. Every other kind has meaningful code/data at its VA, so go to the definition.
+        if (it.Kind == "imp" && _result.Xrefs.To(it.Va) is { Count: > 0 } callers)
+        {
+            CenterTabs.SelectedIndex = 0;
+            _nav.Navigate(callers[0].From);
+            return;
+        }
+        _nav.Navigate(it.Va);
+    }
+
+    private void OnSearchRefActivate(object sender, MouseButtonEventArgs e)
+    {
+        if (SearchRefs.SelectedItem is not ReferenceItem r) return;
+        CenterTabs.SelectedIndex = 0;          // show the referencing code in the linear listing
+        _nav.Navigate(r.Va);
     }
 
     private void OnImportActivate(object sender, MouseButtonEventArgs e)

@@ -312,6 +312,58 @@
                             </DockPanel>
                         </Grid>
                     </TabItem>
+                    <TabItem Header="Search">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Top" Margin="8,6,8,4">
+                                <TextBlock Text="Search functions · strings · imports · exports"
+                                           Foreground="{StaticResource TextMuted}" FontSize="11" Margin="2,0,0,4" />
+                                <TextBox x:Name="SearchBox" TextChanged="OnSearchFilter"
+                                         ToolTip="Type text or a hex address. Click a result to list every reference to it below; double-click a result to jump to its definition, or a reference to jump to that call site." />
+                                <TextBlock x:Name="SearchHeader" Margin="2,4,0,0"
+                                           Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                            </StackPanel>
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="2*" MinHeight="80" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="3*" MinHeight="100" />
+                                </Grid.RowDefinitions>
+                                <ListBox x:Name="SearchResults" Grid.Row="0"
+                                         SelectionChanged="OnSearchResultSelected" MouseDoubleClick="OnSearchResultActivate"
+                                         FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="{Binding Kind}" Foreground="{StaticResource TextMuted}" Width="34" />
+                                                <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="92" />
+                                                <TextBlock Text="{Binding Text}" Foreground="{StaticResource TextPrimary}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch"
+                                              Background="{StaticResource Outline}" />
+                                <TextBlock x:Name="SearchRefHeader" Grid.Row="2" Margin="10,6,10,4"
+                                           Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11"
+                                           Text="Select a result to list references" TextTrimming="CharacterEllipsis" />
+                                <ListBox x:Name="SearchRefs" Grid.Row="3" MouseDoubleClick="OnSearchRefActivate"
+                                         FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="{Binding From}" Foreground="{StaticResource Accent}" Width="92" />
+                                                <TextBlock Text="{Binding Kind}" Foreground="{StaticResource TextSecondary}" Width="52" />
+                                                <TextBlock Text="{Binding Context}" Foreground="{StaticResource TextMuted}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </Grid>
+                        </DockPanel>
+                    </TabItem>
                 </TabControl>
             </Border>
         </Grid>
