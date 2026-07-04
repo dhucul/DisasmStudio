@@ -18,8 +18,10 @@ using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug;
+using DisasmStudio.Managed;
 using Architecture = DisasmStudio.Core.Formats.Architecture;   // disambiguate from System.Runtime.InteropServices.Architecture
 using Iced.Intel;
+using DisasmStudio.Wpf.Controls;
 using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
 using Microsoft.Win32;
@@ -39,6 +41,8 @@ public partial class MainWindow : Window
     private string? _projectPath;
     private AnalysisOptions _loadOptions = AnalysisOptions.None;   // optional non-code sections / PE header folded into the listing
     private ResourceNodeVm? _selectedResource;                    // current leaf in the Resources tree (for Save)
+    private ManagedAssembly? _managed;                            // the .NET model when the open image is a managed assembly
+    private int _managedSeq;                                      // guards the async managed-load against a newer file open
     private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
 
     private DebugSession? _dbg;
@@ -297,6 +301,15 @@ public partial class MainWindow : Window
         if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE executables can be unpacked.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_image.IsDll) { MessageBox.Show(this, "The unpacker targets EXEs; packed DLLs aren't supported yet.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_dbg is not null) { MessageBox.Show(this, "Stop the current debug session before unpacking.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (ManagedPeInfo.TryRead(_image) is { } net)
+        {
+            MessageBox.Show(this,
+                $"This is a {net.Describe()} managed assembly, not a natively packed binary — there is no native OEP " +
+                "to dump, so native unpacking does not apply. Use the C# tab to decompile it, and the .NET tab to " +
+                "extract embedded resources and assemblies.",
+                "Unpack", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
 
         var verdict = PackerDetector.Detect(_image);
         var dlg = new UnpackerDialog(this, _image.FilePath, _image.Bitness, _image.ImageBase, verdict);
@@ -1208,8 +1221,9 @@ public partial class MainWindow : Window
     {
         var dlg = new OpenFileDialog
         {
-            Title = "Open binary",
-            Filter = "Binaries|*.exe;*.dll;*.sys;*.so;*.elf;*.o;*.bin;*.dat|All files|*.*",
+            Title = "Open binary or source",
+            Filter = "Binaries|*.exe;*.dll;*.sys;*.so;*.elf;*.o;*.bin;*.dat|" +
+                     "Source / text|*.cs;*.il;*.c;*.cpp;*.h;*.hpp;*.java;*.vb;*.txt;*.json;*.xml|All files|*.*",
         };
         if (dlg.ShowDialog(this) != true) return;
         await LoadFile(dlg.FileName);
@@ -1507,6 +1521,13 @@ public partial class MainWindow : Window
 
     private async Task LoadFile(string path)
     {
+        // Source/text files (e.g. a saved .cs) open in the read-only source viewer, not the binary/disasm pipeline.
+        if (SourceViewerWindow.IsSourceFile(path))
+        {
+            new SourceViewerWindow(path) { Owner = this }.Show();
+            return;
+        }
+
         _projectPath = null; // opening a binary directly starts an unsaved session
         IBinaryImage image;
         FirmwareScan? firmware = null;
@@ -1558,10 +1579,16 @@ public partial class MainWindow : Window
         // Report what the firmware sniffer found (and where the entry landed) once analysis has settled.
         if (firmware is not null) StatusText.Text = firmware.Summary;
 
-        // Nudge toward the unpacker when the freshly-loaded PE looks packed.
+        // Nudge toward the right tool for the freshly-loaded PE: the managed decompiler for .NET, the unpacker
+        // when it looks natively packed.
         if (image.Format == BinaryFormat.Pe)
         {
-            try { var v = PackerDetector.Detect(image); if (v.IsPacked) StatusText.Text = $"{v.Notes}  Use Unpack… to recover it."; }
+            try
+            {
+                if (ManagedPeInfo.TryRead(image) is { } net)
+                    StatusText.Text = $"{net.Describe()} managed assembly — open the C# tab to decompile, or the .NET tab to extract embedded resources/assemblies.";
+                else { var v = PackerDetector.Detect(image); if (v.IsPacked) StatusText.Text = $"{v.Notes}  Use Unpack… to recover it."; }
+            }
             catch { /* detection is best-effort */ }
         }
     }
@@ -1625,13 +1652,16 @@ public partial class MainWindow : Window
             PopulateLists(result);
             Linear.SetResult(result);
             Hex.SetImage(image);
+            if (fresh) ProbeManaged(image);   // light up the C#/.NET tabs when this PE is a managed assembly
             SavePatchedBtn.IsEnabled = image.IsDirty;
             UndoBtn.IsEnabled = image.CanUndo;
             _funcStarts = result.Functions.Select(f => f.Va).ToArray();
 
             ulong target = initialVa ?? (image.EntryVa != 0 ? image.EntryVa
                 : result.Functions.Count > 0 ? result.Functions[0].Va : image.MinVa);
-            if (initialTab is >= 0 and <= 3) CenterTabs.SelectedIndex = initialTab;
+            // Don't override the C# tab that ProbeManaged just switched to for a managed assembly.
+            if (initialTab is >= 0 and <= 3 && !ReferenceEquals(CenterTabs.SelectedItem, ManagedTab))
+                CenterTabs.SelectedIndex = initialTab;
             _nav.Navigate(target);
 
             // The UI now references the new image and the previous analysis was cancelled — wait for it to
@@ -1666,6 +1696,7 @@ public partial class MainWindow : Window
     {
         base.OnClosed(e);
         _cts?.Cancel();
+        _managed?.Dispose();
         (_image as IDisposable)?.Dispose();
         (_savedResult?.Image as IDisposable)?.Dispose();   // static image held across a debug session
     }
@@ -1735,6 +1766,18 @@ public partial class MainWindow : Window
         Graph.Clear();
         _graphFn = null;
         Decompiler.Clear();
+
+        // Managed (.NET) views: retire the previous assembly and hide the tabs until the next probe re-shows them.
+        Managed.Clear();
+        _managed?.Dispose();
+        _managed = null;
+        _managedSeq++;   // cancel any in-flight managed load for the old file
+        ManagedTab.Visibility = Visibility.Collapsed;
+        DotNetTab.Visibility = Visibility.Collapsed;
+        NetResList.ItemsSource = null;
+        NetInfo.Text = "";
+        NetSaveBtn.IsEnabled = false;
+        NetExtractAllBtn.IsEnabled = false;
     }
 
     // ---- navigation ----
@@ -2149,6 +2192,102 @@ public partial class MainWindow : Window
         ResourceTree.RT_HTML => ".html",
         _ => ".bin",
     };
+
+    // ---- managed (.NET) assembly path ----
+
+    /// <summary>If the freshly-analyzed PE is a managed assembly, build its model on a background thread and
+    /// (once done) reveal the C# and .NET tabs. Seq-guarded so a newer file open discards a stale result.</summary>
+    private void ProbeManaged(IBinaryImage image)
+    {
+        if (image.Format != BinaryFormat.Pe || ManagedPeInfo.TryRead(image) is null) return;
+
+        // Detected synchronously: reveal and switch to the C# view NOW (with a loading note) so the user never
+        // lands on the native disassembly — for a managed image that's just the mscoree stub and looks like a
+        // garbage/encrypted dump. The heavy decompiler load then fills it in; if it fails, we revert to native.
+        Managed.ShowLoading("// loading .NET decompiler…");
+        ManagedTab.Visibility = Visibility.Visible;
+        DotNetTab.Visibility = Visibility.Visible;
+        CenterTabs.SelectedItem = ManagedTab;
+        StatusText.Text = ".NET assembly — loading decompiler…";
+
+        int seq = ++_managedSeq;
+        var captured = image;
+        Task.Run(() => { ManagedAssembly.TryLoad(captured, out var a); return a; }).ContinueWith(t =>
+        {
+            var asm = t.IsCompletedSuccessfully ? t.Result : null;
+            Dispatcher.Invoke(() =>
+            {
+                if (seq != _managedSeq || !ReferenceEquals(_image, captured)) { asm?.Dispose(); return; }
+                if (asm is null)
+                {
+                    // Decompiler couldn't load it — hide the managed tabs and fall back to the native view.
+                    Managed.Clear();
+                    ManagedTab.Visibility = Visibility.Collapsed;
+                    DotNetTab.Visibility = Visibility.Collapsed;
+                    CenterTabs.SelectedIndex = 0;
+                    StatusText.Text = ".NET assembly detected, but the decompiler could not load it — showing the native view.";
+                    return;
+                }
+                _managed = asm;
+                Managed.SetAssembly(asm);
+                PopulateManagedTabs(asm);
+                StatusText.Text = $".NET assembly: {asm.Metadata.Name} — showing decompiled C# (native disasm is only the .NET loader stub).";
+            });
+        });
+    }
+
+    private void PopulateManagedTabs(ManagedAssembly asm)
+    {
+        var m = asm.Metadata;
+        NetInfo.Text = $"{m.Name}  ·  v{m.Version}  ·  {m.TargetFramework}  ·  {(m.IsILOnly ? "IL-only" : "mixed-mode")}\n" +
+                       $"{asm.Resources.Count} embedded resource(s)   ·   references: {string.Join(", ", m.ReferencedAssemblies.Take(6))}";
+        NetResList.ItemsSource = asm.Resources;
+        NetSaveBtn.IsEnabled = false;
+        NetExtractAllBtn.IsEnabled = asm.Resources.Count > 0;
+    }
+
+    private void OnNetResourceSelected(object sender, SelectionChangedEventArgs e)
+        => NetSaveBtn.IsEnabled = NetResList.SelectedItem is ManagedResourceEntry;
+
+    private void OnNetResourceActivate(object sender, MouseButtonEventArgs e) => SaveSelectedManagedResource();
+    private void OnNetSaveResource(object sender, RoutedEventArgs e) => SaveSelectedManagedResource();
+
+    private void SaveSelectedManagedResource()
+    {
+        if (NetResList.SelectedItem is not ManagedResourceEntry r) return;
+        var dlg = new SaveFileDialog { Title = "Save resource", FileName = SafeResourceFileName(r.Name), Filter = "All files|*.*" };
+        if (dlg.ShowDialog(this) != true) return;
+        try { File.WriteAllBytes(dlg.FileName, r.GetBytes()); StatusText.Text = $"Saved {dlg.FileName}"; }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    private void OnNetExtractAll(object sender, RoutedEventArgs e)
+    {
+        if (_managed is not { } asm || asm.Resources.Count == 0) return;
+        var dlg = new OpenFolderDialog { Title = "Extract all embedded resources to…" };
+        if (dlg.ShowDialog(this) != true) return;
+        int ok = 0, fail = 0;
+        foreach (var r in asm.Resources)
+        {
+            try
+            {
+                var bytes = r.GetBytes();
+                if (bytes.Length == 0) continue;
+                File.WriteAllBytes(Path.Combine(dlg.FolderName, SafeResourceFileName(r.Name)), bytes);
+                ok++;
+            }
+            catch { fail++; }
+        }
+        StatusText.Text = $"Extracted {ok} resource(s) to {dlg.FolderName}" + (fail > 0 ? $"  ({fail} failed)" : "");
+    }
+
+    /// <summary>A filesystem-safe name for an extracted managed resource (which may be an inner "blob :: key").</summary>
+    private static string SafeResourceFileName(string name)
+    {
+        string s = string.Concat(name.Split(Path.GetInvalidFileNameChars())).Replace(" :: ", "__");
+        if (s.Length > 120) s = s[^120..];
+        return s.Length == 0 ? "resource.bin" : s;
+    }
 
     private void OnExportActivate(object sender, MouseButtonEventArgs e)
     {

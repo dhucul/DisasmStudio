@@ -142,6 +142,10 @@
                 <TabItem Header="Decompiler">
                     <ctl:DecompilerView x:Name="Decompiler" />
                 </TabItem>
+                <!-- Managed (.NET) decompiler — visible only for .NET assemblies. -->
+                <TabItem Header="C#" x:Name="ManagedTab" Visibility="Collapsed">
+                    <ctl:ManagedDecompilerView x:Name="Managed" />
+                </TabItem>
             </TabControl>
 
             <GridSplitter Grid.Column="3" Width="5" HorizontalAlignment="Stretch" />
@@ -310,6 +314,38 @@
                                 </Grid>
                                 <ContentControl x:Name="ResPreviewHost" />
                             </DockPanel>
+                        </Grid>
+                    </TabItem>
+                    <!-- .NET: managed assembly metadata + extractable embedded resources/assemblies. -->
+                    <TabItem Header=".NET" x:Name="DotNetTab" Visibility="Collapsed">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" MinHeight="120" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock x:Name="NetInfo" Grid.Row="0" Margin="8,6" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextSecondary}" FontSize="11.5" />
+                            <ListBox x:Name="NetResList" Grid.Row="1" SelectionChanged="OnNetResourceSelected"
+                                     MouseDoubleClick="OnNetResourceActivate"
+                                     FontFamily="Cascadia Mono, Consolas" FontSize="11.5"
+                                     Background="{StaticResource Surface}" BorderThickness="0">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal" Margin="2,1">
+                                            <TextBlock Text="{Binding Kind}" Foreground="{StaticResource Accent}" Width="130" />
+                                            <TextBlock Text="{Binding Size}" Foreground="{StaticResource TextMuted}" Width="90"
+                                                       TextAlignment="Right" Margin="0,0,10,0" />
+                                            <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="8,6" HorizontalAlignment="Right">
+                                <Button x:Name="NetSaveBtn" Content="Save selected…" Click="OnNetSaveResource" IsEnabled="False" Margin="0,0,6,0" />
+                                <Button x:Name="NetExtractAllBtn" Content="Extract all…" Click="OnNetExtractAll" IsEnabled="False" />
+                            </StackPanel>
                         </Grid>
                     </TabItem>
                     <TabItem Header="Search">

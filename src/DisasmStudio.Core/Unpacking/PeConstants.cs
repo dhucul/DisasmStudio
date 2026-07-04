@@ -80,6 +80,7 @@ public static class PeConstants
     public const int DirBoundImport = 11;
     public const int DirIat = 12;
     public const int DirDelayImport = 13;
+    public const int DirComDescriptor = 14;             // CLR header — presence marks a .NET managed image
 
     public static int OptImageBaseOffset(bool is64) => is64 ? Opt_ImageBase64 : Opt_ImageBase32;
     public static int DataDirBaseOffset(bool is64) => is64 ? DataDirBase64 : DataDirBase32;

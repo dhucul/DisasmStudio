@@ -8,7 +8,7 @@
     <UseWPF>true</UseWPF>
     <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>DisasmStudio</AssemblyName>
-    <Version>2.11.0</Version>
+    <Version>2.12.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>DisasmStudio.ico</ApplicationIcon>
   </PropertyGroup>
@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DisasmStudio.Core\DisasmStudio.Core.csproj" />
     <ProjectReference Include="..\DisasmStudio.Debug\DisasmStudio.Debug.csproj" />
+    <ProjectReference Include="..\DisasmStudio.Managed\DisasmStudio.Managed.csproj" />
   </ItemGroup>
 
 </Project>

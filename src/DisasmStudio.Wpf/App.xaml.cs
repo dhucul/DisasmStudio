@@ -19,6 +19,16 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for the .NET managed path (decompiler view / SetAssembly tree build). Runs inside the
+        // live App so theme resources exist, prints to the launching terminal, and exits — no window.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-managed")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            string file = e.Args.Length > 1 ? e.Args[1] : @"C:\tmp\891SAFPLUSPCDriveUpdater.exe";
+            int rc = ManagedSmoke.Run(file);
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }

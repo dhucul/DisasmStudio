@@ -74,6 +74,14 @@ public static class PackerDetector
 
     public static PackerVerdict Detect(IBinaryImage img)
     {
+        // A .NET managed assembly is not natively packed — there is no native OEP to dump. Short-circuit before
+        // the entropy/section heuristics (a managed image's compressed IL body would otherwise read as "packed"),
+        // and route the user to the managed decompiler/extractor instead.
+        if (ManagedPeInfo.TryRead(img) is { } net)
+            return new PackerVerdict(".NET", PackerKind.None, [],
+                $"{net.Describe()} managed assembly — not natively packed. Use the C# decompiler (C# tab) and the " +
+                ".NET tab's resource/assembly extractor, not native OEP unpacking.");
+
         var entropy = new List<(string, double)>();
         foreach (var s in img.Sections)
         {
