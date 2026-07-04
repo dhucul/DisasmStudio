@@ -68,7 +68,8 @@ public sealed class GraphView : FrameworkElement
         _result = result;
         _function = function;
         _decoder = decoder;
-        if (!function.BlocksBuilt) CfgBuilder.Build(result.Image, function, result.JumpTables, decoder);
+        if (!function.BlocksBuilt)
+            CfgBuilder.Build(result.Image, function, result.JumpTables, NeutralDisasm.For(result.Image, result.Names, decoder));
 
         _blocks.Clear();
         _byStart.Clear();
@@ -146,16 +147,15 @@ public sealed class GraphView : FrameworkElement
     private void BuildLines(AnalysisResult result)
     {
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        IInstructionDecoder dis = _decoder ?? new Disassembler(result.Image);
-        var fmt = new AsmFormatter(result.Names);
+        INeutralDisassembler dis = NeutralDisasm.For(result.Image, result.Names, _decoder);
 
         foreach (var block in _blocks)
         {
             var list = new List<Line>(block.InstrVas.Count);
             foreach (var va in block.InstrVas)
             {
-                if (!dis.TryDecodeAt(va, out var instr)) continue;
-                var tokens = fmt.Format(instr).ToArray();
+                var tokens = dis.Format(va).ToArray();
+                if (tokens.Length == 0) continue;
                 string text = va.ToString("X8") + "  " + string.Concat(tokens.Select(t => t.Text));
                 result.Comments.TryGetValue(va, out var comment);
                 string measured = comment is null ? text : text + "   ; " + comment;

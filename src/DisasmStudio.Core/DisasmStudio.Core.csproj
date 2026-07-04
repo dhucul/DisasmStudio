@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <PackageReference Include="Iced" Version="1.21.0" />
+    <PackageReference Include="Gee.External.Capstone" Version="2.3.0" />
   </ItemGroup>
 
 </Project>

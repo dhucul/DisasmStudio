@@ -7,7 +7,6 @@ using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Wpf.Services;
-using Iced.Intel;
 
 namespace DisasmStudio.Wpf.Controls;
 
@@ -24,8 +23,7 @@ public sealed class LinearDisassemblyView : Grid
     private readonly ScrollBar _scroll;
 
     private AnalysisResult? _result;
-    private IInstructionDecoder? _dis;
-    private AsmFormatter? _fmt;
+    private INeutralDisassembler? _dis;
     private ulong _ipVa;   // debuggee's current instruction (0 = not debugging)
 
     // Label lines (function starts + named locs), as parallel sorted arrays.
@@ -126,11 +124,10 @@ public sealed class LinearDisassemblyView : Grid
         _caretInstr = -1;
         _selAnchor = -1;
         _topDisplay = 0;
-        if (result is null) { _dis = null; _fmt = null; _labelInstrLines = []; _labelVa = []; }
+        if (result is null) { _dis = null; _labelInstrLines = []; _labelVa = []; }
         else
         {
-            _dis = decoder ?? new Disassembler(result.Image);
-            _fmt = new AsmFormatter(result.Names);
+            _dis = NeutralDisasm.For(result.Image, result.Names, decoder);
             _addrDigits = Math.Max(8, result.Image.MaxVa.ToString("X").Length);
             BuildLabelLines(result);
             BuildRegions(result);
@@ -413,14 +410,14 @@ public sealed class LinearDisassemblyView : Grid
         if (_result is null || _dis is null || _caretInstr < 0) return;
         if (_result.Linear.IsDataAt(_caretInstr)) { StatusRequested?.Invoke("Follow: data line — nothing to follow."); return; }
         ulong va = _result.Linear.VaAt(_caretInstr);
-        if (!_dis.TryDecodeAt(va, out var instr)) { StatusRequested?.Invoke("Follow: this line can't be decoded."); return; }
-        if (FlowAnalysis.DirectBranchTarget(instr) is ulong t)
+        if (!_dis.TryDecode(va, out var instr)) { StatusRequested?.Invoke("Follow: this line can't be decoded."); return; }
+        if (instr.DirectTarget is ulong t)
         {
             if (_result.Image.IsMappedVa(t)) { NavigateRequested?.Invoke(t); StatusRequested?.Invoke($"Followed → {NameOrAddr(t)}"); }
             else StatusRequested?.Invoke($"Follow: target {t:X} is outside the loaded image.");
             return;
         }
-        StatusRequested?.Invoke(instr.FlowControl is FlowControl.IndirectBranch or FlowControl.IndirectCall
+        StatusRequested?.Invoke(instr.Flow is FlowKind.IndirectJump or FlowKind.IndirectCall
             ? "Follow: indirect target — can't be resolved statically (run the debugger to follow it live)."
             : "Follow: no branch or call on this line.");
     }
@@ -431,8 +428,8 @@ public sealed class LinearDisassemblyView : Grid
     {
         if (_result is null || _dis is null || _caretInstr < 0 || _result.Linear.IsDataAt(_caretInstr)) return null;
         ulong va = _result.Linear.VaAt(_caretInstr);
-        if (!_dis.TryDecodeAt(va, out var instr)) return null;
-        return FlowAnalysis.DirectBranchTarget(instr) is ulong t && _result.Image.IsMappedVa(t) ? t : null;
+        if (!_dis.TryDecode(va, out var instr)) return null;
+        return instr.DirectTarget is ulong t && _result.Image.IsMappedVa(t) ? t : null;
     }
 
     private string NameOrAddr(ulong va) => _result?.NameFor(va) is { Length: > 0 } n ? n : va.ToString("X" + _addrDigits);
@@ -506,7 +503,7 @@ public sealed class LinearDisassemblyView : Grid
     /// <summary>Copy the selected lines (address + disassembly / data + comment) to the clipboard, as text.</summary>
     private void CopySelection()
     {
-        if (_result is null || _dis is null || _fmt is null) return;
+        if (_result is null || _dis is null) return;
         var (lo, hi) = SelRange();
         if (lo < 0) return;
         long cap = Math.Min(hi, lo + 200_000);   // bound a runaway select-all copy
@@ -528,8 +525,8 @@ public sealed class LinearDisassemblyView : Grid
             if (_result.Comments.TryGetValue(va, out var dcm)) dataText += "   ; " + dcm;
             return dataText;
         }
-        if (!_dis!.TryDecodeAt(va, out var instr)) return $"{addr}  ??";
-        string text = _fmt!.FormatText(instr);
+        if (!_dis!.TryDecode(va, out var instr)) return $"{addr}  ??";
+        string text = string.Concat(_dis.Format(va).Select(t => t.Text));
         if (_result.Comments.TryGetValue(va, out var c)) text += "   ; " + c;
         return $"{addr}  {Hex(_result.Image.ReadBytesAtVa(va, instr.Length))}  {text}";
     }
@@ -541,7 +538,7 @@ public sealed class LinearDisassemblyView : Grid
     {
         dc.DrawRectangle(SyntaxTheme.Background, null, new Rect(0, 0, width, height));
         dc.DrawRectangle(SyntaxTheme.GutterBg, null, new Rect(0, 0, GutterW, height));
-        if (_result is null || _dis is null || _fmt is null) return;
+        if (_result is null || _dis is null) return;
 
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
         int rows = (int)(height / _rowHeight) + 1;
@@ -619,7 +616,7 @@ public sealed class LinearDisassemblyView : Grid
     {
         Draw(dc, va.ToString("X" + _addrDigits), AddrX, y, SyntaxTheme.Address, dpi);
 
-        if (!_dis!.TryDecodeAt(va, out var instr))
+        if (!_dis!.TryDecode(va, out var instr))
         {
             Draw(dc, "??", DisasmX, y, SyntaxTheme.Comment, dpi);
             return;
@@ -635,7 +632,7 @@ public sealed class LinearDisassemblyView : Grid
 
         // Disassembly tokens.
         double x = DisasmX;
-        foreach (var tok in _fmt!.Format(instr))
+        foreach (var tok in _dis.Format(va))
             x = Draw(dc, tok.Text, x, y, SyntaxTheme.BrushFor(tok.Kind), dpi);
 
         // Inline comment (referenced string, etc.).
@@ -744,9 +741,9 @@ public sealed class LinearDisassemblyView : Grid
             int ri = RegionStartAt(instrLine);
             if (ri >= 0 && _collapsed.Contains(_regions[ri].Va)) continue;   // collapsed header — no arrow
             ulong va = _result.Linear.VaAt(instrLine);
-            if (!_dis.TryDecodeAt(va, out var instr)) continue;
-            if (FlowAnalysis.DirectBranchTarget(instr) is not ulong target) continue;
-            if (instr.FlowControl == FlowControl.Call) continue; // arrows for jumps only
+            if (!_dis.TryDecode(va, out var instr)) continue;
+            if (instr.DirectTarget is not ulong target) continue;
+            if (instr.Flow == FlowKind.Call) continue; // arrows for jumps only
 
             long targetInstr = _result.Linear.IndexOf(target);
             if (_result.Linear.VaAt(targetInstr) != target) continue;

@@ -1,9 +1,10 @@
 # DisasmStudio
 
 A Binary Ninja–style disassembler for Windows — soft, dark, high-DPI WPF. Loads PE / ELF / raw
-binaries, disassembles x86/x64 (via [Iced](https://github.com/icedland/iced)), and presents a
-linear listing, a per-function control-flow graph, and a hex view, with the usual reverse-engineering
-side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large files.
+binaries, disassembles x86/x64 (via [Iced](https://github.com/icedland/iced)) and ARM / Thumb /
+AArch64 (via [Capstone](https://www.capstone-engine.org/)), and presents a linear listing, a
+per-function control-flow graph, and a hex view, with the usual reverse-engineering side panels and
+fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large files.
 
 ## Features
 
@@ -18,6 +19,16 @@ side panels and fluid navigation. Built to stay crisp on 4K/5K monitors and resp
   corroborated by Intel Flash Descriptor and UEFI firmware-volume (`_FVH`) signatures, and the open
   dialog pre-fills the base, bitness (now incl. 16-bit real mode) and entry — all editable. Detected
   landmarks (`reset_vector`, `boot_entry`, firmware-volume bases) seed analysis and name the listing.
+- **ARM / Thumb / AArch64:** a raw blob can be opened as **ARM (A32)**, **Thumb/Thumb-2**, or
+  **ARM64 (A64)** — the route for embedded-controller firmware (e.g. an optical-drive MediaTek/Renesas
+  dump), which is ARM, not x86. A byte-frequency sniff (`push {…,lr}`/`bl` density) pre-selects the
+  instruction set in the open dialog. Analysis is a self-contained Capstone-backed recursive descent
+  (from the entry, symbols, and discovered prologues) that separates code from the literal pools ARM
+  interleaves with it; the same linear listing, CFG graph, hex view, cross-references and string scan
+  work as for x86. Decoding is behind a small neutral seam, so the x86/x64 Iced path is unchanged.
+  *Limitations:* one instruction set per image (no automatic ARM↔Thumb switching on `BX`/`BLX` yet);
+  the **IL/pseudo-C decompiler, debugger, devirtualizer and C/ASM export are x86/x64-only** and are
+  disabled for ARM images; ARM table branches (`tbb`/`tbh`/`ldr pc,[…]`) are shown but not resolved.
 - **Linear view:** a custom, virtualized listing that decodes and formats only the rows on screen,
   so it scrolls smoothly over multi-million-instruction images. Soft syntax colouring, named branch
   targets (`sub_`/`loc_`/imports/exports), inline string comments, and a branch-arrow gutter.

@@ -16,6 +16,15 @@ public interface IBinaryImage
     int Bitness { get; }
     string ArchName { get; }
 
+    /// <summary>The instruction set to decode with. Defaults to x86/x64 by bitness; only <see cref="RawImage"/>
+    /// overrides it to an ARM-family architecture (chosen in the raw-load dialog). This is the single signal
+    /// that routes an image to the Iced (x86/x64) or Capstone (ARM) decoder + analysis path.</summary>
+    Architecture Arch => Bitness == 64 ? Architecture.X64 : Architecture.X86;
+
+    /// <summary>True when this image decodes as ARM/Thumb/AArch64 — x86-only features (decompiler, debugger,
+    /// devirt, unpack, C export) are gated off for these.</summary>
+    bool IsArm => Arch is Architecture.Arm or Architecture.Thumb or Architecture.Arm64;
+
     ulong ImageBase { get; }
 
     /// <summary>Entry point VA, or 0 if the format has none.</summary>

@@ -11,12 +11,13 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 public sealed record ProjectFile
 {
-    public int Version { get; init; } = 3;
+    public int Version { get; init; } = 4;
     public string BinaryPath { get; init; } = "";
     public string Format { get; init; } = "";   // "PE" / "ELF" / "Raw"
     public ulong RawBaseVa { get; init; }        // raw blobs only
     public int RawBitness { get; init; }         // raw blobs only
     public ulong RawEntryVa { get; init; }       // v3: raw/firmware entry point (0 ⇒ entry at base, legacy behaviour)
+    public string? RawArch { get; init; }        // v4: raw ISA ("Arm"/"Thumb"/"Arm64"); null ⇒ x86/x64 by bitness (legacy)
     public ulong CurrentVa { get; init; }        // navigation state
     public int CenterTab { get; init; }          // active center tab (Linear/Graph/Hex)
     public List<string>? LoadedSections { get; init; }   // v2: non-code sections folded into the listing

@@ -36,19 +36,29 @@ internal static class Dialogs
     /// summary of what was found is shown; the entry box tracks the base (preserving the detected offset) until
     /// the user edits it. <paramref name="fileLength"/> is the blob size, used to keep the entry pinned relative
     /// to the base. Returns the chosen base, bitness (16/32/64) and entry VA, or null if cancelled.</summary>
-    public static (ulong BaseVa, int Bitness, ulong EntryVa)? AskRawOptions(Window owner, FirmwareScan scan, long fileLength)
+    public static (ulong BaseVa, int Bitness, ulong EntryVa, Architecture Arch)? AskRawOptions(
+        Window owner, FirmwareScan scan, long fileLength, Architecture? suggestedArch = null)
     {
         var mono = new FontFamily("Cascadia Mono, Consolas");
 
         var bits = new ComboBox { Margin = new Thickness(0, 0, 0, 10) };
-        bits.Items.Add("x64 (64-bit)");
-        bits.Items.Add("x86 (32-bit)");
-        bits.Items.Add("x86-16 (16-bit real mode)");
-        bits.SelectedIndex = scan.IsFirmware
-            ? scan.Bitness switch { 16 => 2, 32 => 1, _ => 0 }
-            : 0;
+        bits.Items.Add("x64 (64-bit)");                // 0
+        bits.Items.Add("x86 (32-bit)");                // 1
+        bits.Items.Add("x86-16 (16-bit real mode)");   // 2
+        bits.Items.Add("ARM (32-bit)");                // 3
+        bits.Items.Add("Thumb (16/32-bit)");           // 4
+        bits.Items.Add("ARM64 (AArch64)");             // 5
+        // An ARM/Thumb guess (from a byte-frequency sniff) wins the default; else the firmware bitness; else x64.
+        bits.SelectedIndex = suggestedArch switch
+        {
+            Architecture.Arm => 3,
+            Architecture.Thumb => 4,
+            Architecture.Arm64 => 5,
+            _ => scan.IsFirmware ? scan.Bitness switch { 16 => 2, 32 => 1, _ => 0 } : 0,
+        };
 
-        ulong defaultBase = scan.IsFirmware ? scan.BaseVa : 0x140000000UL;
+        // ARM firmware is conventionally based at 0; x86 firmware/blobs keep the sniffer's suggestion or the x64 default.
+        ulong defaultBase = suggestedArch is not null ? 0UL : scan.IsFirmware ? scan.BaseVa : 0x140000000UL;
         ulong defaultEntry = scan.IsFirmware ? scan.EntryVa : defaultBase;
         var baseBox = new TextBox { Text = defaultBase.ToString("X"), FontFamily = mono };
         var entryBox = new TextBox { Text = defaultEntry.ToString("X"), FontFamily = mono };
@@ -87,10 +97,18 @@ internal static class Dialogs
         bool ok = ShowModal(owner, scan.IsFirmware ? "Open firmware" : "Open as raw", panel,
                             scan.IsFirmware ? entryBox : baseBox, scan.IsFirmware ? 460 : 340);
         if (!ok) return null;
-        int bitness = bits.SelectedIndex switch { 2 => 16, 1 => 32, _ => 64 };
+        (int bitness, Architecture arch) = bits.SelectedIndex switch
+        {
+            2 => (16, Architecture.X86),
+            1 => (32, Architecture.X86),
+            3 => (32, Architecture.Arm),
+            4 => (32, Architecture.Thumb),
+            5 => (64, Architecture.Arm64),
+            _ => (64, Architecture.X64),
+        };
         ulong baseVa = ParseHex(baseBox.Text) ?? (bitness == 64 ? 0x140000000UL : 0x400000UL);
         ulong entryVa = ParseHex(entryBox.Text) ?? baseVa;
-        return (baseVa, bitness, entryVa);
+        return (baseVa, bitness, entryVa, arch);
     }
 
     /// <summary>Show every section in the image and let the user fold optional ones into the listing as data.

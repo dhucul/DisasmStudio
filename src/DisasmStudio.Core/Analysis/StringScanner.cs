@@ -28,7 +28,8 @@ public static class StringScanner
     /// <param name="useVirtualSize">Scan each section's whole virtual extent rather than its on-disk size — used
     /// when scanning live process memory, where decrypted/unpacked strings can live past the raw file size.</param>
     public static List<FoundString> Scan(IBinaryImage img, IReadOnlySet<ulong>? execRefs = null,
-        int minLength = 4, int maxResults = 200_000, bool useVirtualSize = false, CancellationToken token = default)
+        int minLength = 4, int maxResults = 200_000, bool useVirtualSize = false, bool includeExecutable = false,
+        CancellationToken token = default)
     {
         var found = new List<FoundString>();
         foreach (var s in img.Sections)
@@ -38,9 +39,11 @@ public static class StringScanner
                 ? (int)Math.Min(Math.Max(s.VirtualSize, (ulong)s.FileSize), (ulong)MaxLiveSectionBytes)
                 : s.FileSize;
             if (size <= 0) continue;
-            // Executable section: only mine it for strings code points into (needs the ref set).
+            // Executable section: only mine it for strings code points into (needs the ref set) — unless the
+            // caller opts in to scanning the whole span (a raw firmware blob is one big "executable" section
+            // that legitimately holds string tables; ArmAnalyzer opts in, then filters out code-region hits).
             var gate = s.IsExecutable ? execRefs : null;
-            if (s.IsExecutable && gate is null) continue;
+            if (s.IsExecutable && gate is null && !includeExecutable) continue;
             ScanSection(img, s.StartVa, size, minLength, maxResults, found, gate, token);
             if (found.Count >= maxResults) break;
         }

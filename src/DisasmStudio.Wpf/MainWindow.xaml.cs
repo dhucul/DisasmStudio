@@ -18,6 +18,7 @@ using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug;
+using Architecture = DisasmStudio.Core.Formats.Architecture;   // disambiguate from System.Runtime.InteropServices.Architecture
 using Iced.Intel;
 using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
@@ -282,6 +283,7 @@ public partial class MainWindow : Window
     private void OnAttach(object sender, RoutedEventArgs e)
     {
         if (_dbg is not null) { MessageBox.Show(this, "A debug session is already active.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (NotForArm("Attach")) return;
         // No file required: with a binary open we rebase its analysis onto the process; without one we analyze
         // the process's own image after attaching. The bitness hint is 0 ("unknown") when nothing is open.
         if (Dialogs.AskProcess(this, _result?.Image.Bitness ?? 0) is uint pid) BeginDebug(d => d.Attach(pid));
@@ -322,6 +324,7 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "Open a decrypted PE or memory dump first.", "Devirtualizer", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+        if (NotForArm("Devirtualizer")) return;
 
         Progress.Visibility = Visibility.Visible;
         Progress.IsIndeterminate = true;
@@ -580,7 +583,7 @@ public partial class MainWindow : Window
         var fn = FindFunction(ip);
         if (fn is not null)
         {
-            try { CfgBuilder.Build(_result.Image, fn, null, _dbg.LiveDecoder); } catch { /* fall through to Step Out */ }
+            try { CfgBuilder.Build(_result.Image, fn, null, NeutralDisasm.For(_result.Image, _result.Names, _dbg.LiveDecoder)); } catch { /* fall through to Step Out */ }
             // FindFunction returns the nearest preceding function start; only trust it if the IP is actually
             // inside one of its blocks — otherwise (an unanalyzed gap) we'd run to an unrelated function's rets.
             bool inFn = fn.Blocks.Any(b => ip >= b.Start && ip < b.End);
@@ -1310,7 +1313,10 @@ public partial class MainWindow : Window
         {
             image = proj.Format == "Raw"
                 ? RawImage.Load(proj.BinaryPath, proj.RawBaseVa, proj.RawBitness,
-                                proj.RawEntryVa != 0 ? proj.RawEntryVa : proj.RawBaseVa, null)
+                                proj.RawEntryVa != 0 ? proj.RawEntryVa : proj.RawBaseVa,
+                                Enum.TryParse<Architecture>(proj.RawArch, out var a) ? a
+                                    : proj.RawBitness == 64 ? Architecture.X64 : Architecture.X86,
+                                null)
                 : proj.Format == "PE memory"
                 ? PeMemoryImage.Load(proj.BinaryPath, proj.RawBaseVa)
                 : BinaryLoader.Load(proj.BinaryPath);
@@ -1360,6 +1366,7 @@ public partial class MainWindow : Window
             RawBaseVa = _image.Format == BinaryFormat.Raw || _image.FormatName == "PE memory" ? _image.ImageBase : 0,
             RawBitness = _image.Format == BinaryFormat.Raw ? _image.Bitness : 0,
             RawEntryVa = _image.Format == BinaryFormat.Raw ? _image.EntryVa : 0,
+            RawArch = _image.Format == BinaryFormat.Raw ? _image.Arch.ToString() : null,
             CurrentVa = _nav.Current ?? _image.EntryVa,
             CenterTab = CenterTabs.SelectedIndex,
             LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
@@ -1379,6 +1386,7 @@ public partial class MainWindow : Window
         // Works on _result (the live analysis when fileless-attached), so only that is required — the default
         // filename comes from _result.Image (the file, or the attached process's module path).
         if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save ASM", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (NotForArm("Save ASM")) return;
         var dlg = new SaveFileDialog { Title = "Save disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
             FileName = ExportBaseName() + ".asm" };
         if (dlg.ShowDialog(this) != true) return;
@@ -1389,6 +1397,7 @@ public partial class MainWindow : Window
     private async void OnSaveC(object sender, RoutedEventArgs e)
     {
         if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (NotForArm("Save C")) return;
         var dlg = new SaveFileDialog
         {
             Title = "Save C",
@@ -1443,6 +1452,7 @@ public partial class MainWindow : Window
     {
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
+        if (NotForArm("Save ASM")) return;
         var dlg = new SaveFileDialog { Title = "Save function disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
             FileName = SafeFileName(fn.Name) + ".asm" };
         if (dlg.ShowDialog(this) != true) return;
@@ -1459,6 +1469,7 @@ public partial class MainWindow : Window
     {
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
+        if (NotForArm("Save C")) return;
         var dlg = new SaveFileDialog
         {
             Title = "Save function C",
@@ -1482,6 +1493,18 @@ public partial class MainWindow : Window
         return s.Length > 80 ? s[..80] : s;
     }
 
+    /// <summary>The IL decompiler, C/ASM export, devirtualizer and debugger are x86/x64-only (they depend on
+    /// Iced semantics / the Win64 ABI). Returns true — after telling the user — when the loaded image is an
+    /// ARM-family raw blob, so the caller bails. ARM images still have linear disassembly, graph, hex and xrefs.</summary>
+    private bool NotForArm(string feature)
+    {
+        if (_result?.Image.IsArm != true) return false;
+        MessageBox.Show(this, $"{feature} is available for x86/x64 targets only — this is an ARM image. " +
+            "Linear disassembly, the CFG graph, the hex view and cross-references all work for ARM.",
+            feature, MessageBoxButton.OK, MessageBoxImage.Information);
+        return true;
+    }
+
     private async Task LoadFile(string path)
     {
         _projectPath = null; // opening a binary directly starts an unsaved session
@@ -1498,10 +1521,20 @@ public partial class MainWindow : Window
                 try { scan = FirmwareScanner.Scan(path); }
                 catch { scan = FirmwareScan.NotFirmware; }
                 long fileLength = new FileInfo(path).Length;
-                var opt = Dialogs.AskRawOptions(this, scan, fileLength);
+                // Sniff a sample for ARM/Thumb so the dialog can pre-select the architecture (user confirms).
+                Architecture? armGuess = null;
+                try
+                {
+                    using var fs = File.OpenRead(path);
+                    var sample = new byte[(int)Math.Min(fs.Length, 0x40000)];
+                    fs.ReadExactly(sample);
+                    armGuess = ArmHeuristics.Detect(sample);
+                }
+                catch { /* detection is best-effort */ }
+                var opt = Dialogs.AskRawOptions(this, scan, fileLength, armGuess);
                 if (opt is null) return;
                 image = RawImage.Load(path, opt.Value.BaseVa, opt.Value.Bitness, opt.Value.EntryVa,
-                                      scan.IsFirmware ? scan.Symbols : null);
+                                      opt.Value.Arch, scan.IsFirmware ? scan.Symbols : null);
                 if (scan.IsFirmware) firmware = scan;
             }
             else if (fmt == BinaryFormat.Pe && LooksLikeMemoryDumpPath(path) && PeMemoryImage.TryLoad(path, out var mem))
@@ -1755,6 +1788,12 @@ public partial class MainWindow : Window
 
     private void OpenDecompiler(ulong va)
     {
+        // The IL/pseudo-C decompiler is x86/x64-only (Iced-based); ARM images use the linear + graph views.
+        if (_result?.Image.IsArm == true)
+        {
+            StatusText.Text = "Decompiler is x86/x64 only — this ARM image shows linear + graph disassembly.";
+            return;
+        }
         var fn = FindFunction(va);
         if (fn is not null && _result is not null) Decompiler.SetFunction(_result, fn);
     }

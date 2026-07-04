@@ -26,6 +26,10 @@ public static class AnalysisEngine
     public static AnalysisResult Analyze(IBinaryImage image, AnalysisOptions? options = null,
         IProgress<string>? progress = null, CancellationToken token = default)
     {
+        // ARM-family images (raw firmware opened as ARM/Thumb/AArch64) use a self-contained Capstone
+        // pipeline; the x86/x64 Iced passes below don't apply.
+        if (image.IsArm) return ArmAnalyzer.Analyze(image, progress, token);
+
         options ??= AnalysisOptions.None;
         var warnings = new List<string>();
 

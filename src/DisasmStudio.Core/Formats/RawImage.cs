@@ -18,7 +18,14 @@ public sealed class RawImage : IBinaryImage, IDisposable
     public BinaryFormat Format => BinaryFormat.Raw;
     public string FormatName => "Raw";
     public int Bitness { get; }
-    public string ArchName => Bitness switch { 64 => "x64", 16 => "x86-16", _ => "x86" };
+    public Architecture Arch { get; }
+    public string ArchName => Arch switch
+    {
+        Architecture.Arm => "arm",
+        Architecture.Thumb => "thumb",
+        Architecture.Arm64 => "arm64",
+        _ => Bitness switch { 64 => "x64", 16 => "x86-16", _ => "x86" },
+    };
     public ulong ImageBase { get; }
     public ulong EntryVa { get; }
     public bool IsDll => false;
@@ -32,12 +39,19 @@ public sealed class RawImage : IBinaryImage, IDisposable
     public int BackingLength => _f.Length;
 
     private RawImage(MappedFile f, string path, ulong baseVa, int bitness, ulong entryVa,
-                     IReadOnlyList<NamedSymbol>? symbols)
+                     Architecture arch, IReadOnlyList<NamedSymbol>? symbols)
     {
         _f = f;
         FilePath = path;
         ImageBase = baseVa;
-        Bitness = bitness switch { 64 => 64, 16 => 16, _ => 32 };
+        Arch = arch;
+        // ARM/Thumb are 32-bit, AArch64 is 64-bit; otherwise honour the requested x86 bitness.
+        Bitness = arch switch
+        {
+            Architecture.Arm64 => 64,
+            Architecture.Arm or Architecture.Thumb => 32,
+            _ => bitness switch { 64 => 64, 16 => 16, _ => 32 },
+        };
         EntryVa = entryVa;
         // Keep only markers that land inside the mapped blob, so a seed can never point analysis at an
         // unmapped VA (e.g. a legacy reset vector's far jump into low memory that this mapping doesn't cover).
@@ -61,13 +75,21 @@ public sealed class RawImage : IBinaryImage, IDisposable
 
     /// <summary>Map a flat blob at <paramref name="baseVa"/> with the entry at the base (shellcode / dumps).</summary>
     public static RawImage Load(string path, ulong baseVa, int bitness) =>
-        new(MappedFile.Open(path), path, baseVa, bitness, baseVa, null);
+        new(MappedFile.Open(path), path, baseVa, bitness, baseVa, ArchFor(bitness), null);
 
     /// <summary>Map a flat blob with an explicit entry point and optional firmware markers (see
     /// <see cref="FirmwareScanner"/>). Used for firmware, whose entry is a reset vector near the top of the image.</summary>
     public static RawImage Load(string path, ulong baseVa, int bitness, ulong entryVa,
                                 IReadOnlyList<NamedSymbol>? symbols) =>
-        new(MappedFile.Open(path), path, baseVa, bitness, entryVa, symbols);
+        new(MappedFile.Open(path), path, baseVa, bitness, entryVa, ArchFor(bitness), symbols);
+
+    /// <summary>Map a flat blob with an explicit instruction-set architecture — the ARM-family path used by
+    /// the raw-load dialog to open firmware as ARM/Thumb/AArch64. Bitness is derived from the architecture.</summary>
+    public static RawImage Load(string path, ulong baseVa, int bitness, ulong entryVa,
+                                Architecture arch, IReadOnlyList<NamedSymbol>? symbols) =>
+        new(MappedFile.Open(path), path, baseVa, bitness, entryVa, arch, symbols);
+
+    private static Architecture ArchFor(int bitness) => bitness == 64 ? Architecture.X64 : Architecture.X86;
 
     public ulong MinVa => ImageBase;
     public ulong MaxVa => ImageBase + (ulong)_f.Length;
