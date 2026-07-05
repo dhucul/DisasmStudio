@@ -4,9 +4,11 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- Run at the user's current integrity level. Forced elevation prevents Windows Explorer
-             from dragging files into the app because cross-integrity drag/drop is blocked by UIPI. -->
-        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+        <!-- Run elevated: a debugger needs administrator rights to launch/attach elevated targets (and to debug
+             .NET programs whose own manifest requests requireAdministrator). Explorer-to-app file drag/drop still
+             works while elevated because the app uses native WM_DROPFILES with a UIPI message filter (see
+             NativeFileDrop), not cross-integrity OLE drag/drop. -->
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>
