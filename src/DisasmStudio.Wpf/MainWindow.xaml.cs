@@ -764,11 +764,14 @@ public partial class MainWindow : Window
         // the Framework CLR), which also blocks the host and can freeze Stop.
         if (!IsNetCoreTarget(dll))
         {
-            MessageBox.Show(this,
-                "This looks like a .NET Framework program. The source-level (C#) debugger currently supports " +
-                ".NET 5+/Core only — .NET Framework isn't supported yet.\n\n" +
-                "You can still decompile and analyze it here; run it under a .NET Framework debugger for now.",
-                "Managed debug", MessageBoxButton.OK, MessageBoxImage.Information);
+            // dbgshim (the ICorDebug backend here) is CoreCLR-only, so it can't source-debug .NET Framework.
+            // Offer the native (assembly-level) debugger, which runs any PE — the C# decompilation stays available.
+            var choice = MessageBox.Show(this,
+                "This is a .NET Framework program. Source-level (C#) debugging currently supports .NET 5+/Core only.\n\n" +
+                "Debug it with the native (assembly-level) debugger instead? You can run it, set native breakpoints, " +
+                "and inspect registers/memory — but not break on C# lines. (The C# decompilation stays available for reading.)",
+                "Managed debug", MessageBoxButton.YesNo, MessageBoxImage.Information);
+            if (choice == MessageBoxResult.Yes) BeginDebug(d => d.Launch(_image!.FilePath));
             return;
         }
 
