@@ -363,6 +363,8 @@ public sealed partial class DebuggerEngine
                 // at a chosen export (breakIsEntry == false) is a normal Breakpoint.
                 bool entry = !_attached && addr == EntryPoint && !_seenEntry && (!_hostingDll || _breakIsEntry);
                 _seenEntry = true;
+                // Phase-2 anti-debug hooks: kernelbase/kernel32/user32 are now fully initialized — install them.
+                if (HideFromDebugger && _adApplied && HideUseApiHooks) TryInstallLateHooks();
                 Stopped?.Invoke(new StopInfo(entry ? StopReason.EntryPoint : StopReason.Breakpoint, ev.dwThreadId, addr, code));
                 return true;
             }

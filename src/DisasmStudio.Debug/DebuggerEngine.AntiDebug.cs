@@ -40,6 +40,7 @@ public sealed partial class DebuggerEngine
     public uint SpoofParentProcessId => _spoofParentPid;
 
     private bool _adApplied;
+    private bool _lateHooksInstalled;      // kernelbase/kernel32/user32 hooks armed (deferred past DLL init)
     private uint _spoofParentPid;          // parent PID to report to the debuggee (0 = spoof disabled)
     private bool _windowHooksInstalled;    // FindWindow* hooks armed (once user32 is mapped)
     private long _fakeClock;                                            // monotonic synthetic timer (defeats timing checks)
@@ -177,7 +178,13 @@ public sealed partial class DebuggerEngine
         finally { Native.VirtualProtectEx(_proc, page, 0x1000, orig, out _); }
     }
 
-    // ---- hooks ----
+    // ---- hooks (two-phase: ntdll at loader breakpoint, everything else after DLL init) ----
+
+    /// <summary>Phase-1 hooks installed at the loader breakpoint: ntdll.dll only. ntdll is the first
+    /// DLL loaded and is fully initialized before the loader breakpoint fires, so these are safe.
+    /// Phase-2 hooks (kernelbase, kernel32, user32) are deferred to <see cref="TryInstallLateHooks"/>
+    /// because those DLLs are still going through DllMain during the loader breakpoint — hooking them
+    /// too early can cause STATUS_DLL_INIT_FAILED (0xC06D007E).</summary>
     private void InstallNtdllHooks()
     {
         ulong ntdll = ModuleBaseByName("ntdll.dll", Is32);
@@ -202,6 +209,17 @@ public sealed partial class DebuggerEngine
         TryHook(ntdll, "NtQueryPerformanceCounter", AdKind.NtQpc, 2);
         TryHook(ntdll, "NtQuerySystemTime", AdKind.NtSystemTime, 1);
 
+        Output?.Invoke($"Anti-debug: {_internalBps.Count} hook(s) armed ({(Is32 ? "32-bit" : "64-bit")}; ntdll @ {ntdll:X}).");
+    }
+
+    /// <summary>Phase-2 hooks: install kernelbase, kernel32, and user32 hooks. Idempotent — safe to
+    /// call from the entry-point stop or any subsequent LOAD_DLL event. Must NOT be called during the
+    /// loader breakpoint (DLL init is still in progress).</summary>
+    public void TryInstallLateHooks()
+    {
+        if (!HideFromDebugger || !HideUseApiHooks || _lateHooksInstalled) return;
+        if (_internalBps.Count == 0) return;   // ntdll hooks weren't installed either
+
         // Timing (KUSER_SHARED_DATA readers live in kernelbase; kernel32 forwards to it).
         ulong kbase = ModuleBaseByName("kernelbase.dll", Is32);
         if (kbase != 0)
@@ -212,10 +230,7 @@ public sealed partial class DebuggerEngine
             TryHook(kbase, "GetSystemTimeAsFileTime", AdKind.SysTimeAsFileTime, 1);
         }
 
-        // Snapshot parent walk: hook kernel32!Process32FirstW / Process32NextW. The packer calls these to
-        // walk its own process tree; we override the th32ParentProcessID field on return so it always sees
-        // explorer.exe as its parent. Process32FirstW → 2 stdcall args (hSnapshot, out PROCESSENTRY32W);
-        // Process32NextW → 2 stdcall args (hSnapshot, out PROCESSENTRY32W). Both return BOOL.
+        // Snapshot parent walk: hook kernel32!Process32FirstW / Process32NextW.
         ulong k32 = ModuleBaseByName("kernel32.dll", Is32);
         if (k32 != 0)
         {
@@ -223,9 +238,16 @@ public sealed partial class DebuggerEngine
             TryHook(k32, "Process32NextW", AdKind.Process32Next, 2);
         }
 
-        Output?.Invoke($"Anti-debug: {_internalBps.Count} hook(s) armed ({(Is32 ? "32-bit" : "64-bit")}; ntdll @ {ntdll:X}).");
+        TryInstallWindowHooks();   // user32 is usually already mapped at this point
+        _lateHooksInstalled = true;
 
-        TryInstallWindowHooks();   // user32 is usually already mapped; LOAD_DLL re-tries any later load
+        int lateCount = 0;
+        lock (_lock) lateCount = _internalBps.Count(bp =>
+            bp.Value.Kind is AdKind.TickCount or AdKind.TickCount64 or AdKind.Qpc
+                or AdKind.SysTimeAsFileTime or AdKind.Process32First or AdKind.Process32Next
+                or AdKind.FindWindowW or AdKind.FindWindowA or AdKind.FindWindowExW or AdKind.FindWindowExA);
+        if (lateCount > 0)
+            Output?.Invoke($"Anti-debug: {lateCount} phase-2 hook(s) armed (kernelbase/kernel32/user32 — deferred past DLL init).");
     }
 
     private void TryHook(ulong moduleBase, string export, AdKind kind, int x86Args)
@@ -648,9 +670,9 @@ public sealed partial class DebuggerEngine
     }
 
     // ---- window-enumeration defense: FindWindow[Ex][A/W] ----
-    /// <summary>Install the FindWindow* hooks once user32 is mapped (idempotent). Called at the loader
-    /// breakpoint and again on each LOAD_DLL, so a user32 mapped later (e.g. a packer's runtime LoadLibrary)
-    /// is still covered.</summary>
+    /// <summary>Install the FindWindow* hooks once user32 is mapped (idempotent). Called both from the
+    /// deferred phase-2 hook installer and on each LOAD_DLL, so a user32 mapped later (e.g. a packer's
+    /// runtime LoadLibrary) is still covered.</summary>
     private void TryInstallWindowHooks()
     {
         if (_windowHooksInstalled) return;
