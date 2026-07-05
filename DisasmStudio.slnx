@@ -3,6 +3,8 @@
     <Project Path="src/DisasmStudio.Core/DisasmStudio.Core.csproj" />
     <Project Path="src/DisasmStudio.Debug/DisasmStudio.Debug.csproj" />
     <Project Path="src/DisasmStudio.Managed/DisasmStudio.Managed.csproj" />
+    <Project Path="src/DisasmStudio.ManagedDebug/DisasmStudio.ManagedDebug.csproj" />
+    <Project Path="src/DisasmStudio.ManagedDbgHost/DisasmStudio.ManagedDbgHost.csproj" />
     <Project Path="src/DisasmStudio.Wpf/DisasmStudio.Wpf.csproj" />
   </Folder>
 </Solution>

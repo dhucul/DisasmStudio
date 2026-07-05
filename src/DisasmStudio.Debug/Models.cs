@@ -44,6 +44,8 @@ public sealed record FaultSnapshot(uint Code, ulong Address, bool FirstChance,
         0xC0000409 => "STACK_BUFFER_OVERRUN",
         0xC0000025 => "NONCONTINUABLE_EXCEPTION",
         0xC0000420 => "ASSERTION_FAILURE",
+        0x04242420 => "CLR debugger notification",
+        0xE0434352 => "CLR/.NET exception",
         _ => $"0x{Code:X8}",
     };
 

@@ -22,6 +22,12 @@
     <ProjectReference Include="..\DisasmStudio.Core\DisasmStudio.Core.csproj" />
     <ProjectReference Include="..\DisasmStudio.Debug\DisasmStudio.Debug.csproj" />
     <ProjectReference Include="..\DisasmStudio.Managed\DisasmStudio.Managed.csproj" />
+    <!-- IPC contract with the out-of-process managed-debug host. -->
+    <ProjectReference Include="..\DisasmStudio.ManagedDebug\DisasmStudio.ManagedDebug.csproj" />
+    <!-- Build the host alongside the app (separate process, own ClrDebug/dbgshim deps) but don't link it.
+         At runtime it is located next to the app (deploy) or in its sibling bin folder (dev) — see
+         ManagedDebugHostLocator. Phase 5 adds the per-RID (win-x86/win-x64) publish + copy for release. -->
+    <ProjectReference Include="..\DisasmStudio.ManagedDbgHost\DisasmStudio.ManagedDbgHost.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

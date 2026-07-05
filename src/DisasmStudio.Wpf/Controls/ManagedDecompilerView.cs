@@ -37,6 +37,91 @@ public sealed class ManagedDecompilerView : Grid
     private long _top;
     private long _caret = -1;
 
+    // ---- source-level debugging ----
+    private ManagedLineMap _map = ManagedLineMap.Empty;   // line ↔ (methodToken, ilOffset) for the shown node
+    private int _currentLine = -1;                        // 1-based current-IP line while stopped (or -1)
+    private readonly HashSet<int> _bpLines = [];          // 1-based lines that currently carry a breakpoint
+    private IReadOnlyCollection<(int Token, int IlOffset)> _activeBps = [];
+    private (int Token, int Il)? _pendingStop;            // a stop to highlight once the target method's C# is rebuilt
+    private int _pendingStopSeq = -1;                     // the build seq the pending stop was issued for
+    private int _renderedSeq = -1;                        // the build seq currently rendered (map is live)
+
+    /// <summary>Raised when the user toggles a breakpoint on a mapped C# line — carries the (methodToken,
+    /// ilOffset) the debug host uses (the module is the loaded assembly's, known to the window).</summary>
+    public event Action<(int Token, int IlOffset)>? BreakpointToggleRequested;
+
+    /// <summary>Tell the view which (methodToken, ilOffset) breakpoints are active so it can dot their lines.</summary>
+    public void SetActiveBreakpoints(IReadOnlyCollection<(int Token, int IlOffset)> bps)
+    {
+        _activeBps = bps;
+        RecomputeBreakpointLines();
+        _surface.InvalidateVisual();
+    }
+
+    /// <summary>Highlight the current stopped line (1-based; -1 clears) and scroll it into view.</summary>
+    public void SetCurrentLine(int line)
+    {
+        _currentLine = line;
+        if (line >= 1) MoveCaret(line - 1);   // scrolls the line into view + repaints
+        else _surface.InvalidateVisual();
+    }
+
+    /// <summary>True while the shown C# has IL mappings (i.e. breakpoints can be set on it).</summary>
+    public bool HasLineMap => _map.HasMappings;
+
+    /// <summary>Highlight the stop location in the CURRENT view (no navigation): if the stopped method is the
+    /// one shown its C# line is highlighted, else the current-line marker is cleared. Used as a fallback when
+    /// the stopped method has no tree node (e.g. a compiler-generated method).</summary>
+    public void ShowStop(int token, int ilOffset)
+        => SetCurrentLine(_map.LineFor(token, ilOffset) is int ln ? ln : -1);
+
+    /// <summary>Navigate to <paramref name="node"/> (the stopped/selected method), rebuild its C#, and highlight
+    /// the (token, ilOffset) line once ready. Switches to C# mode (the map only exists there).</summary>
+    public void ShowMethodForStop(ManagedTypeNode node, int token, int ilOffset)
+    {
+        _pendingStop = (token, ilOffset);
+        if (ReferenceEquals(_node, node) && !_il)
+        {
+            // Already showing this method. Apply now only if its map is actually rendered; if a rebuild is still
+            // in flight, let that build's completion apply it (against the correct map).
+            _pendingStopSeq = _buildSeq;
+            if (_buildSeq == _renderedSeq) ApplyPendingStop();
+            return;
+        }
+        _node = node;
+        _il = false;
+        UpdateModeButtons();
+        Rebuild();                     // async — its completion applies the pending stop
+        _pendingStopSeq = _buildSeq;   // only the build we just started (its seq) honors this stop
+    }
+
+    /// <summary>Consume the pending stop: highlight its line only if the CURRENT build is the one the stop was
+    /// issued for (so a stale stop from a superseded/preempted build can never highlight a later, unrelated view).</summary>
+    private void ApplyPendingStop()
+    {
+        if (_pendingStop is not { } ps) return;
+        _pendingStop = null;
+        if (_buildSeq == _pendingStopSeq && _map.LineFor(ps.Token, ps.Il) is int ln)
+            SetCurrentLine(ln);
+    }
+
+    /// <summary>The IL range to step over the current C# statement (for line-level stepping), or null.</summary>
+    public (int Start, int End)? CurrentStatementStepRange(int token, int ilOffset)
+        => _map.StatementStepRange(token, ilOffset);
+
+    private void RecomputeBreakpointLines()
+    {
+        _bpLines.Clear();
+        foreach (var (tok, il) in _activeBps)
+            if (_map.LineFor(tok, il) is int ln) _bpLines.Add(ln);
+    }
+
+    private void ToggleBreakpointAtLine(int line1Based)
+    {
+        if (line1Based < 1) return;
+        if (_map.Resolve(line1Based) is { } target) BreakpointToggleRequested?.Invoke(target);
+    }
+
     private readonly Typeface _typeface =
         new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 13.0;
@@ -164,6 +249,9 @@ public sealed class ManagedDecompilerView : Grid
         _node = null;
         _tree.Items.Clear();
         _lines = [];
+        _map = ManagedLineMap.Empty;
+        _bpLines.Clear();
+        _currentLine = -1;
         _top = 0;
         _caret = -1;
         _path.Text = "";
@@ -276,20 +364,32 @@ public sealed class ManagedDecompilerView : Grid
         int seq = ++_buildSeq;
         _lines = [new DecompLine(0, [new AsmToken(_il ? "// disassembling…" : "// decompiling…", AsmTokenKind.Comment)], 0)];
         _top = 0; _caret = -1;
+        _currentLine = -1;   // the stop highlight is only valid for the method it was set in (re-applied by ApplyPendingStop)
         ConfigureScroll();
         _surface.InvalidateVisual();
 
         bool il = _il;
-        Task.Run(() => il ? asm.DecompileIl(node) : asm.DecompileCSharp(node)).ContinueWith(t =>
+        Task.Run(() =>
         {
-            var lines = t.IsCompletedSuccessfully ? t.Result : [new DecompLine(0, [new AsmToken("// failed", AsmTokenKind.Comment)], 0)];
+            if (il) return (Lines: asm.DecompileIl(node), Map: ManagedLineMap.Empty);
+            var (csLines, csMap) = asm.DecompileCSharpForDebug(node);
+            return (Lines: csLines, Map: csMap);
+        }).ContinueWith(t =>
+        {
+            var result = t.IsCompletedSuccessfully
+                ? t.Result
+                : (Lines: (IReadOnlyList<DecompLine>)[new DecompLine(0, [new AsmToken("// failed", AsmTokenKind.Comment)], 0)], Map: ManagedLineMap.Empty);
             Dispatcher.Invoke(() =>
             {
                 if (seq != _buildSeq) return;   // a newer selection won
-                _lines = lines;
+                _lines = result.Lines;
+                _map = result.Map;
+                _renderedSeq = seq;   // this build's map is now live
+                RecomputeBreakpointLines();
                 _top = 0; _caret = -1;
                 ConfigureScroll();
                 _surface.InvalidateVisual();
+                ApplyPendingStop();   // if this rebuild was for a stop, highlight + scroll to the line now
             });
         });
     }
@@ -305,6 +405,7 @@ public sealed class ManagedDecompilerView : Grid
     // ---- geometry / rendering (mirrors DecompilerView, minus the address gutter) ----
 
     private int VisibleRows => Math.Max(1, (int)(_surface.ActualHeight / _rowHeight));
+    private const double GutterW = 16;    // left strip for breakpoint dots (click to toggle)
     private const double ContentX = 8;
     private const int IndentChars = 4;
 
@@ -357,11 +458,16 @@ public sealed class ManagedDecompilerView : Grid
             if (idx >= _lines.Count) break;
             double y = r * _rowHeight;
             var line = _lines[(int)idx];
+            int lineNo = (int)idx + 1;   // 1-based, matches sequence-point lines
 
             if (idx == _caret)
                 dc.DrawRectangle(SyntaxTheme.CurrentLine, null, new Rect(0, y, width, _rowHeight));
+            if (lineNo == _currentLine)   // the stopped line (current IP)
+                dc.DrawRectangle(SyntaxTheme.CurrentIp, null, new Rect(0, y, width, _rowHeight));
+            if (_bpLines.Contains(lineNo))
+                dc.DrawEllipse(SyntaxTheme.BreakpointDot, null, new Point(GutterW / 2, y + _rowHeight / 2), 4, 4);
 
-            double x = ContentX + line.Indent * IndentChars * _charWidth;
+            double x = GutterW + ContentX + line.Indent * IndentChars * _charWidth;
             foreach (var tok in line.Tokens)
                 x = Draw(dc, tok.Text, x, y, SyntaxTheme.BrushFor(tok.Kind), dpi);
         }
@@ -387,9 +493,15 @@ public sealed class ManagedDecompilerView : Grid
         protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
         {
             Focus();
-            _owner.MoveCaret(_owner._top + (long)(e.GetPosition(this).Y / _owner._rowHeight));
+            var p = e.GetPosition(this);
+            long lineIdx = _owner._top + (long)(p.Y / _owner._rowHeight);
+            _owner.MoveCaret(lineIdx);
+            if (p.X < GutterW) _owner.ToggleBreakpointAtLine((int)lineIdx + 1);   // click the gutter to toggle a breakpoint
             e.Handled = true;
         }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+            => Cursor = e.GetPosition(this).X < GutterW ? Cursors.Hand : Cursors.Arrow;
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
@@ -399,6 +511,7 @@ public sealed class ManagedDecompilerView : Grid
                 case Key.Up: _owner.MoveCaret(_owner._caret - 1); break;
                 case Key.PageDown: _owner.MoveCaret(_owner._caret + _owner.VisibleRows); break;
                 case Key.PageUp: _owner.MoveCaret(_owner._caret - _owner.VisibleRows); break;
+                case Key.F2 or Key.F9: if (_owner._caret >= 0) _owner.ToggleBreakpointAtLine((int)_owner._caret + 1); break;
                 default: return;
             }
             e.Handled = true;

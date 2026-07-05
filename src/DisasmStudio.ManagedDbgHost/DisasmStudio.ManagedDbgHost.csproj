@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>DisasmStudio.ManagedDbgHost</AssemblyName>
+    <RollForward>LatestMajor</RollForward>
+    <!-- Both RIDs' dbgshim.dll are copied to runtimes/win-{x86,x64}/native; the resolver picks by
+         process architecture. Published per-RID (win-x86 / win-x64) so the host bitness matches the target. -->
+    <NoWarn>$(NoWarn);NU1901;NU1902;NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DisasmStudio.ManagedDebug\DisasmStudio.ManagedDebug.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ClrDebug" Version="0.4.1" />
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" Version="9.0.661903" />
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x86" Version="9.0.661903" />
+  </ItemGroup>
+
+</Project>

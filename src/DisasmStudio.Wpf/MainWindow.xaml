@@ -87,6 +87,12 @@
             <ctl:DebugPanel x:Name="Debug" />
         </Border>
 
+        <!-- Managed (.NET source-level) debugger panel: call stack + locals, shown during a managed session -->
+        <Border x:Name="ManagedDebugDock" DockPanel.Dock="Bottom" Height="200" Visibility="Collapsed"
+                Background="{StaticResource Surface}" BorderBrush="{StaticResource Outline}" BorderThickness="0,1,0,0">
+            <ctl:ManagedDebugPanel x:Name="ManagedDebug" />
+        </Border>
+
         <!-- Main 3-pane layout -->
         <Grid>
             <Grid.ColumnDefinitions>

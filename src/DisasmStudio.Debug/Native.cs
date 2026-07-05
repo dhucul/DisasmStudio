@@ -35,6 +35,13 @@ internal static class Native
     public const uint STATUS_WX86_SINGLE_STEP = 0x4000001E;
     public const uint EXCEPTION_ACCESS_VIOLATION = 0xC0000005;
     public const uint STATUS_GUARD_PAGE_VIOLATION = 0x80000001;
+    // The CLR's debugger-notification exception: a benign first-chance code the runtime raises (via
+    // RaiseException) purely to tell an attached native debugger about managed events (module/class loads).
+    // It re-fires constantly while a .NET process runs under a debugger — swallow it, never break.
+    public const uint DBG_COMPLUS_NOTIFICATION = 0x04242420;
+    // A genuine managed (.NET) exception. Like a C++ throw it is usually handled inside the runtime, so by
+    // default don't break on first chance (see ExceptionFilter.CreateDefault), only when it comes back unhandled.
+    public const uint EXCEPTION_COMPLUS = 0xE0434352;
 
     // ---- continue status ----
     public const uint DBG_CONTINUE = 0x00010002;

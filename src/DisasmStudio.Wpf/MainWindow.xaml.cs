@@ -19,6 +19,7 @@ using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug;
 using DisasmStudio.Managed;
+using DisasmStudio.ManagedDebug;
 using Architecture = DisasmStudio.Core.Formats.Architecture;   // disambiguate from System.Runtime.InteropServices.Architecture
 using Iced.Intel;
 using DisasmStudio.Wpf.Controls;
@@ -46,6 +47,12 @@ public partial class MainWindow : Window
     private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
 
     private DebugSession? _dbg;
+    // Managed (.NET source-level) debugging: a separate out-of-process ICorDebug session. Breakpoints are kept
+    // by (method token + IL offset) rather than address, and persist across the session; they are sent to the
+    // host on launch (as pending) and live while stopped.
+    private ManagedDebugSession? _mdbg;
+    private readonly Dictionary<int, BpLoc> _managedBps = [];   // id -> source breakpoint (module + method token + IL offset)
+    private int _nextManagedBpId = 1;
     // Breakpoints toggled on the static listing before (or between) debug runs, kept as static VAs. They are
     // armed at the first stop of each session (rebased by the live ASLR slide) and mirror live toggles, so the
     // set persists across Run / Restart. The gutter reads it whenever the view isn't showing live addresses.
@@ -131,6 +138,14 @@ public partial class MainWindow : Window
         // so `va - LiveSlide` maps the shown (live) address back to it during a run and matches directly after.
         Linear.IsInstrHit = va => _coveredInstrs.Count > 0 && _coveredInstrs.Contains(va - LiveSlide);
         Graph.IsInstrHit = Linear.IsInstrHit;   // the graph shares the same trace overlay (same VA space)
+        // The graph shares the linear view's breakpoint handler and predicates (same VA space), so a breakpoint
+        // set from either view shows in both.
+        Graph.BreakpointToggleRequested += OnBreakpointToggle;
+        Graph.IsBreakpointAt = Linear.IsBreakpointAt;
+        Graph.IsHardwareBreakpointAt = Linear.IsHardwareBreakpointAt;
+        // Managed (.NET) source-level breakpoints: toggle from the C# view, navigate the call stack.
+        Managed.BreakpointToggleRequested += OnManagedBreakpointToggle;
+        ManagedDebug.FrameActivated += OnManagedFrameActivated;
         Linear.RunToCursorRequested += va => _dbg?.RunToCursor(va);
         Linear.RunToReturnRequested += () => OnRunToReturn(this, new RoutedEventArgs());
         Linear.CaptureFunctionRequested += CaptureFunctionAt;
@@ -259,9 +274,13 @@ public partial class MainWindow : Window
     // ---- debugger ----
     private void OnDebugRun(object sender, RoutedEventArgs e)
     {
-        if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return; }   // continue only from a stop (else it skips the next stop)
+        if (_mdbg is not null) { if (_mdbg.IsStopped) _mdbg.Go(); return; }   // managed: continue from a stop
+        if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return; }   // native: continue only from a stop (else it skips the next stop)
         if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        // A .NET assembly → source-level (C# line) debugging via the out-of-process ICorDebug host, not the
+        // native Win32 debugger. The loaded image is the managed module (its .exe apphost is what we launch).
+        if (_managed is not null) { StartManagedDebug(); return; }
         if (_image.IsDll)
         {
             // A DLL can't be launched directly — host it in an EXE (rundll32 by default, or a custom host)
@@ -288,7 +307,7 @@ public partial class MainWindow : Window
 
     private void OnAttach(object sender, RoutedEventArgs e)
     {
-        if (_dbg is not null) { MessageBox.Show(this, "A debug session is already active.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_dbg is not null || _mdbg is not null) { MessageBox.Show(this, "A debug session is already active.", "Attach", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (NotForArm("Attach")) return;
         // No file required: with a binary open we rebase its analysis onto the process; without one we analyze
         // the process's own image after attaching. The bitness hint is 0 ("unknown") when nothing is open.
@@ -381,6 +400,7 @@ public partial class MainWindow : Window
         else if (!_pendingBreakpoints.Remove(va))         // pre-run / before the first stop: va is a static VA
             _pendingBreakpoints[va] = new BpDef();
         Linear.Refresh();
+        Graph.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
     }
@@ -402,6 +422,7 @@ public partial class MainWindow : Window
             d.Engine.ConfigureBreakpoint(va, def.Condition, def.HitMode, def.HitTarget, def.Enabled);
         }
         Linear.Refresh();
+        Graph.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
     }
@@ -417,6 +438,7 @@ public partial class MainWindow : Window
         if (_dbgViewLive && _dbg is { } d && d.HasBreakpoint(va))
             d.Engine.ConfigureBreakpoint(va, updated.Condition, updated.HitMode, updated.HitTarget, updated.Enabled);
         Linear.Refresh();
+        Graph.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
     }
@@ -584,9 +606,18 @@ public partial class MainWindow : Window
 
     // Stepping is only valid from a stop; ignore it (button or key) while the debuggee is running, where it
     // would queue a resume that the loop consumes at the next stop — silently skipping that stop.
-    private void OnStepInto(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepInto(); }
-    private void OnStepOver(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOver(); }
-    private void OnStepOut(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.StepOut(); }
+    private void OnStepInto(object sender, RoutedEventArgs e) { if (_mdbg is { IsStopped: true }) { _mdbg.StepInto(ManagedStepRange()); return; } if (_dbg is { IsStopped: true }) _dbg.StepInto(); }
+    private void OnStepOver(object sender, RoutedEventArgs e) { if (_mdbg is { IsStopped: true }) { _mdbg.StepOver(ManagedStepRange()); return; } if (_dbg is { IsStopped: true }) _dbg.StepOver(); }
+    private void OnStepOut(object sender, RoutedEventArgs e) { if (_mdbg is { IsStopped: true }) { _mdbg.StepOut(); return; } if (_dbg is { IsStopped: true }) _dbg.StepOut(); }
+
+    /// <summary>The current C# statement's IL step range (from the shown method's map), for line-level stepping.</summary>
+    private int[]? ManagedStepRange()
+    {
+        if (_mdbg?.LastStop?.Frames is { Length: > 0 } f
+            && Managed.CurrentStatementStepRange(f[0].Token, f[0].IlOffset) is { } r)
+            return [r.Start, r.End];
+        return null;
+    }
 
     /// <summary>Continue until the current function returns, stopping ON its ret (calls run at full speed). Plants
     /// one-shot breakpoints on every ret of the function the IP is in (via its CFG) and runs to whichever is hit
@@ -693,10 +724,127 @@ public partial class MainWindow : Window
     }
 
     private void StopCoverageTimer() => _coverageTimer?.Stop();
-    private void OnDebugPause(object sender, RoutedEventArgs e) => _dbg?.Pause();
-    private void OnDebugStop(object sender, RoutedEventArgs e) => _dbg?.Stop();
+    private void OnDebugPause(object sender, RoutedEventArgs e) { if (_mdbg is not null) { _mdbg.Pause(); return; } _dbg?.Pause(); }
+    private void OnDebugStop(object sender, RoutedEventArgs e) { if (_mdbg is not null) { EndManagedDebug(); return; } _dbg?.Stop(); }
     // Detach keeps the debuggee running; only valid from a stop (so breakpoints/hooks can be cleanly removed).
-    private void OnDebugDetach(object sender, RoutedEventArgs e) { if (_dbg is { IsStopped: true }) _dbg.Detach(); }
+    private void OnDebugDetach(object sender, RoutedEventArgs e) { if (_mdbg is not null) { _mdbg.Detach(); EndManagedDebug(); return; } if (_dbg is { IsStopped: true }) _dbg.Detach(); }
+
+    // ---- managed (.NET) source-level debugging ----
+
+    /// <summary>Toggle a source breakpoint from the C# view, keyed by (method token, IL offset). Persists across
+    /// the session; applied live if a managed session is running.</summary>
+    private void OnManagedBreakpointToggle((int Token, int IlOffset) t)
+    {
+        string module = _image is not null ? Path.GetFileName(_image.FilePath) : "";
+        var existing = _managedBps.FirstOrDefault(kv => kv.Value.Token == t.Token && kv.Value.IlOffset == t.IlOffset);
+        if (existing.Value is not null)
+        {
+            _managedBps.Remove(existing.Key);
+            _mdbg?.RemoveBreakpoint(existing.Key);
+        }
+        else
+        {
+            int id = _nextManagedBpId++;
+            var bp = new BpLoc(module, t.Token, t.IlOffset, id);
+            _managedBps[id] = bp;
+            _mdbg?.SetBreakpoint(bp);
+        }
+        Managed.SetActiveBreakpoints(_managedBps.Values.Select(b => (b.Token, b.IlOffset)).ToList());
+    }
+
+    private void StartManagedDebug()
+    {
+        if (_image is null || _managed is null) return;
+        string dll = _image.FilePath;
+        string module = Path.GetFileName(dll);
+        string exe = Path.ChangeExtension(dll, ".exe");
+
+        // Launch the sibling apphost .exe if present (its PE machine is the real bitness); else run via `dotnet <dll>`.
+        string target; string? args = null; int bitness;
+        if (File.Exists(exe)) { target = exe; bitness = PeBitness(exe) ?? 64; }
+        else { target = "dotnet"; args = $"\"{dll}\""; bitness = 64; }
+
+        string? hostPath = ManagedDebugHostLocator.Find(bitness);
+        if (hostPath is null)
+        {
+            MessageBox.Show(this,
+                $"The {(bitness == 32 ? "32-bit (win-x86)" : "64-bit (win-x64)")} managed-debug host was not found.\n\n" +
+                "Build/publish DisasmStudio.ManagedDbgHost for that architecture (mdbghost\\win-x86 | win-x64 next to the app).",
+                "Managed debug", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        // Re-key breakpoints to the launch module (they may have been created before a run).
+        var rekeyed = _managedBps.Values.Select(b => b with { Module = module }).ToList();
+        _managedBps.Clear();
+        foreach (var b in rekeyed) _managedBps[b.Id] = b;
+
+        var mdbg = new ManagedDebugSession(Dispatcher, hostPath);
+        mdbg.Launched += () => StatusText.Text = $"Managed debug: running {module}…";
+        mdbg.Stopped += OnManagedStopped;
+        mdbg.Exited += OnManagedExited;
+        mdbg.Error += msg => StatusText.Text = "Managed debug: " + msg;
+        _mdbg = mdbg;
+
+        ManagedDebugDock.Visibility = Visibility.Visible;
+        ManagedDebug.Clear();
+        StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = DetachBtn.IsEnabled = true;
+        CenterTabs.SelectedItem = ManagedTab;
+        Managed.SetActiveBreakpoints(_managedBps.Values.Select(b => (b.Token, b.IlOffset)).ToList());
+
+        mdbg.Launch(target, args, Path.GetDirectoryName(dll), _managedBps.Values.ToList());
+    }
+
+    private void OnManagedStopped(MdbgEvent stop)
+    {
+        string where = stop.Frames is { Length: > 0 } fr ? _managed?.MethodName(fr[0].Token) ?? "" : "";
+        StatusText.Text = $"⛔ Managed stop ({stop.Reason})  {where}";
+        if (_managed is not null) ManagedDebug.Show(stop, _managed.MethodName);
+        if (stop.Frames is { Length: > 0 } f) NavigateManagedTo(f[0].Token, f[0].IlOffset);
+    }
+
+    /// <summary>Show a frame's method (navigating to it in the C# view if it isn't the one shown) and highlight
+    /// its line. Falls back to an in-place highlight for a method with no tree node (compiler-generated).</summary>
+    private void NavigateManagedTo(int token, int ilOffset)
+    {
+        if (_managed?.FindNode(token) is { } node) Managed.ShowMethodForStop(node, token, ilOffset);
+        else Managed.ShowStop(token, ilOffset);
+    }
+
+    private void OnManagedExited(int code)
+    {
+        StatusText.Text = $"Managed target exited (code {code}).";
+        EndManagedDebug();
+    }
+
+    private void EndManagedDebug()
+    {
+        Managed.SetCurrentLine(-1);
+        ManagedDebug.Clear();
+        ManagedDebugDock.Visibility = Visibility.Collapsed;
+        StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = DetachBtn.IsEnabled = false;
+        var m = _mdbg; _mdbg = null;
+        try { m?.Dispose(); } catch { }
+    }
+
+    /// <summary>Double-click a call-stack frame → navigate to its method and highlight its C# line.</summary>
+    private void OnManagedFrameActivated(int index)
+    {
+        if (_mdbg?.LastStop?.Frames is { } frames && index >= 0 && index < frames.Length)
+            NavigateManagedTo(frames[index].Token, frames[index].IlOffset);
+    }
+
+    /// <summary>PE machine bitness of a file: 64 (PE32+) or 32 (PE32), or null if unreadable.</summary>
+    private static int? PeBitness(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            using var pe = new System.Reflection.PortableExecutable.PEReader(fs);
+            return pe.PEHeaders.PEHeader?.Magic == System.Reflection.PortableExecutable.PEMagic.PE32Plus ? 64 : 32;
+        }
+        catch { return null; }
+    }
 
     // The theme's MenuItem template is flat (no submenu popup), so drop the Help items via the button's
     // ContextMenu — opened on left-click, placed below the button.
@@ -1698,6 +1846,7 @@ public partial class MainWindow : Window
     {
         base.OnClosed(e);
         _cts?.Cancel();
+        try { _mdbg?.Dispose(); } catch { }   // stop the out-of-process managed-debug host (+ its debuggee) cleanly
         _managed?.Dispose();
         (_image as IDisposable)?.Dispose();
         (_savedResult?.Image as IDisposable)?.Dispose();   // static image held across a debug session

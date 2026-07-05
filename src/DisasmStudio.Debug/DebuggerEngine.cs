@@ -540,6 +540,13 @@ public sealed partial class DebuggerEngine
         // no-debugger behaviour, where closing a bad handle is silent.
         if (HideFromDebugger && code == 0xC0000008) { cont = Native.DBG_CONTINUE; return false; }
 
+        // The CLR's debugger-notification exception (raised by every .NET process that runs under a native
+        // debugger, on every managed module/class load). It carries no fault — it exists only to notify a
+        // managed-aware debugger, which we aren't. Swallow it (continue as handled) and never surface it, or a
+        // .NET target halts on the first one and can't run. Handled here, before the generic filter, so the fix
+        // holds regardless of any persisted exception policy.
+        if (code == Native.DBG_COMPLUS_NOTIFICATION) { cont = Native.DBG_CONTINUE; return false; }
+
         // Any other exception (AV, C++ EH, etc.). The filter decides whether to break and whether to pass it
         // to the debuggee's own handler (DBG_EXCEPTION_NOT_HANDLED) or swallow it (DBG_CONTINUE) on resume.
         bool firstChance = ev.Exception.dwFirstChance != 0;

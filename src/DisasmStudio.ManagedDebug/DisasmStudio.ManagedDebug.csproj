@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    Shared IPC contract between the WPF app and the out-of-process managed-debug host
+    (DisasmStudio.ManagedDbgHost). Plain DTOs only — no ClrDebug/dbgshim dependency here, so the
+    WPF process never loads the CLR debugging API (that lives entirely in the bitness-matched host).
+  -->
+
+</Project>

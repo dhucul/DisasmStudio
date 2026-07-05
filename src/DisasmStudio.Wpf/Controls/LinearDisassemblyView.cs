@@ -793,7 +793,7 @@ public sealed class LinearDisassemblyView : Grid
         // out when there's nothing to follow — so it's clear up front whether the action will do anything.
         var patch = new MenuItem { Header = "Patch instruction…" };
         patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
-        var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2" };
+        var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2 / F9" };
         toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
         var hwBp = new MenuItem { Header = "Hardware breakpoint…" };
         hwBp.Click += (_, _) => { if (CaretVa != 0) HardwareBreakpointRequested?.Invoke(CaretVa); };
@@ -912,7 +912,7 @@ public sealed class LinearDisassemblyView : Grid
                 case Key.C when ctrl: _owner.CopySelection(); break;
                 case Key.A when ctrl: _owner.SelectAll(); break;
                 case Key.G when ctrl: _owner.GoToRequested?.Invoke(); break;
-                case Key.F2: if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
+                case Key.F2 or Key.F9: if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
                 default: return;
             }
             e.Handled = true;

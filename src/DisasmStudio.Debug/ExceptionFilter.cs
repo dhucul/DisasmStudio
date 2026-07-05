@@ -64,6 +64,13 @@ public sealed class ExceptionFilter
         f.Rules.Add(new ExceptionRule { CodeLow = 0x4001000A, CodeHigh = 0x4001000A, Name = "DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)", BreakFirstChance = false, BreakSecondChance = false });
         f.Rules.Add(new ExceptionRule { CodeLow = 0x406D1388, CodeHigh = 0x406D1388, Name = "MS C++ set thread name", BreakFirstChance = false, BreakSecondChance = false });
         f.Rules.Add(new ExceptionRule { CodeLow = 0xE06D7363, CodeHigh = 0xE06D7363, Name = "MS C++ exception (throw)", BreakFirstChance = false, BreakSecondChance = true });
+        // A .NET managed exception behaves like a C++ throw: usually handled inside the CLR, so don't break on
+        // first chance (a running .NET app raises these routinely), only when it comes back unhandled.
+        f.Rules.Add(new ExceptionRule { CodeLow = 0xE0434352, CodeHigh = 0xE0434352, Name = "CLR/.NET exception", BreakFirstChance = false, BreakSecondChance = true });
+        // CLR debugger-notification exception: pure noise a .NET process raises under a debugger. The engine
+        // swallows it before consulting the filter (DebuggerEngine.HandleException); this row is here so it also
+        // shows in the exceptions dialog as a known, never-break code.
+        f.Rules.Add(new ExceptionRule { CodeLow = 0x04242420, CodeHigh = 0x04242420, Name = "CLR debugger notification", BreakFirstChance = false, BreakSecondChance = false });
         return f;
     }
 }

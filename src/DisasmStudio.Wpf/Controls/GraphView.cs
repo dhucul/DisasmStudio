@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
@@ -28,6 +29,8 @@ public sealed class GraphView : FrameworkElement
     private bool _dragging;
     private IInstructionDecoder? _decoder;   // live decoder while debugging
     private ulong _ipVa;                      // debuggee's current instruction
+    private ulong _selVa;                     // last-clicked instruction (target of F2/F9 toggle)
+    private ulong _menuVa;                    // instruction under the last right-click (context-menu target)
 
     // A view change (fit-to-graph in disassembler mode, or focus-on-current-block in debugger mode) is
     // applied once the graph has a real size — the tab may not be laid out when it's requested.
@@ -46,10 +49,17 @@ public sealed class GraphView : FrameworkElement
     private const double HeaderH = 18;
 
     public event Action<ulong>? BlockSelected;
+    /// <summary>Toggle a software breakpoint at the address (gutter dot, right-click → Toggle breakpoint, or F2/F9).
+    /// Wired to the same handler as the linear view so both share one breakpoint set.</summary>
+    public event Action<ulong>? BreakpointToggleRequested;
 
     /// <summary>Predicate the renderer uses to tint executed (traced) instruction rows — mirrors the
     /// linear view's coverage overlay so the graph shows the same trace highlights.</summary>
     public Func<ulong, bool>? IsInstrHit { get; set; }
+    /// <summary>Predicate the renderer uses to mark instruction rows that have a breakpoint.</summary>
+    public Func<ulong, bool>? IsBreakpointAt { get; set; }
+    /// <summary>Predicate the renderer uses to colour a hardware breakpoint's dot differently from a software one.</summary>
+    public Func<ulong, bool>? IsHardwareBreakpointAt { get; set; }
 
     /// <summary>Repaint without rebuilding layout — e.g. when the coverage/trace set grows during a run.</summary>
     public void Refresh() => InvalidateVisual();
@@ -60,7 +70,18 @@ public sealed class GraphView : FrameworkElement
     {
         ClipToBounds = true;
         Focusable = true;
+        BuildContextMenu();
         MeasureFont();
+    }
+
+    private void BuildContextMenu()
+    {
+        var menu = new ContextMenu();
+        var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2 / F9" };
+        toggleBp.Click += (_, _) => { if (_menuVa != 0) BreakpointToggleRequested?.Invoke(_menuVa); };
+        menu.Opened += (_, _) => toggleBp.IsEnabled = _menuVa != 0;
+        menu.Items.Add(toggleBp);
+        ContextMenu = menu;
     }
 
     public void SetFunction(AnalysisResult result, Function function, IInstructionDecoder? decoder = null, bool autoFit = true)
@@ -74,6 +95,8 @@ public sealed class GraphView : FrameworkElement
         _blocks.Clear();
         _byStart.Clear();
         _lines.Clear();
+        _selVa = 0;
+        _menuVa = 0;
         _blocks.AddRange(function.Blocks);
         foreach (var b in _blocks) _byStart[b.Start] = b;
 
@@ -117,6 +140,8 @@ public sealed class GraphView : FrameworkElement
         _function = null;
         _decoder = null;
         _ipVa = 0;
+        _selVa = 0;
+        _menuVa = 0;
         _pend = Pend.None;   // drop any deferred fit/focus so it can't fire against empty blocks
         _blocks.Clear();
         _byStart.Clear();
@@ -300,6 +325,14 @@ public sealed class GraphView : FrameworkElement
             // invisible over the block's lighter surface, so the outline makes the row unmistakable.
             if (_ipVa != 0 && line.Va == _ipVa)
                 dc.DrawRectangle(SyntaxTheme.CurrentIpGraph, SyntaxTheme.CurrentIpGraphOutline, row);
+            else if (_selVa != 0 && line.Va == _selVa)   // selected instruction (F2/F9 target) — don't cover the IP
+                dc.DrawRectangle(SyntaxTheme.Selection, null, row);
+            // Breakpoint marker in the block's left padding (the graph has no gutter column).
+            if (IsBreakpointAt?.Invoke(line.Va) == true)
+            {
+                var dot = IsHardwareBreakpointAt?.Invoke(line.Va) == true ? SyntaxTheme.HwBreakpointDot : SyntaxTheme.BreakpointDot;
+                dc.DrawEllipse(dot, null, new Point(b.X + 4, y + _rowHeight / 2), 3, 3);
+            }
             double x = b.X + Pad;
             // Address prefix.
             int split = line.Text.IndexOf("  ", StringComparison.Ordinal);
@@ -323,6 +356,21 @@ public sealed class GraphView : FrameworkElement
 
     // ---- interaction ----
     private Point ToGraph(Point screen) => new((screen.X - _offset.X) / _scale, (screen.Y - _offset.Y) / _scale);
+
+    /// <summary>The instruction VA under a screen point (inside a block's instruction rows), or 0 if none.</summary>
+    private ulong InstrAt(Point screen)
+    {
+        var g = ToGraph(screen);
+        foreach (var b in _blocks)
+        {
+            if (g.X < b.X || g.X > b.X + b.Width || g.Y < b.Y || g.Y > b.Y + b.Height) continue;
+            if (g.Y < b.Y + HeaderH + 1) return 0;   // click is in the block header, not on an instruction row
+            var lines = _lines[b.Start];
+            int idx = (int)((g.Y - (b.Y + HeaderH + 1)) / _rowHeight);
+            return idx >= 0 && idx < lines.Count ? lines[idx].Va : 0;
+        }
+        return 0;
+    }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
@@ -350,9 +398,29 @@ public sealed class GraphView : FrameworkElement
         CaptureMouse();
 
         var g = ToGraph(_lastDrag);
+        _selVa = InstrAt(_lastDrag);   // remember the instruction so F2/F9 can toggle a breakpoint on it
         foreach (var b in _blocks)
             if (g.X >= b.X && g.X <= b.X + b.Width && g.Y >= b.Y && g.Y <= b.Y + b.Height)
             { BlockSelected?.Invoke(b.Start); break; }
+        InvalidateVisual();   // reflect the new selection highlight
+    }
+
+    protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
+    {
+        // Record the instruction under the cursor so the (auto-shown) context menu toggles a breakpoint there.
+        // Don't set e.Handled — WPF still needs to open the ContextMenu on right-button-up.
+        Focus();
+        _menuVa = InstrAt(e.GetPosition(this));
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.F2 or Key.F9: if (_selVa != 0) BreakpointToggleRequested?.Invoke(_selVa); break;
+            default: return;
+        }
+        e.Handled = true;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
