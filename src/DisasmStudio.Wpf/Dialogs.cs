@@ -48,6 +48,7 @@ internal static class Dialogs
         bits.Items.Add("ARM (32-bit)");                // 3
         bits.Items.Add("Thumb (16/32-bit)");           // 4
         bits.Items.Add("ARM64 (AArch64)");             // 5
+        bits.Items.Add("8051 / MCS-51 (8-bit)");       // 6
         // An ARM/Thumb guess (from a byte-frequency sniff) wins the default; else the firmware bitness; else x64.
         bits.SelectedIndex = suggestedArch switch
         {
@@ -104,6 +105,7 @@ internal static class Dialogs
             3 => (32, Architecture.Arm),
             4 => (32, Architecture.Thumb),
             5 => (64, Architecture.Arm64),
+            6 => (16, Architecture.I8051),
             _ => (64, Architecture.X64),
         };
         ulong baseVa = ParseHex(baseBox.Text) ?? (bitness == 64 ? 0x140000000UL : 0x400000UL);

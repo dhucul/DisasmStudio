@@ -26,9 +26,9 @@ public static class AnalysisEngine
     public static AnalysisResult Analyze(IBinaryImage image, AnalysisOptions? options = null,
         IProgress<string>? progress = null, CancellationToken token = default)
     {
-        // ARM-family images (raw firmware opened as ARM/Thumb/AArch64) use a self-contained Capstone
-        // pipeline; the x86/x64 Iced passes below don't apply.
-        if (image.IsArm) return ArmAnalyzer.Analyze(image, progress, token);
+        // Non-x86 raw images use self-contained pipelines; the x86/x64 Iced passes below don't apply.
+        if (image.IsArm) return ArmAnalyzer.Analyze(image, progress, token);       // ARM/Thumb/AArch64 (Capstone)
+        if (image.Is8051) return I8051Analyzer.Analyze(image, progress, token);     // Intel 8051/MCS-51
 
         options ??= AnalysisOptions.None;
         var warnings = new List<string>();

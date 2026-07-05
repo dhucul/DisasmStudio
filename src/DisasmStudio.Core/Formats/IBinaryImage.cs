@@ -25,6 +25,14 @@ public interface IBinaryImage
     /// devirt, unpack, C export) are gated off for these.</summary>
     bool IsArm => Arch is Architecture.Arm or Architecture.Thumb or Architecture.Arm64;
 
+    /// <summary>True when this image decodes as Intel 8051/MCS-51. Like ARM it's a non-x86 arch: it routes to
+    /// its own decoder + analyzer and the x86-only features (decompiler/IL, debugger, devirt, unpack, C
+    /// export) are gated off.</summary>
+    bool Is8051 => Arch is Architecture.I8051;
+
+    /// <summary>Any non-x86 architecture — the shared test for gating off the x86-only feature set.</summary>
+    bool IsNonX86 => IsArm || Is8051;
+
     ulong ImageBase { get; }
 
     /// <summary>Entry point VA, or 0 if the format has none.</summary>

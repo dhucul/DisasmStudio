@@ -24,6 +24,7 @@ public sealed class RawImage : IBinaryImage, IDisposable
         Architecture.Arm => "arm",
         Architecture.Thumb => "thumb",
         Architecture.Arm64 => "arm64",
+        Architecture.I8051 => "8051",
         _ => Bitness switch { 64 => "x64", 16 => "x86-16", _ => "x86" },
     };
     public ulong ImageBase { get; }
@@ -45,11 +46,14 @@ public sealed class RawImage : IBinaryImage, IDisposable
         FilePath = path;
         ImageBase = baseVa;
         Arch = arch;
-        // ARM/Thumb are 32-bit, AArch64 is 64-bit; otherwise honour the requested x86 bitness.
+        // ARM/Thumb are 32-bit, AArch64 is 64-bit; 8051 is 8-bit with a 16-bit code space. 8051 never
+        // reaches Iced, but a few UI paths still construct the Iced Disassembler unconditionally, and
+        // Decoder.Create only accepts 16/32/64 — so report 16 (never 8). Otherwise honour the x86 bitness.
         Bitness = arch switch
         {
             Architecture.Arm64 => 64,
             Architecture.Arm or Architecture.Thumb => 32,
+            Architecture.I8051 => 16,
             _ => bitness switch { 64 => 64, 16 => 16, _ => 32 },
         };
         EntryVa = entryVa;

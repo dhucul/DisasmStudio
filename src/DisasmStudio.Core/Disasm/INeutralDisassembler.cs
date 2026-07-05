@@ -36,13 +36,14 @@ public interface INeutralDisassembler
     IReadOnlyList<AsmToken> Format(ulong va);
 }
 
-/// <summary>Builds the right neutral decoder for an image: Capstone for ARM-family, else Iced (optionally
-/// over a supplied live/debugger decoder). This is the one place the arch → decoder routing lives.</summary>
+/// <summary>Builds the right neutral decoder for an image: Capstone for ARM-family, the hand-written 8051
+/// decoder for MCS-51, else Iced (optionally over a supplied live/debugger decoder). This is the one place
+/// the arch → decoder routing lives.</summary>
 public static class NeutralDisasm
 {
     public static INeutralDisassembler For(IBinaryImage image, IReadOnlyDictionary<ulong, string>? names,
                                            IInstructionDecoder? live = null) =>
-        image.IsArm
-            ? new ArmDisassembler(image, image.Arch, names)
-            : new IcedNeutral(live ?? new Disassembler(image), new AsmFormatter(names));
+        image.Is8051 ? new I8051Disassembler(image, names)
+        : image.IsArm ? new ArmDisassembler(image, image.Arch, names)
+        : new IcedNeutral(live ?? new Disassembler(image), new AsmFormatter(names));
 }

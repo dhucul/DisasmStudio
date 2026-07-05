@@ -4,9 +4,10 @@ namespace DisasmStudio.Core.Formats;
 public enum BinaryFormat { Unknown, Pe, Elf, Raw, Snapshot }
 
 /// <summary>The instruction set an image's bytes are decoded as. x86/x64 go through Iced; the ARM family
-/// (32-bit ARM, Thumb/Thumb-2, and AArch64) goes through Capstone. Only raw blobs can pick an ARM
-/// architecture — PE/ELF stay x86/x64.</summary>
-public enum Architecture { X86, X64, Arm, Thumb, Arm64 }
+/// (32-bit ARM, Thumb/Thumb-2, and AArch64) goes through Capstone; Intel 8051/MCS-51 (8-bit MCU firmware,
+/// e.g. MediaTek/PLDS optical-drive controllers) goes through the hand-written I8051 decoder. Only raw
+/// blobs can pick a non-x86 architecture — PE/ELF stay x86/x64.</summary>
+public enum Architecture { X86, X64, Arm, Thumb, Arm64, I8051 }
 
 /// <summary>A loaded section/segment, addressed in absolute VAs so the UI is format-agnostic.</summary>
 public sealed class Section
