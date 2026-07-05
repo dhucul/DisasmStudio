@@ -30,4 +30,26 @@
     <ProjectReference Include="..\DisasmStudio.ManagedDbgHost\DisasmStudio.ManagedDbgHost.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <!--
+    Copy the COMPLETE managed-debug host (exe + its .dll + ClrDebug + the dbgshim runtimes + deps.json) next to
+    the app under mdbghost/win-{arch}/ — where ManagedDebugHostLocator looks first. The bare ProjectReference
+    above only drops the apphost stub (no deps), which can't run ("application to execute does not exist"), so
+    Run appeared to do nothing. The x86 host is copied when a `dotnet publish -r win-x86` output exists (for
+    32-bit targets); the x64 host is the normal build output and is always copied.
+  -->
+  <Target Name="CopyManagedDbgHost" AfterTargets="Build">
+    <ItemGroup>
+      <_MdbgHostX64 Include="..\DisasmStudio.ManagedDbgHost\bin\$(Configuration)\net10.0\**\*.*"
+                    Exclude="..\DisasmStudio.ManagedDbgHost\bin\$(Configuration)\net10.0\win-x86\**\*.*" />
+      <_MdbgHostX86 Include="..\DisasmStudio.ManagedDbgHost\bin\$(Configuration)\net10.0\win-x86\publish\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_MdbgHostX64)"
+          DestinationFiles="@(_MdbgHostX64->'$(OutDir)mdbghost\win-x64\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_MdbgHostX86)"
+          DestinationFiles="@(_MdbgHostX86->'$(OutDir)mdbghost\win-x86\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          Condition="'@(_MdbgHostX86)' != ''" />
+  </Target>
+
 </Project>

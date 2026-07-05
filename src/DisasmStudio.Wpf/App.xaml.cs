@@ -29,6 +29,15 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for the managed source-level debugger: drive the real ManagedDebugClient against a
+        // .NET assembly (locate host → launch → entry breakpoint → hit → exit), print to the terminal, exit.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-mdbg")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = e.Args.Length > 1 ? Diagnostics.ManagedDebugSmoke.Run(e.Args[1]) : 2;
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }
