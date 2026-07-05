@@ -4,8 +4,7 @@
         xmlns:ctl="clr-namespace:DisasmStudio.Wpf.Controls"
         Title="DisasmStudio" Height="820" Width="1320"
         Icon="DisasmStudio.ico"
-        FontFamily="Segoe UI" FontSize="12.5"
-        AllowDrop="True">
+        FontFamily="Segoe UI" FontSize="12.5">
     <DockPanel>
         <!-- Toolbar -->
         <Border DockPanel.Dock="Top" Background="{StaticResource Surface}"

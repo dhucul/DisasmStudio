@@ -152,24 +152,28 @@ public partial class MainWindow : Window
         Linear.StatusRequested += msg => StatusText.Text = msg;
         Debug.NavigateRequested += va => _nav.Navigate(va);
         PreviewKeyDown += OnWindowPreviewKeyDown;
+        PreviewMouseDown += OnWindowMouseDown;
     }
 
-    private void EnableFileDrop()
+    // Mouse back/forward thumb buttons walk the address history, like a browser.
+    private void OnWindowMouseDown(object sender, MouseButtonEventArgs e)
     {
-        AllowDrop = true;
-        AddHandler(DragDrop.PreviewDragEnterEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
-        AddHandler(DragDrop.PreviewDragOverEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
-        AddHandler(DragDrop.PreviewDropEvent, new DragEventHandler(OnFileDrop), handledEventsToo: true);
-        AddHandler(DragDrop.DragEnterEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
-        AddHandler(DragDrop.DragOverEvent, new DragEventHandler(OnFileDragOver), handledEventsToo: true);
-        AddHandler(DragDrop.DropEvent, new DragEventHandler(OnFileDrop), handledEventsToo: true);
-        SourceInitialized += (_, _) => EnableNativeFileDrop();
-        Loaded += (_, _) => EnableFileDropOnVisualTree(this);
+        if (e.ChangedButton == MouseButton.XButton1) { _nav.Back(); e.Handled = true; }
+        else if (e.ChangedButton == MouseButton.XButton2) { _nav.Forward(); e.Handled = true; }
     }
 
+    // The app runs elevated (requireAdministrator); WPF's OLE drag-and-drop can't receive files from a
+    // normal-integrity Explorer (UIPI blocks it). Use the native shell path (WM_DROPFILES) instead, which works
+    // across integrity levels via the ChangeWindowMessageFilterEx allow-list in NativeFileDrop. Wired at Loaded so
+    // any OLE IDropTarget WPF may have registered already exists and can be revoked — otherwise it would swallow
+    // WM_DROPFILES and neither path would work once elevated. No AllowDrop is set anywhere in this window.
+    private void EnableFileDrop() => Loaded += (_, _) => EnableNativeFileDrop();
+
+    private bool _nativeDropReady;
     private void EnableNativeFileDrop()
     {
-        if (PresentationSource.FromVisual(this) is not HwndSource source) return;
+        if (_nativeDropReady || PresentationSource.FromVisual(this) is not HwndSource source) return;
+        _nativeDropReady = true;
         NativeFileDrop.Enable(source.Handle);
         source.AddHook(OnNativeMessage);
     }
@@ -184,17 +188,6 @@ public partial class MainWindow : Window
         return IntPtr.Zero;
     }
 
-    private static void EnableFileDropOnVisualTree(DependencyObject root)
-    {
-        if (root is UIElement ui) ui.AllowDrop = true;
-        if (root is ContentElement content) content.AllowDrop = true;
-        if (root is not Visual) return;
-
-        int count = VisualTreeHelper.GetChildrenCount(root);
-        for (int i = 0; i < count; i++)
-            EnableFileDropOnVisualTree(VisualTreeHelper.GetChild(root, i));
-    }
-
     private static class NativeFileDrop
     {
         public const int WmDropFiles = 0x0233;
@@ -204,6 +197,7 @@ public partial class MainWindow : Window
 
         public static void Enable(IntPtr hwnd)
         {
+            _ = RevokeDragDrop(hwnd);   // drop any WPF OLE IDropTarget so the shell delivers WM_DROPFILES to us instead
             DragAcceptFiles(hwnd, true);
             _ = ChangeWindowMessageFilterEx(hwnd, WmDropFiles, MsgfltAllow, IntPtr.Zero);
             _ = ChangeWindowMessageFilterEx(hwnd, WmCopyData, MsgfltAllow, IntPtr.Zero);
@@ -247,6 +241,9 @@ public partial class MainWindow : Window
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint message, uint action, IntPtr changeInfo);
+
+        [DllImport("ole32.dll")]
+        private static extern int RevokeDragDrop(IntPtr hwnd);
     }
 
     private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
@@ -255,6 +252,14 @@ public partial class MainWindow : Window
             && Keyboard.FocusedElement is not TextBox)   // let text fields keep their own undo
         {
             UndoLastPatch();
+            e.Handled = true;
+            return;
+        }
+        // Alt+Left / Alt+Right walk the address history like a browser. (With Alt held, the real key is in SystemKey.)
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if ((Keyboard.Modifiers & ModifierKeys.Alt) != 0 && key is Key.Left or Key.Right)
+        {
+            if (key == Key.Left) _nav.Back(); else _nav.Forward();
             e.Handled = true;
             return;
         }
@@ -1500,64 +1505,6 @@ public partial class MainWindow : Window
         await LoadProject(dlg.FileName);
     }
 
-    private async void OnFileDrop(object sender, DragEventArgs e)
-    {
-        if (!TryGetDroppedFile(e, out var path))
-        {
-            e.Effects = DragDropEffects.None;
-            e.Handled = true;
-            StatusText.Text = "Drop ignored: drag a file into DisasmStudio.";
-            return;
-        }
-
-        e.Effects = DragDropEffects.Copy;
-        e.Handled = true;
-        await OpenDroppedFile(path);
-    }
-
-    private void OnFileDragOver(object sender, DragEventArgs e)
-    {
-        e.Effects = HasFileDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
-        e.Handled = true;
-    }
-
-    private static bool HasFileDrop(DragEventArgs e) =>
-        e.Data.GetDataPresent(DataFormats.FileDrop, autoConvert: true)
-        || e.Data.GetDataPresent("FileNameW", autoConvert: true)
-        || e.Data.GetDataPresent("FileName", autoConvert: true);
-
-    private static bool TryGetDroppedFile(DragEventArgs e, out string path)
-    {
-        path = "";
-        return TryGetFilePath(e.Data.GetData(DataFormats.FileDrop, autoConvert: true), out path)
-            || TryGetFilePath(e.Data.GetData("FileNameW", autoConvert: true), out path)
-            || TryGetFilePath(e.Data.GetData("FileName", autoConvert: true), out path);
-    }
-
-    private static bool TryGetFilePath(object? data, out string path)
-    {
-        path = "";
-        if (data is string candidate) return TryUseFile(candidate, out path);
-        if (data is not string[] paths) return false;
-
-        foreach (string item in paths)
-            if (TryUseFile(item, out path))
-                return true;
-
-        return false;
-    }
-
-    private static bool TryUseFile(string candidate, out string path)
-    {
-        path = "";
-        if (string.IsNullOrWhiteSpace(candidate)) return false;
-        candidate = candidate.TrimEnd('\0');
-        if (!File.Exists(candidate)) return false;
-
-        path = candidate;
-        return true;
-    }
-
     private async Task OpenDroppedFile(string path)
     {
         long now = Environment.TickCount64;
@@ -1824,7 +1771,7 @@ public partial class MainWindow : Window
                                       opt.Value.Arch, scan.IsFirmware ? scan.Symbols : null);
                 if (scan.IsFirmware) firmware = scan;
             }
-            else if (fmt == BinaryFormat.Pe && LooksLikeMemoryDumpPath(path) && PeMemoryImage.TryLoad(path, out var mem))
+            else if (fmt == BinaryFormat.Pe && ShouldLoadAsMemoryImage(path) && PeMemoryImage.TryLoad(path, out var mem))
             {
                 image = mem;
             }
@@ -1859,15 +1806,22 @@ public partial class MainWindow : Window
         }
     }
 
-    private static bool LooksLikeMemoryDumpPath(string path)
+    /// <summary>Whether a PE file should be interpreted as a raw memory image (sections at their virtual addresses)
+    /// rather than a normal on-disk executable. Explicit dump names/extensions are trusted; an ambiguous <c>.bin</c>
+    /// is decided by content (<see cref="PeMemoryImage.LooksLikeMemoryImage(string)"/>) so an ordinary executable
+    /// that merely has a .bin extension still loads correctly as a program instead of rendering as garbage.</summary>
+    private static bool ShouldLoadAsMemoryImage(string path)
     {
         string name = Path.GetFileName(path);
         string ext = Path.GetExtension(path);
-        return name.Contains("_fault_dump", StringComparison.OrdinalIgnoreCase)
+        if (name.Contains("_fault_dump", StringComparison.OrdinalIgnoreCase)
             || name.Contains("_memdump", StringComparison.OrdinalIgnoreCase)
             || ext.Equals(".dmp", StringComparison.OrdinalIgnoreCase)
-            || ext.Equals(".mem", StringComparison.OrdinalIgnoreCase)
-            || ext.Equals(".bin", StringComparison.OrdinalIgnoreCase);
+            || ext.Equals(".mem", StringComparison.OrdinalIgnoreCase))
+            return true;   // named as a dump → trust it
+        if (ext.Equals(".bin", StringComparison.OrdinalIgnoreCase))
+            return PeMemoryImage.LooksLikeMemoryImage(path);   // ambiguous → decide by byte layout
+        return false;
     }
 
     private enum AnalyzeOutcome { Applied, Cancelled, Failed }

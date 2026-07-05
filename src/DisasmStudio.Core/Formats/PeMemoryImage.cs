@@ -45,6 +45,38 @@ public sealed class PeMemoryImage : IBinaryImage
         catch { return false; }
     }
 
+    /// <summary>Heuristic: do this PE file's on-disk bytes look like a raw memory image (sections at their virtual
+    /// addresses, spanning ~SizeOfImage) rather than a normal on-disk executable (sections at file offsets)? Used to
+    /// distinguish a genuine memory dump from an ordinary program that merely has an ambiguous extension (e.g. .bin)
+    /// — loading the latter as a memory image would read every section at the wrong offset and render garbage.</summary>
+    public static bool LooksLikeMemoryImage(string path)
+    {
+        try { return LooksLikeMemoryImage(File.ReadAllBytes(path)); }
+        catch { return false; }
+    }
+
+    public static bool LooksLikeMemoryImage(byte[] bytes)
+    {
+        if (!PeView.TryParse(bytes, out var v) || v.Sections.Count == 0) return false;
+
+        // Strongest signal: a dumped/rebuilt header places each section's raw data at its RVA (PointerToRawData == VA).
+        bool allAtRva = true;
+        foreach (var s in v.Sections) if (s.PointerToRawData != s.VirtualAddress) { allAtRva = false; break; }
+        if (allAtRva) return true;
+
+        // Otherwise compare the file length to the two expected layouts: a normal on-disk PE is sized to its
+        // file-aligned raw sections; a memory image spans the (larger) virtual layout, ~SizeOfImage.
+        long len = bytes.LongLength;
+        long rawEnd = v.SizeOfHeaders, virtEnd = v.SizeOfHeaders;
+        foreach (var s in v.Sections)
+        {
+            rawEnd = Math.Max(rawEnd, (long)s.PointerToRawData + s.SizeOfRawData);
+            virtEnd = Math.Max(virtEnd, (long)s.VirtualAddress + Math.Max(s.VirtualSize, s.SizeOfRawData));
+        }
+        if (virtEnd <= rawEnd) return false;                       // no meaningful difference → treat as a file PE
+        return Math.Abs(len - virtEnd) < Math.Abs(len - rawEnd);   // file size closer to the virtual span → memory image
+    }
+
     /// <summary>Build a memory-image view directly from an in-memory dump (e.g. <c>DebuggerEngine.DumpImage</c>),
     /// with no file on disk. <paramref name="displayPath"/> is what the UI shows as the "file" (the process's
     /// module path, or a placeholder). Returns false if the bytes aren't a parseable PE.</summary>
