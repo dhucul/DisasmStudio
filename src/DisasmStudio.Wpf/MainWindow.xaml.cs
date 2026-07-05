@@ -783,7 +783,7 @@ public partial class MainWindow : Window
         mdbg.Launched += () => StatusText.Text = $"Managed debug: running {module}…";
         mdbg.Stopped += OnManagedStopped;
         mdbg.Exited += OnManagedExited;
-        mdbg.Error += msg => StatusText.Text = "Managed debug: " + msg;
+        mdbg.Error += OnManagedError;
         _mdbg = mdbg;
 
         ManagedDebugDock.Visibility = Visibility.Visible;
@@ -815,6 +815,44 @@ public partial class MainWindow : Window
     {
         StatusText.Text = $"Managed target exited (code {code}).";
         EndManagedDebug();
+    }
+
+    /// <summary>Managed-debug error handler. A target whose manifest requests administrator rights can't be
+    /// launched by a non-elevated DisasmStudio (CreateProcess can't elevate), so offer a one-click elevated relaunch.</summary>
+    private void OnManagedError(string msg)
+    {
+        if (msg.Contains("ELEVATION_REQUIRED") || msg.Contains("0x800702E4"))
+        {
+            EndManagedDebug();
+            StatusText.Text = "The target requires administrator rights.";
+            if (MessageBox.Show(this,
+                "This program requests administrator rights, and DisasmStudio is running as a standard user — so it can't launch it.\n\n" +
+                "Relaunch DisasmStudio as administrator and reopen this file?",
+                "Administrator rights required", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
+                RelaunchElevated();
+            return;
+        }
+        StatusText.Text = "Managed debug: " + msg;
+    }
+
+    /// <summary>Relaunch DisasmStudio elevated (UAC prompt), reopening the current file, then close this instance.</summary>
+    private void RelaunchElevated()
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath ?? "DisasmStudio.exe")
+            {
+                UseShellExecute = true,   // required for the "runas" verb (UAC)
+                Verb = "runas",
+            };
+            if (_image is not null) psi.ArgumentList.Add(_image.FilePath);   // `DisasmStudio <path>` auto-loads on start
+            System.Diagnostics.Process.Start(psi);
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)   // e.g. the user dismissed the UAC prompt (ERROR_CANCELLED)
+        {
+            StatusText.Text = "Relaunch as administrator was cancelled or failed: " + ex.Message;
+        }
     }
 
     private void EndManagedDebug()

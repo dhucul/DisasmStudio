@@ -70,7 +70,7 @@ internal static class ManagedDebugSmoke
                     client.Go();
                     break;
                 case Mdbg.Exited: Console.WriteLine($"  ev EXITED code={ev.Code}"); exited = true; done.Set(); break;
-                case Mdbg.Error: err = ev.Message; Console.WriteLine($"  ev ERROR {ev.Message}"); break;
+                case Mdbg.Error: err = ev.Message; Console.WriteLine($"  ev ERROR {ev.Message}"); done.Set(); break;   // terminal for the smoke
             }
         };
 

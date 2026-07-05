@@ -48,7 +48,19 @@ internal sealed class ManagedDebugEngine
         string cmdline = string.IsNullOrEmpty(args) ? Quote(target) : $"{Quote(target)} {args}";
         string workdir = cwd ?? Path.GetDirectoryName(target) ?? Environment.CurrentDirectory;
 
-        var proc = _dbgshim.CreateProcessForLaunch(cmdline, bSuspendProcess: true, IntPtr.Zero, workdir);
+        CreateProcessForLaunchResult proc;
+        try
+        {
+            proc = _dbgshim.CreateProcessForLaunch(cmdline, bSuspendProcess: true, IntPtr.Zero, workdir);
+        }
+        catch (Exception ex) when (ex.HResult == unchecked((int)0x800702E4)   // ERROR_ELEVATION_REQUIRED
+                                   || (ex.Message?.Contains("0x800702E4", StringComparison.OrdinalIgnoreCase) ?? false))
+        {
+            // The target's manifest asks for administrator rights, but this host (and DisasmStudio) is not
+            // elevated. CreateProcess can't elevate — the app must relaunch elevated. Signal that, don't crash.
+            _emit(new MdbgEvent { Ev = Mdbg.Error, Message = "ELEVATION_REQUIRED" });
+            return;
+        }
         _pid = proc.ProcessId;
         try { _osProc = Process.GetProcessById(_pid); } catch { /* best-effort for exit code */ }
 
