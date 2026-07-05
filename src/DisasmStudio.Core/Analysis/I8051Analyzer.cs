@@ -29,22 +29,23 @@ public static class I8051Analyzer
         var callTargets = new HashSet<ulong>();
         var branchTargets = new HashSet<ulong>();
 
-        // 1. Recursive descent from the entry, any symbols, and each executable section start. Following
-        //    LCALL/ACALL/LJMP/AJMP/SJMP/Jcc targets marks reachable code + collects call/branch targets.
-        progress?.Report("Disassembling (recursive descent)…");
-        var roots = new List<ulong>();
-        if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) roots.Add(image.EntryVa);
-        foreach (var s in image.Symbols) if (image.IsExecutableVa(s.Va)) roots.Add(s.Va);
-        foreach (var sec in image.Sections)
-            if (sec.IsExecutable && sec.FileSize > 0) roots.Add(sec.StartVa);
-        Descend(image, dis, code, roots, callTargets, branchTargets, xrefs, token);
-
-        // 2. Strings: scan the whole blob (8051 firmware keeps its parameter/string tables inside the one
-        //    executable section), then keep only those starting in a data region so code isn't mined for
-        //    false strings.
+        // 1. Strings first, so the code sweep can treat string/parameter tables as data instead of decoding
+        //    them as stray instructions. 8051 firmware keeps its tables inside the one executable section.
         progress?.Report("Scanning strings…");
-        var strings = StringScanner.Scan(image, includeExecutable: true, token: token)
-            .Where(s => !code.IsCode(s.Va)).ToList();
+        var strings = StringScanner.Scan(image, includeExecutable: true, token: token).ToList();
+        var stringSpans = strings.Select(s => (s.Va, End: s.Va + (ulong)Math.Max(1, s.Wide ? s.Length * 2 : s.Length)))
+                                 .OrderBy(x => x.Va).ToArray();
+
+        // 2. Linear sweep (the 8051 convention: firmware is predominantly contiguous code). Runs of >= 16
+        //    identical 0x00/0xFF are skipped as padding, string spans are skipped as data, and every other
+        //    decodable byte is marked code — so the whole code bank is disassembled (recursive descent alone
+        //    misses code reachable only via indirect dispatch or a bank this dump doesn't contain), while the
+        //    zero sea shows as data instead of a wall of NOPs.
+        progress?.Report("Disassembling (linear sweep)…");
+        Sweep(image, dis, code, stringSpans, callTargets, branchTargets, xrefs, token);
+
+        // Keep only strings that didn't land inside swept code (defends against a printable run in code).
+        strings = strings.Where(s => !code.IsCode(s.Va)).ToList();
         var comments = new Dictionary<ulong, string>();
         foreach (var s in strings)
             foreach (var x in xrefs.To(s.Va))
@@ -98,49 +99,88 @@ public static class I8051Analyzer
         };
     }
 
-    private static void Descend(IBinaryImage image, INeutralDisassembler dis, CodeBitmap code,
-        IEnumerable<ulong> seeds, HashSet<ulong> callTargets, HashSet<ulong> branchTargets,
+    /// <summary>Linear sweep of the executable sections. Skips padding runs and string spans as data and
+    /// marks every other decodable instruction as code, collecting call/branch targets + xrefs. An
+    /// instruction is never allowed to straddle into a string span (the sweep stops the run at the span so a
+    /// table isn't half-eaten by a preceding opcode).</summary>
+    private static void Sweep(IBinaryImage image, INeutralDisassembler dis, CodeBitmap code,
+        (ulong Va, ulong End)[] stringSpans, HashSet<ulong> callTargets, HashSet<ulong> branchTargets,
         XrefDatabase xrefs, CancellationToken token)
     {
-        var work = new Stack<ulong>();
-        foreach (var s in seeds) if (image.IsExecutableVa(s)) work.Push(s);
-
-        long n = 0;
-        while (work.Count > 0 && n < Budget)
+        foreach (var sec in image.Sections)
         {
-            if ((n & 0xFFFFF) == 0 && token.IsCancellationRequested) break;
-            ulong va = work.Pop();
-            if (!image.IsExecutableVa(va) || code.IsCode(va)) continue;
-            if (!dis.TryDecode(va, out var ni)) continue;
-            code.Mark(va, ni.Length);
-            n++;
-
-            ulong fall = va + (ulong)ni.Length;
-            switch (ni.Flow)
+            if (!sec.IsExecutable || sec.FileSize <= 0) continue;
+            ulong end = sec.StartVa + (sec.VirtualSize > 0 ? Math.Min(sec.VirtualSize, (ulong)sec.FileSize) : (ulong)sec.FileSize);
+            ulong va = sec.StartVa;
+            long n = 0;
+            while (va < end && n < Budget)
             {
-                case FlowKind.CondJump:
-                    if (ni.DirectTarget is ulong tc && image.IsExecutableVa(tc))
-                    { branchTargets.Add(tc); xrefs.Add(va, tc, XrefKind.CondJump); work.Push(tc); }
-                    work.Push(fall);
-                    break;
-                case FlowKind.Jump:
-                    if (ni.DirectTarget is ulong tj && image.IsExecutableVa(tj))
-                    { branchTargets.Add(tj); xrefs.Add(va, tj, XrefKind.Jump); work.Push(tj); }
-                    break;   // no fall-through past an unconditional jump
-                case FlowKind.Call:
-                    if (ni.DirectTarget is ulong tk && image.IsExecutableVa(tk))
-                    { callTargets.Add(tk); xrefs.Add(va, tk, XrefKind.Call); work.Push(tk); }
-                    work.Push(fall);
-                    break;
-                case FlowKind.Ret:
-                case FlowKind.IndirectJump:      // JMP @A+DPTR — unresolved computed branch, path ends here
-                case FlowKind.Interrupt:
-                    break;
-                default:
-                    work.Push(fall);             // Seq, IndirectCall — execution continues after
-                    break;
+                if ((n & 0xFFFFF) == 0 && token.IsCancellationRequested) break;
+                n++;
+
+                ulong runEnd = PaddingRunEnd(image, va, end);      // > va when va starts a padding run
+                if (runEnd > va) { va = runEnd; continue; }         // padding -> data
+
+                if (InSpan(stringSpans, va, out ulong spanEnd)) { va = Math.Min(spanEnd, end); continue; }  // string -> data
+
+                if (!dis.TryDecode(va, out var ni) || ni.Length == 0) { va++; continue; }
+                ulong next = va + (ulong)ni.Length;
+                if (next > NextSpanStart(stringSpans, va, end)) { va++; continue; }   // would cross a string → treat as data
+
+                code.Mark(va, ni.Length);
+                if (ni.DirectTarget is ulong t && image.IsExecutableVa(t))
+                {
+                    switch (ni.Flow)
+                    {
+                        case FlowKind.Call: callTargets.Add(t); xrefs.Add(va, t, XrefKind.Call); break;
+                        case FlowKind.Jump: branchTargets.Add(t); xrefs.Add(va, t, XrefKind.Jump); break;
+                        case FlowKind.CondJump: branchTargets.Add(t); xrefs.Add(va, t, XrefKind.CondJump); break;
+                    }
+                }
+                va = next;
             }
         }
+    }
+
+    /// <summary>If a run of >= 16 identical 0x00/0xFF bytes starts at <paramref name="va"/>, return the VA
+    /// just past the whole run (clamped to <paramref name="end"/>); otherwise return <paramref name="va"/>.</summary>
+    private static ulong PaddingRunEnd(IBinaryImage image, ulong va, ulong end)
+    {
+        var b = image.ReadBytesAtVa(va, 16);
+        if (b.Length < 16 || (b[0] != 0x00 && b[0] != 0xFF)) return va;
+        for (int i = 1; i < 16; i++) if (b[i] != b[0]) return va;
+        byte fill = b[0];
+        ulong p = va + 16;
+        while (p < end)
+        {
+            var chunk = image.ReadBytesAtVa(p, 256);
+            if (chunk.Length == 0) break;
+            int i = 0;
+            while (i < chunk.Length && chunk[i] == fill) i++;
+            p += (ulong)i;
+            if (i < chunk.Length) break;
+        }
+        return Math.Min(p, end);
+    }
+
+    private static bool InSpan((ulong Va, ulong End)[] spans, ulong va, out ulong spanEnd)
+    {
+        int lo = 0, hi = spans.Length - 1;
+        while (lo <= hi)
+        {
+            int mid = (lo + hi) >> 1;
+            if (va < spans[mid].Va) hi = mid - 1;
+            else if (va >= spans[mid].End) lo = mid + 1;
+            else { spanEnd = spans[mid].End; return true; }
+        }
+        spanEnd = va; return false;
+    }
+
+    private static ulong NextSpanStart((ulong Va, ulong End)[] spans, ulong after, ulong end)
+    {
+        int lo = 0, hi = spans.Length;
+        while (lo < hi) { int mid = (lo + hi) >> 1; if (spans[mid].Va <= after) lo = mid + 1; else hi = mid; }
+        return lo < spans.Length && spans[lo].Va < end ? spans[lo].Va : end;
     }
 
     private static LinearIndex BuildIndex(IBinaryImage image, INeutralDisassembler dis, CodeBitmap code,

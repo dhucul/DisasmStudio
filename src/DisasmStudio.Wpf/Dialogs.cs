@@ -76,6 +76,15 @@ internal static class Dialogs
             syncing = false;
         };
         entryBox.TextChanged += (_, _) => { if (!syncing) userTouchedEntry = true; };
+        // 8051 lives in a 16-bit code space based at 0 — snap base/entry to 0 when it's chosen so branch
+        // targets (absolute + page + relative) resolve instead of landing at a huge x86-style base.
+        bits.SelectionChanged += (_, _) =>
+        {
+            if (bits.SelectedIndex != 6) return;
+            userTouchedEntry = false;
+            baseBox.Text = "0";
+            entryBox.Text = "0";
+        };
 
         var panel = new StackPanel { Margin = new Thickness(16) };
         if (scan.IsFirmware)
