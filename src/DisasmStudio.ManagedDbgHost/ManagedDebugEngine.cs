@@ -80,8 +80,8 @@ internal sealed class ManagedDebugEngine
                     ready.Set();
                 });
                 _dbgshim.ResumeProcess(proc.ResumeHandle);
-                if (!ready.WaitOne(TimeSpan.FromSeconds(60)))
-                    throw new TimeoutException("the target's .NET runtime did not start within 60s");
+                if (!ready.WaitOne(TimeSpan.FromSeconds(30)))
+                    throw new TimeoutException("the target's .NET (Core/5+) runtime did not start within 30s — is it a supported .NET Core app?");
             }
             finally
             {
@@ -187,8 +187,7 @@ internal sealed class ManagedDebugEngine
     private void OnExit()
     {
         int code = 0;
-        // At the ICorDebug ExitProcess callback the OS process isn't fully torn down yet; wait briefly for it.
-        try { if (_osProc is { } p) { p.WaitForExit(2000); code = p.ExitCode; } } catch { }
+        try { if (_osProc is { HasExited: true }) code = _osProc.ExitCode; } catch { }   // best-effort, never block
         _emit(new MdbgEvent { Ev = Mdbg.Exited, Code = code });
     }
 

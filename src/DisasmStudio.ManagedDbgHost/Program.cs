@@ -42,7 +42,16 @@ while ((line = reader.ReadLine()) is not null)
     {
         switch (cmd.Cmd)
         {
-            case Mdbg.Launch: engine.Launch(cmd.Target!, cmd.Args, cmd.Cwd, cmd.Breakpoints); break;
+            case Mdbg.Launch:
+                // Launch (register-for-startup + wait + attach) can take seconds; run it off the command-reader
+                // thread so Stop/Quit stay responsive if the target's runtime never starts (e.g. a wrong-runtime target).
+                var lc = cmd;
+                _ = Task.Run(() =>
+                {
+                    try { engine.Launch(lc.Target!, lc.Args, lc.Cwd, lc.Breakpoints); }
+                    catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message }); }
+                });
+                break;
             case Mdbg.SetBreakpoint: if (cmd.Bp is not null) engine.SetBreakpoint(cmd.Bp); break;
             case Mdbg.RemoveBreakpoint: engine.RemoveBreakpoint(cmd.Id); break;
             case Mdbg.Go: engine.Go(); break;

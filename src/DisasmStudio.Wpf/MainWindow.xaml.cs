@@ -759,6 +759,19 @@ public partial class MainWindow : Window
         string module = Path.GetFileName(dll);
         string exe = Path.ChangeExtension(dll, ".exe");
 
+        // The source-level debugger uses dbgshim, which is CoreCLR-only. Detect a .NET Framework target up front
+        // and stop — otherwise the host waits 60s for a CoreCLR runtime-startup that never fires (the target loads
+        // the Framework CLR), which also blocks the host and can freeze Stop.
+        if (!IsNetCoreTarget(dll))
+        {
+            MessageBox.Show(this,
+                "This looks like a .NET Framework program. The source-level (C#) debugger currently supports " +
+                ".NET 5+/Core only — .NET Framework isn't supported yet.\n\n" +
+                "You can still decompile and analyze it here; run it under a .NET Framework debugger for now.",
+                "Managed debug", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         // Launch the sibling apphost .exe if present (its PE machine is the real bitness); else run via `dotnet <dll>`.
         string target; string? args = null; int bitness;
         if (File.Exists(exe)) { target = exe; bitness = PeBitness(exe) ?? 64; }
@@ -810,6 +823,19 @@ public partial class MainWindow : Window
     }
 
     private const int EntryBreakpointId = -1;   // the implicit "stop at entry" breakpoint's id (not a user bp)
+
+    /// <summary>True if the loaded managed target is .NET 5+/Core (which dbgshim can debug), false for .NET
+    /// Framework. Core apps ship a <c>*.runtimeconfig.json</c> and target <c>.NETCoreApp</c>; Framework apps are a
+    /// managed <c>.exe</c> targeting <c>.NETFramework</c> with neither.</summary>
+    private bool IsNetCoreTarget(string dll)
+    {
+        if (File.Exists(Path.ChangeExtension(dll, ".runtimeconfig.json"))) return true;
+        string tfm = _managed?.Metadata.TargetFramework ?? "";
+        if (tfm.Contains(".NETCoreApp", StringComparison.OrdinalIgnoreCase) || tfm.Contains(".NETStandard", StringComparison.OrdinalIgnoreCase)) return true;
+        if (tfm.Contains(".NETFramework", StringComparison.OrdinalIgnoreCase)) return false;
+        // Unknown TFM: a managed .exe is the Framework shape (a Core managed module is a .dll + native apphost).
+        return !Path.GetExtension(dll).Equals(".exe", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>True if the PE's subsystem is Windows CUI (a console app) — used to decide whether to give the
     /// debuggee a console window. Defaults to false (no console) on any read error.</summary>
@@ -904,7 +930,9 @@ public partial class MainWindow : Window
         ManagedDebugDock.Visibility = Visibility.Collapsed;
         StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = DetachBtn.IsEnabled = false;
         var m = _mdbg; _mdbg = null;
-        try { m?.Dispose(); } catch { }
+        // Tear down off the UI thread — quitting/killing the host (and any stuck ICorDebug cleanup) must never
+        // freeze the app.
+        if (m is not null) Task.Run(() => { try { m.Dispose(); } catch { } });
     }
 
     /// <summary>Double-click a call-stack frame → navigate to its method and highlight its C# line.</summary>

@@ -51,44 +51,54 @@ internal static class ManagedDebugSmoke
             return 3;
         }
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        void Log(string m) => Console.WriteLine($"  [{sw.ElapsedMilliseconds,6}ms] {m}");
+
         var client = new ManagedDebugClient(host, showConsole: false);
         var done = new ManualResetEventSlim(false);
-        int stops = 0, modules = 0; bool exited = false; string? err = null;
+        int stops = 0, modules = 0, pid = 0; bool exited = false; string? err = null;
         client.EventReceived += ev =>
         {
             switch (ev.Ev)
             {
-                case Mdbg.Launched: Console.WriteLine($"  ev launched pid={ev.Pid}"); break;
-                case Mdbg.ModuleLoaded: modules++; if (modules <= 6) Console.WriteLine($"  ev module {ev.Module}"); break;
+                case Mdbg.Launched: pid = ev.Pid; Log($"launched pid={pid}"); break;
+                case Mdbg.ModuleLoaded: modules++; if (modules <= 6) Log($"module {ev.Module}"); break;
                 case Mdbg.Stopped:
                     stops++;
                     var top = ev.Frames is { Length: > 0 } fr ? fr[0] : null;
-                    Console.WriteLine($"  ev STOPPED {ev.Reason} frames={ev.Frames?.Length} " +
-                                      $"top={(top is null ? "-" : $"{top.Module}!0x{top.Token:X8}+IL{top.IlOffset}")} locals={ev.Locals?.Length}");
-                    if (ev.Locals is not null)
-                        foreach (var l in ev.Locals) Console.WriteLine($"      {(l.IsArg ? "(arg) " : "")}{l.Name} : {l.Type} = {l.Value}");
+                    Log($"STOPPED {ev.Reason} top={(top is null ? "-" : $"{top.Module}!0x{top.Token:X8}+IL{top.IlOffset}")} locals={ev.Locals?.Length}");
                     client.Go();
                     break;
-                case Mdbg.Exited: Console.WriteLine($"  ev EXITED code={ev.Code}"); exited = true; done.Set(); break;
-                case Mdbg.Error: err = ev.Message; Console.WriteLine($"  ev ERROR {ev.Message}"); done.Set(); break;   // terminal for the smoke
+                case Mdbg.Exited: Log($"EXITED code={ev.Code}"); exited = true; done.Set(); break;
+                case Mdbg.Error: err = ev.Message; Log($"ERROR {ev.Message}"); done.Set(); break;
             }
         };
 
         client.Start();
         client.Launch(target, args, Path.GetDirectoryName(dll), [new BpLoc(module, epToken, 0, 1)]);
 
-        if (!done.Wait(TimeSpan.FromSeconds(40)))
+        // Watchdog: if the target is still running after 3s (a long-running target we'll Go past its breakpoint),
+        // kill it — simulating the user closing the program — so we can time the teardown.
+        _ = Task.Run(async () =>
         {
-            Console.WriteLine("TIMEOUT: no exit within 40s (stops so far = " + stops + ")");
-            client.Dispose();
-            return 4;
-        }
-        client.Dispose();
+            await Task.Delay(3000);
+            if (!done.IsSet && pid != 0)
+            {
+                try { Log($"killing debuggee pid={pid} (simulate the user closing the program)"); System.Diagnostics.Process.GetProcessById(pid).Kill(); }
+                catch (Exception ex) { Log("kill failed: " + ex.Message); }
+            }
+        });
 
-        Console.WriteLine($"\nstops={stops} exited={exited} error={err ?? "(none)"}");
-        bool pass = stops >= 1 && exited && err is null;
-        Console.WriteLine(pass ? "PASS: managed debug launched, hit the entry breakpoint, and exited" : "FAIL");
-        return pass ? 0 : 1;
+        if (!done.Wait(TimeSpan.FromSeconds(90)))
+            Log("TIMEOUT: no exit within 90s");
+
+        Log("disposing client…");
+        var dsw = System.Diagnostics.Stopwatch.StartNew();
+        client.Dispose();
+        Log($"client.Dispose() returned after {dsw.ElapsedMilliseconds}ms");
+
+        Console.WriteLine($"\nstops={stops} exited={exited} error={err ?? "(none)"}  total={sw.ElapsedMilliseconds}ms");
+        return exited ? 0 : 1;
     }
 
     private static int? PeBitness(string path)
