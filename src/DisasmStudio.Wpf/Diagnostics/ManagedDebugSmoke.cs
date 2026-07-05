@@ -42,9 +42,10 @@ internal static class ManagedDebugSmoke
         string target; string? args = null; int bitness;
         if (File.Exists(exe)) { target = exe; bitness = PeBitness(exe) ?? 64; }
         else { target = "dotnet"; args = $"\"{dll}\""; bitness = 64; }
+        bool framework = !File.Exists(Path.ChangeExtension(dll, ".runtimeconfig.json"));   // no runtimeconfig ⇒ .NET Framework
         string? host = ManagedDebugHostLocator.Find(bitness);
         Console.WriteLine($"launch target = {target}{(args is null ? "" : " " + args)}");
-        Console.WriteLine($"bitness = {bitness}  host = {host ?? "<NOT FOUND>"}");
+        Console.WriteLine($"bitness = {bitness}  framework = {framework}  host = {host ?? "<NOT FOUND>"}");
         if (host is null)
         {
             Console.WriteLine("FAIL: managed-debug host exe not found for this bitness (build/publish DisasmStudio.ManagedDbgHost).");
@@ -75,7 +76,7 @@ internal static class ManagedDebugSmoke
         };
 
         client.Start();
-        client.Launch(target, args, Path.GetDirectoryName(dll), [new BpLoc(module, epToken, 0, 1)]);
+        client.Launch(target, args, Path.GetDirectoryName(dll), [new BpLoc(module, epToken, 0, 1)], framework);
 
         // Watchdog: if the target is still running after 3s (a long-running target we'll Go past its breakpoint),
         // kill it — simulating the user closing the program — so we can time the teardown.

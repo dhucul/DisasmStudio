@@ -29,11 +29,11 @@ internal sealed class ManagedDebugSession : IDisposable
         _client.EventReceived += OnEvent;
     }
 
-    public void Launch(string target, string? args, string? cwd, IReadOnlyList<BpLoc>? bps)
+    public void Launch(string target, string? args, string? cwd, IReadOnlyList<BpLoc>? bps, bool framework = false)
     {
         IsRunning = true;
         _client.Start();
-        _client.Launch(target, args, cwd, bps);
+        _client.Launch(target, args, cwd, bps, framework);
     }
 
     public void SetBreakpoint(BpLoc bp) => _client.SetBreakpoint(bp);

@@ -759,23 +759,12 @@ public partial class MainWindow : Window
         string module = Path.GetFileName(dll);
         string exe = Path.ChangeExtension(dll, ".exe");
 
-        // The source-level debugger uses dbgshim, which is CoreCLR-only. Detect a .NET Framework target up front
-        // and stop — otherwise the host waits 60s for a CoreCLR runtime-startup that never fires (the target loads
-        // the Framework CLR), which also blocks the host and can freeze Stop.
-        if (!IsNetCoreTarget(dll))
-        {
-            // dbgshim (the ICorDebug backend here) is CoreCLR-only, so it can't source-debug .NET Framework.
-            // Offer the native (assembly-level) debugger, which runs any PE — the C# decompilation stays available.
-            var choice = MessageBox.Show(this,
-                "This is a .NET Framework program. Source-level (C#) debugging currently supports .NET 5+/Core only.\n\n" +
-                "Debug it with the native (assembly-level) debugger instead? You can run it, set native breakpoints, " +
-                "and inspect registers/memory — but not break on C# lines. (The C# decompilation stays available for reading.)",
-                "Managed debug", MessageBoxButton.YesNo, MessageBoxImage.Information);
-            if (choice == MessageBoxResult.Yes) BeginDebug(d => d.Launch(_image!.FilePath));
-            return;
-        }
+        // .NET Framework (desktop CLR) can't be launched via dbgshim (CoreCLR-only); the host uses the legacy
+        // ICLRMetaHost + ICorDebug.CreateProcess path instead. A Framework target is itself a managed .exe.
+        bool framework = !IsNetCoreTarget(dll);
 
         // Launch the sibling apphost .exe if present (its PE machine is the real bitness); else run via `dotnet <dll>`.
+        // (A .NET Framework managed .exe is its own apphost, so it takes the .exe branch.)
         string target; string? args = null; int bitness;
         if (File.Exists(exe)) { target = exe; bitness = PeBitness(exe) ?? 64; }
         else { target = "dotnet"; args = $"\"{dll}\""; bitness = 64; }
@@ -822,7 +811,7 @@ public partial class MainWindow : Window
             if (ep != 0) launchBps.Add(new BpLoc(module, ep, 0, EntryBreakpointId));
         }
 
-        mdbg.Launch(target, args, Path.GetDirectoryName(dll), launchBps);
+        mdbg.Launch(target, args, Path.GetDirectoryName(dll), launchBps, framework);
     }
 
     private const int EntryBreakpointId = -1;   // the implicit "stop at entry" breakpoint's id (not a user bp)
@@ -952,7 +941,14 @@ public partial class MainWindow : Window
         {
             using var fs = File.OpenRead(path);
             using var pe = new System.Reflection.PortableExecutable.PEReader(fs);
-            return pe.PEHeaders.PEHeader?.Magic == System.Reflection.PortableExecutable.PEMagic.PE32Plus ? 64 : 32;
+            var h = pe.PEHeaders;
+            if (h.PEHeader?.Magic == System.Reflection.PortableExecutable.PEMagic.PE32Plus) return 64;   // PE32+ → x64
+            // PE32: a managed AnyCPU assembly (IL-only, not 32-bit-required) runs as the OS bitness — x64 here — so
+            // it needs the x64 host; only an x86 / 32-bit-preferred managed image (Requires32Bit set, which
+            // 32-bit-preferred also sets) actually runs 32-bit. Native PE32 images are 32-bit.
+            if (h.CorHeader is { } cor)
+                return (cor.Flags & System.Reflection.PortableExecutable.CorFlags.Requires32Bit) != 0 ? 32 : 64;
+            return 32;
         }
         catch { return null; }
     }

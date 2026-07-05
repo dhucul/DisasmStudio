@@ -122,8 +122,8 @@ internal sealed class ManagedDebugClient : IDisposable
         }
     }
 
-    public void Launch(string target, string? args, string? cwd, IReadOnlyList<BpLoc>? bps)
-        => Send(new MdbgCommand { Cmd = Mdbg.Launch, Target = target, Args = args, Cwd = cwd, Breakpoints = bps?.ToArray() });
+    public void Launch(string target, string? args, string? cwd, IReadOnlyList<BpLoc>? bps, bool framework = false)
+        => Send(new MdbgCommand { Cmd = Mdbg.Launch, Target = target, Args = args, Cwd = cwd, Breakpoints = bps?.ToArray(), Framework = framework });
     public void SetBreakpoint(BpLoc bp) => Send(new MdbgCommand { Cmd = Mdbg.SetBreakpoint, Bp = bp });
     public void RemoveBreakpoint(int id) => Send(new MdbgCommand { Cmd = Mdbg.RemoveBreakpoint, Id = id });
     public void Go() => Send(new MdbgCommand { Cmd = Mdbg.Go });

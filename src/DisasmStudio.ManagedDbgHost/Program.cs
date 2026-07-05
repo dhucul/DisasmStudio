@@ -48,7 +48,7 @@ while ((line = reader.ReadLine()) is not null)
                 var lc = cmd;
                 _ = Task.Run(() =>
                 {
-                    try { engine.Launch(lc.Target!, lc.Args, lc.Cwd, lc.Breakpoints); }
+                    try { engine.Launch(lc.Target!, lc.Args, lc.Cwd, lc.Breakpoints, lc.Framework); }
                     catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message }); }
                 });
                 break;

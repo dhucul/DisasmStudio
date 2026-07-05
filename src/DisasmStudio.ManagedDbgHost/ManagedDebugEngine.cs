@@ -41,12 +41,14 @@ internal sealed class ManagedDebugEngine
 
     // ---- lifecycle ----
 
-    public void Launch(string target, string? args, string? cwd, BpLoc[]? pending)
+    public void Launch(string target, string? args, string? cwd, BpLoc[]? pending, bool framework)
     {
         if (pending is { Length: > 0 }) lock (_gate) _pending.AddRange(pending);
 
         string cmdline = string.IsNullOrEmpty(args) ? Quote(target) : $"{Quote(target)} {args}";
         string workdir = cwd ?? Path.GetDirectoryName(target) ?? Environment.CurrentDirectory;
+
+        if (framework) { LaunchFramework(target, cmdline, workdir); return; }
 
         CreateProcessForLaunchResult proc;
         try
@@ -103,6 +105,61 @@ internal sealed class ManagedDebugEngine
         cordebug.SetManagedHandler(_cb);
         _process = cordebug.DebugActiveProcess(proc.ProcessId, false);
 
+        _emit(new MdbgEvent { Ev = Mdbg.Launched, Pid = _pid });
+    }
+
+    // CLSID_CLRDebuggingLegacy — ICLRRuntimeInfo.GetInterface(this, IID_ICorDebug) yields the desktop CLR's ICorDebug.
+    private static readonly Guid CLSID_CLRDebuggingLegacy = new("DF8395B5-A4BA-450B-A77C-A9A47762C520");
+
+    /// <summary>Launch a .NET Framework (desktop CLR) target. dbgshim/CoreCLR can't debug it, so obtain ICorDebug
+    /// from the OS desktop runtime via ICLRMetaHost, then launch + attach in one step with ICorDebug.CreateProcess
+    /// (the desktop CLR does not use dbgshim's runtime-startup notification). Everything after this — module loads,
+    /// breakpoints, stepping, stacks, locals — is the same ICorDebug machinery as the Core path.</summary>
+    private void LaunchFramework(string target, string cmdline, string workdir)
+    {
+        CorDebug cordebug;
+        try
+        {
+            var metahost = CLRCreateInstance().CLRMetaHost;
+            var runtimeInfo = new CLRRuntimeInfo((ICLRRuntimeInfo)metahost.GetRuntime("v4.0.30319", typeof(ICLRRuntimeInfo).GUID));
+            cordebug = new CorDebug((ICorDebug)runtimeInfo.GetInterface(CLSID_CLRDebuggingLegacy, typeof(ICorDebug).GUID));
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("could not initialize the .NET Framework debugger (desktop CLR v4.0.30319): " + ex.Message);
+        }
+
+        _cordebug = cordebug;
+        _cb = BuildCallback();
+        cordebug.Initialize();
+        cordebug.SetManagedHandler(_cb);
+
+        var si = new STARTUPINFOW { cb = Marshal.SizeOf<STARTUPINFOW>() };
+        PROCESS_INFORMATION pi = default;
+        try
+        {
+            _process = cordebug.CreateProcess(
+                lpApplicationName: target,
+                lpCommandLine: cmdline,
+                lpProcessAttributes: default,
+                lpThreadAttributes: default,
+                bInheritHandles: false,
+                dwCreationFlags: default,        // inherit the host's console (or lack of one) — matches the Core path
+                lpEnvironment: IntPtr.Zero,
+                lpCurrentDirectory: workdir,
+                lpStartupInfo: si,
+                lpProcessInformation: ref pi,
+                debuggingFlags: CorDebugCreateProcessFlags.DEBUG_NO_SPECIAL_OPTIONS);
+        }
+        catch (Exception ex) when (ex.HResult == unchecked((int)0x800702E4)   // ERROR_ELEVATION_REQUIRED
+                                   || (ex.Message?.Contains("0x800702E4", StringComparison.OrdinalIgnoreCase) ?? false))
+        {
+            _emit(new MdbgEvent { Ev = Mdbg.Error, Message = "ELEVATION_REQUIRED" });
+            return;
+        }
+
+        _pid = _process.Id;
+        try { _osProc = Process.GetProcessById(_pid); } catch { /* best-effort for exit code */ }
         _emit(new MdbgEvent { Ev = Mdbg.Launched, Pid = _pid });
     }
 

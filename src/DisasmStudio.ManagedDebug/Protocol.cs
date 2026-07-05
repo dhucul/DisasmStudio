@@ -26,6 +26,7 @@ public sealed record MdbgCommand
     public int Frame { get; init; }
     public BpLoc[]? Breakpoints { get; init; }  // pending breakpoints to arm as their modules load
     public int[]? Range { get; init; }          // [ilStart, ilEnd) of the current C# statement — for line-level step
+    public bool Framework { get; init; }         // target is .NET Framework (desktop CLR) — use the legacy ICorDebug launch
 }
 
 /// <summary>Event from the host to the app (one JSON object per line over the pipe).</summary>

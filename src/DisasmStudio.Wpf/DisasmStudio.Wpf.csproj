@@ -34,8 +34,14 @@
     Copy the COMPLETE managed-debug host (exe + its .dll + ClrDebug + the dbgshim runtimes + deps.json) next to
     the app under mdbghost/win-{arch}/ — where ManagedDebugHostLocator looks first. The bare ProjectReference
     above only drops the apphost stub (no deps), which can't run ("application to execute does not exist"), so
-    Run appeared to do nothing. The x86 host is copied when a `dotnet publish -r win-x86` output exists (for
-    32-bit targets); the x64 host is the normal build output and is always copied.
+    Run appeared to do nothing. The x64 host is the normal build output and is always copied.
+
+    For 32-bit targets (incl. .NET Framework x86), the x86 host is copied when a
+    `dotnet publish -r win-x86 --self-contained true` output exists. It MUST be self-contained: the
+    framework-dependent x86 apphost, launched from the x64 app, probes app-local and fails to resolve the global
+    x86 runtime ("No frameworks were found") — bundling the x86 runtime avoids that. Run:
+      dotnet publish src\DisasmStudio.ManagedDbgHost\DisasmStudio.ManagedDbgHost.csproj -c <cfg> -r win-x86 --self-contained true -p:PublishTrimmed=false
+    then rebuild this project so the output is copied under mdbghost\win-x86\.
   -->
   <Target Name="CopyManagedDbgHost" AfterTargets="Build">
     <ItemGroup>
