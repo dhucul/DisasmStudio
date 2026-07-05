@@ -34,7 +34,7 @@ internal static class ManagedDebugSmoke
 
         string module = Path.GetFileName(dll);
         Console.WriteLine($"entry method token = 0x{epToken:X8} in {module}");
-        if ((epToken & 0x06000000) != 0x06000000)
+        if ((epToken & 0xFF000000) != 0x06000000)   // table byte must be 0x06 (MethodDef)
             Console.WriteLine($"WARNING: entry token 0x{epToken:X8} is not a MethodDef (0x06……) — a library with no entry point can't be launched.");
 
         // Same target/bitness/host selection as MainWindow.StartManagedDebug.
