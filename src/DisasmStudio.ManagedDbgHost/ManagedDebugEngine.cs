@@ -118,15 +118,24 @@ internal sealed class ManagedDebugEngine
     private void LaunchFramework(string target, string cmdline, string workdir)
     {
         CorDebug cordebug;
+        string version = "v4.0.30319";
         try
         {
             var metahost = CLRCreateInstance().CLRMetaHost;
-            var runtimeInfo = new CLRRuntimeInfo((ICLRRuntimeInfo)metahost.GetRuntime("v4.0.30319", typeof(ICLRRuntimeInfo).GUID));
+            // Prefer the CLR version the target was built against (e.g. v2.0.50727 for a genuine 2.0/3.5 app), but
+            // fall back to v4 when that runtime isn't installed: on modern Windows CLR v2 is usually absent and a
+            // 2.0/3.5 exe rolls forward onto v4, so v4 is the ICorDebug that matches the process it actually becomes.
+            string built = "v4.0.30319";
+            try { var v = metahost.GetVersionFromFile(target); if (!string.IsNullOrEmpty(v)) built = v!; } catch { }
+            CLRRuntimeInfo runtimeInfo;
+            try { version = built; runtimeInfo = new CLRRuntimeInfo((ICLRRuntimeInfo)metahost.GetRuntime(built, typeof(ICLRRuntimeInfo).GUID)); }
+            catch when (built != "v4.0.30319")
+            { version = "v4.0.30319"; runtimeInfo = new CLRRuntimeInfo((ICLRRuntimeInfo)metahost.GetRuntime(version, typeof(ICLRRuntimeInfo).GUID)); }
             cordebug = new CorDebug((ICorDebug)runtimeInfo.GetInterface(CLSID_CLRDebuggingLegacy, typeof(ICorDebug).GUID));
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException("could not initialize the .NET Framework debugger (desktop CLR v4.0.30319): " + ex.Message);
+            throw new InvalidOperationException($"could not initialize the .NET Framework debugger (desktop CLR {version}): " + ex.Message);
         }
 
         _cordebug = cordebug;
@@ -349,8 +358,13 @@ internal sealed class ManagedDebugEngine
         try { fbp?.Raw.Activate(false); } catch { }
     }
 
+    private volatile bool _detachRequested;   // user asked to detach — never terminate the debuggee, even at Quit
+
     public void Stop()
     {
+        // A Detach can race the launch (before _process exists) and be dropped; the flag makes the subsequent
+        // Quit → Stop honor it — detach, don't terminate the debuggee the user asked to keep running.
+        if (_detachRequested) { try { _process?.Stop(0); } catch { } try { _process?.Detach(); } catch { } return; }
         try { _process?.Stop(0); } catch { }
         try { _process?.Terminate(0); } catch { }
         if (_process is null) KillTarget();   // launch failed before attach → kill the orphaned target
@@ -358,9 +372,10 @@ internal sealed class ManagedDebugEngine
 
     public void Detach()
     {
+        _detachRequested = true;
         try { _process?.Stop(0); } catch { }
         try { _process?.Detach(); } catch { }
-        if (_process is null) KillTarget();
+        if (_process is null) KillTarget();   // resumed-but-never-attached orphan (failed launch) → clean up
     }
 
     /// <summary>Terminate the target via the OS handle — the fallback when we resumed it but never attached

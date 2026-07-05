@@ -43,6 +43,7 @@ internal static class ManagedDebugSmoke
         if (File.Exists(exe)) { target = exe; bitness = PeBitness(exe) ?? 64; }
         else { target = "dotnet"; args = $"\"{dll}\""; bitness = 64; }
         bool framework = !File.Exists(Path.ChangeExtension(dll, ".runtimeconfig.json"));   // no runtimeconfig ⇒ .NET Framework
+        if (framework && target == "dotnet") { Console.WriteLine("refusing: a .NET Framework library (no .exe) can't be launched (mirrors StartManagedDebug)."); return 2; }
         string? host = ManagedDebugHostLocator.Find(bitness);
         Console.WriteLine($"launch target = {target}{(args is null ? "" : " " + args)}");
         Console.WriteLine($"bitness = {bitness}  framework = {framework}  host = {host ?? "<NOT FOUND>"}");

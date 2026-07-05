@@ -767,6 +767,15 @@ public partial class MainWindow : Window
         // (A .NET Framework managed .exe is its own apphost, so it takes the .exe branch.)
         string target; string? args = null; int bitness;
         if (File.Exists(exe)) { target = exe; bitness = PeBitness(exe) ?? 64; }
+        else if (framework)
+        {
+            // A .NET Framework assembly with no .exe is a library (no entry point) — the `dotnet <dll>` fallback
+            // would load CoreCLR, which the desktop-CLR debugger can't attach to. Refuse clearly instead of hanging.
+            MessageBox.Show(this,
+                "This .NET Framework assembly has no runnable executable (it looks like a library). Open the program's .exe to debug it.",
+                "Managed debug", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         else { target = "dotnet"; args = $"\"{dll}\""; bitness = 64; }
 
         string? hostPath = ManagedDebugHostLocator.Find(bitness);
