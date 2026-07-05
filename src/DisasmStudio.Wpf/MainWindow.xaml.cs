@@ -174,8 +174,13 @@ public partial class MainWindow : Window
     {
         if (_nativeDropReady || PresentationSource.FromVisual(this) is not HwndSource source) return;
         _nativeDropReady = true;
-        NativeFileDrop.Enable(source.Handle);
+        IntPtr hwnd = source.Handle;
+        NativeFileDrop.Enable(hwnd);
         source.AddHook(OnNativeMessage);
+        // A default-AllowDrop TextBox realized later (e.g. a side-tab's filter box on first view) can make WPF
+        // re-register an OLE drop target on our hwnd, which would swallow WM_DROPFILES. Re-assert (revoke + accept)
+        // on each activation — it's cheap and idempotent — so the native drop path stays live.
+        Activated += (_, _) => NativeFileDrop.Enable(hwnd);
     }
 
     private IntPtr OnNativeMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -256,8 +261,10 @@ public partial class MainWindow : Window
             return;
         }
         // Alt+Left / Alt+Right walk the address history like a browser. (With Alt held, the real key is in SystemKey.)
+        // Require Alt alone, and stay out of the way of text fields (e.g. the address / filter / search boxes).
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
-        if ((Keyboard.Modifiers & ModifierKeys.Alt) != 0 && key is Key.Left or Key.Right)
+        if (Keyboard.Modifiers == ModifierKeys.Alt && key is Key.Left or Key.Right
+            && Keyboard.FocusedElement is not TextBox)
         {
             if (key == Key.Left) _nav.Back(); else _nav.Forward();
             e.Handled = true;

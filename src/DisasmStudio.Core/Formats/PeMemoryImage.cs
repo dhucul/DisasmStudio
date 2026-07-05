@@ -59,22 +59,22 @@ public sealed class PeMemoryImage : IBinaryImage
     {
         if (!PeView.TryParse(bytes, out var v) || v.Sections.Count == 0) return false;
 
-        // Strongest signal: a dumped/rebuilt header places each section's raw data at its RVA (PointerToRawData == VA).
+        // If every section's raw pointer already equals its RVA — a single-section PE, a FileAlignment==SectionAlignment
+        // build, or a dump with rebuilt headers — the on-disk and in-memory layouts coincide, so the NORMAL PE loader
+        // reads the correct bytes AND recovers imports/exports/resources. Prefer it (don't claim a memory image).
         bool allAtRva = true;
         foreach (var s in v.Sections) if (s.PointerToRawData != s.VirtualAddress) { allAtRva = false; break; }
-        if (allAtRva) return true;
+        if (allAtRva) return false;
 
-        // Otherwise compare the file length to the two expected layouts: a normal on-disk PE is sized to its
-        // file-aligned raw sections; a memory image spans the (larger) virtual layout, ~SizeOfImage.
+        // Sections are file-aligned (raw pointer != RVA), so the two layouts differ. It's a raw memory image only if
+        // the file is actually laid out by RVA: big enough to hold every section at its virtual address AND sized to
+        // the virtual image (~SizeOfImage). A normal on-disk PE is file-aligned and smaller; even one with a large
+        // appended overlay won't match the virtual-image size. This deliberately biases toward the normal PE loader.
         long len = bytes.LongLength;
-        long rawEnd = v.SizeOfHeaders, virtEnd = v.SizeOfHeaders;
-        foreach (var s in v.Sections)
-        {
-            rawEnd = Math.Max(rawEnd, (long)s.PointerToRawData + s.SizeOfRawData);
-            virtEnd = Math.Max(virtEnd, (long)s.VirtualAddress + Math.Max(s.VirtualSize, s.SizeOfRawData));
-        }
-        if (virtEnd <= rawEnd) return false;                       // no meaningful difference → treat as a file PE
-        return Math.Abs(len - virtEnd) < Math.Abs(len - rawEnd);   // file size closer to the virtual span → memory image
+        long virtEnd = v.SizeOfHeaders;
+        foreach (var s in v.Sections) virtEnd = Math.Max(virtEnd, (long)s.VirtualAddress + Math.Max(s.VirtualSize, s.SizeOfRawData));
+        long align = Math.Max(v.SectionAlignment, 0x1000u);
+        return len >= virtEnd && len <= (long)v.SizeOfImage + align;   // spans the sections' RVAs and ≈ the virtual image
     }
 
     /// <summary>Build a memory-image view directly from an in-memory dump (e.g. <c>DebuggerEngine.DumpImage</c>),

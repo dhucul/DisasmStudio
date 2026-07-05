@@ -58,17 +58,21 @@
   </Target>
 
   <!-- Same copy for `dotnet publish` (release / installer): the AfterTargets=Build copy above lands in the build
-       output ($(OutDir)), NOT the publish folder, so a published/installed app would otherwise lack mdbghost/
-       and the managed debugger would break there. -->
+       output ($(OutDir)), NOT the publish folder, so a published/installed app would otherwise lack mdbghost/ and
+       the managed debugger would break there. Both hosts are read from their per-RID SELF-CONTAINED publish
+       (win-{arch}\publish\), because the installed app is itself self-contained (no .NET prerequisite): a
+       framework-dependent host would fail to find a runtime on a clean machine. Publish both first (see
+       build-installer.ps1); the flat win-{arch}\publish\ layout also avoids the nested win-x64\win-x64\ a bare
+       `-r win-x64` build produced. -->
   <Target Name="CopyManagedDbgHostToPublish" AfterTargets="Publish">
     <ItemGroup>
-      <_MdbgPubX64 Include="..\DisasmStudio.ManagedDbgHost\bin\$(Configuration)\net10.0\**\*.*"
-                   Exclude="..\DisasmStudio.ManagedDbgHost\bin\$(Configuration)\net10.0\win-x86\**\*.*" />
+      <_MdbgPubX64 Include="..\DisasmStudio.ManagedDbgHost\bin\$(Configuration)\net10.0\win-x64\publish\**\*.*" />
       <_MdbgPubX86 Include="..\DisasmStudio.ManagedDbgHost\bin\$(Configuration)\net10.0\win-x86\publish\**\*.*" />
     </ItemGroup>
     <Copy SourceFiles="@(_MdbgPubX64)"
           DestinationFiles="@(_MdbgPubX64->'$(PublishDir)mdbghost\win-x64\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+          SkipUnchangedFiles="true"
+          Condition="'@(_MdbgPubX64)' != ''" />
     <Copy SourceFiles="@(_MdbgPubX86)"
           DestinationFiles="@(_MdbgPubX86->'$(PublishDir)mdbghost\win-x86\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true"

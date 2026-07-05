@@ -45,11 +45,21 @@ $verLine = Get-Content $issFile | Where-Object { $_ -match '#define\s+MyAppVersi
 $version = if ($verLine -match '"([^"]+)"') { $Matches[1] } else { '?' }
 Write-Host "DisasmStudio installer build - version $version" -ForegroundColor Cyan
 
+$hostProj = Join-Path $repo 'src\DisasmStudio.ManagedDbgHost'
+
 # --- 1. Publish the self-contained Release payload the installer packages ---
 if ($SkipPublish) {
     Write-Host "Skipping publish (-SkipPublish); reusing existing publish output." -ForegroundColor Yellow
 } else {
-    Write-Host "`n[1/2] Publishing self-contained Release (win-x64)..." -ForegroundColor Cyan
+    # The out-of-process managed-debug hosts (one per target bitness) must be self-contained: the installed app
+    # ships with no .NET prerequisite, so a framework-dependent host would fail to find a runtime on a clean
+    # machine. Publish both first so the WPF publish's copy target bundles them under mdbghost\win-{arch}\.
+    foreach ($rid in 'win-x64','win-x86') {
+        Write-Host "`n[1/3] Publishing managed-debug host ($rid, self-contained)..." -ForegroundColor Cyan
+        & dotnet publish $hostProj -c Release -r $rid --self-contained true -p:PublishTrimmed=false
+        if ($LASTEXITCODE -ne 0) { throw "dotnet publish (host $rid) failed (exit $LASTEXITCODE)." }
+    }
+    Write-Host "`n[2/3] Publishing self-contained Release app (win-x64)..." -ForegroundColor Cyan
     & dotnet publish $wpfProj -c Release -r win-x64 --self-contained true `
         -p:PublishSingleFile=false -p:DebugType=none
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)." }
@@ -76,7 +86,7 @@ if (-not $Iscc -or -not (Test-Path $Iscc)) {
 Write-Host "Using ISCC: $Iscc" -ForegroundColor DarkGray
 
 # --- 3. Compile the installer ---
-Write-Host "`n[2/2] Compiling installer..." -ForegroundColor Cyan
+Write-Host "`n[3/3] Compiling installer..." -ForegroundColor Cyan
 & $Iscc $issFile
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)." }
 
