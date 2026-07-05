@@ -51,7 +51,10 @@ public sealed class I8051Disassembler : INeutralDisassembler
     private static string Hex(int v)
     {
         string h = v.ToString("X");
-        return (h[0] >= 'A' ? "0" + h : h) + "h";     // keep a leading digit so it tokenises as a Number
+        // Conventional 8051: even hex width (byte -> 2 digits, e.g. 05h/0Ah) and always a leading digit so
+        // it tokenises as a Number (0ABh, not ABh).
+        if (h.Length % 2 != 0 || h[0] >= 'A') h = "0" + h;
+        return h + "h";
     }
 
     private static string Dir(int a) => Sfr.TryGetValue(a, out var n) ? n : Hex(a);
