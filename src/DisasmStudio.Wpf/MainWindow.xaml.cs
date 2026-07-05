@@ -779,7 +779,11 @@ public partial class MainWindow : Window
         _managedBps.Clear();
         foreach (var b in rekeyed) _managedBps[b.Id] = b;
 
-        var mdbg = new ManagedDebugSession(Dispatcher, hostPath);
+        // Only give the debuggee a console when it IS a console app — a GUI target would otherwise get a stray
+        // blank console window behind its own.
+        bool consoleApp = IsConsoleSubsystem(dll);
+
+        var mdbg = new ManagedDebugSession(Dispatcher, hostPath, consoleApp);
         mdbg.Launched += () => StatusText.Text = $"Managed debug: running {module}…";
         mdbg.Stopped += OnManagedStopped;
         mdbg.Exited += OnManagedExited;
@@ -792,7 +796,45 @@ public partial class MainWindow : Window
         CenterTabs.SelectedItem = ManagedTab;
         Managed.SetActiveBreakpoints(_managedBps.Values.Select(b => (b.Token, b.IlOffset)).ToList());
 
-        mdbg.Launch(target, args, Path.GetDirectoryName(dll), _managedBps.Values.ToList());
+        // Optionally stop at the managed entry point (Main) — reuse the "Break at loader" toggle. Sent to the
+        // host but not tracked as a user breakpoint (no gutter dot / side-list entry); Main runs once, so it's
+        // effectively one-shot.
+        var launchBps = _managedBps.Values.ToList();
+        if (LoaderBreakCheck.IsChecked == true)
+        {
+            int ep = EntryToken(dll);
+            if (ep != 0) launchBps.Add(new BpLoc(module, ep, 0, EntryBreakpointId));
+        }
+
+        mdbg.Launch(target, args, Path.GetDirectoryName(dll), launchBps);
+    }
+
+    private const int EntryBreakpointId = -1;   // the implicit "stop at entry" breakpoint's id (not a user bp)
+
+    /// <summary>True if the PE's subsystem is Windows CUI (a console app) — used to decide whether to give the
+    /// debuggee a console window. Defaults to false (no console) on any read error.</summary>
+    private static bool IsConsoleSubsystem(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            using var pe = new System.Reflection.PortableExecutable.PEReader(fs);
+            return pe.PEHeaders.PEHeader?.Subsystem == System.Reflection.PortableExecutable.Subsystem.WindowsCui;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>The managed entry-point method token (0x06……) of an assembly, or 0 if it has no managed entry.</summary>
+    private static int EntryToken(string dll)
+    {
+        try
+        {
+            using var fs = File.OpenRead(dll);
+            using var pe = new System.Reflection.PortableExecutable.PEReader(fs);
+            int tok = pe.PEHeaders.CorHeader?.EntryPointTokenOrRelativeVirtualAddress ?? 0;
+            return (tok & 0xFF000000) == 0x06000000 ? tok : 0;   // only a MethodDef entry point
+        }
+        catch { return 0; }
     }
 
     private void OnManagedStopped(MdbgEvent stop)

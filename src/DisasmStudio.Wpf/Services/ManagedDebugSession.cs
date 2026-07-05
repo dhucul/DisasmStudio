@@ -22,10 +22,10 @@ internal sealed class ManagedDebugSession : IDisposable
     public bool IsStopped { get; private set; }
     public MdbgEvent? LastStop { get; private set; }
 
-    public ManagedDebugSession(Dispatcher dispatcher, string hostPath)
+    public ManagedDebugSession(Dispatcher dispatcher, string hostPath, bool showConsole)
     {
         _dispatcher = dispatcher;
-        _client = new ManagedDebugClient(hostPath);
+        _client = new ManagedDebugClient(hostPath, showConsole);
         _client.EventReceived += OnEvent;
     }
 

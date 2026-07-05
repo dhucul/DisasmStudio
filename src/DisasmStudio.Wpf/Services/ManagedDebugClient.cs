@@ -41,6 +41,7 @@ internal static class ManagedDebugHostLocator
 internal sealed class ManagedDebugClient : IDisposable
 {
     private readonly string _hostPath;
+    private readonly bool _showConsole;   // give the host (and thus the debuggee) a console — only for console targets
     private NamedPipeServerStream? _pipe;
     private Process? _host;
     private StreamReader? _reader;
@@ -52,16 +53,20 @@ internal sealed class ManagedDebugClient : IDisposable
 
     public event Action<MdbgEvent>? EventReceived;
 
-    public ManagedDebugClient(string hostPath) => _hostPath = hostPath;
+    public ManagedDebugClient(string hostPath, bool showConsole)
+    {
+        _hostPath = hostPath;
+        _showConsole = showConsole;
+    }
 
     public void Start()
     {
         string pipeName = "disasmstudio-mdbg-" + Guid.NewGuid().ToString("N");
         _pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 
-        // Give the host (a console app) its own window: dbgshim's CreateProcessForLaunch can't request a new
-        // console, so the debuggee inherits the host's — this is how a console target's stdout becomes visible.
-        var psi = new ProcessStartInfo(_hostPath) { UseShellExecute = false, CreateNoWindow = false };
+        // The debuggee inherits the host's console (dbgshim's CreateProcessForLaunch can't request its own), so
+        // give the host a console ONLY for a console target — otherwise a GUI target gets a stray blank window.
+        var psi = new ProcessStartInfo(_hostPath) { UseShellExecute = false, CreateNoWindow = !_showConsole };
         psi.ArgumentList.Add("--pipe");
         psi.ArgumentList.Add(pipeName);
         _host = Process.Start(psi) ?? throw new InvalidOperationException("failed to start the managed-debug host");

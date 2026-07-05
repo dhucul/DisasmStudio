@@ -51,7 +51,7 @@ internal static class ManagedDebugSmoke
             return 3;
         }
 
-        var client = new ManagedDebugClient(host);
+        var client = new ManagedDebugClient(host, showConsole: false);
         var done = new ManualResetEventSlim(false);
         int stops = 0, modules = 0; bool exited = false; string? err = null;
         client.EventReceived += ev =>
