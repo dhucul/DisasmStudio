@@ -333,7 +333,7 @@ internal sealed class ManagedDebugEngine
         try
         {
             if (v is CorDebugReferenceValue r) { if (r.IsNull) return null; v = r.Dereference(); }
-            if (v is CorDebugStringValue s) return Truncate(s.GetString(Math.Min(Math.Max(s.Length, 0), 512)));
+            if (v is CorDebugStringValue s) return ReadCorString(s);
         }
         catch { }
         return null;
@@ -564,7 +564,7 @@ internal sealed class ManagedDebugEngine
             return v switch
             {
                 CorDebugReferenceValue r => r.IsNull ? "null" : FormatValue(r.Dereference()),
-                CorDebugStringValue s => "\"" + Truncate(s.GetString(Math.Min(Math.Max(s.Length, 0), 256))) + "\"",
+                CorDebugStringValue s => "\"" + ReadCorString(s) + "\"",
                 CorDebugArrayValue a => $"{a.ElementType}[{a.Count}]",
                 CorDebugBoxValue b => "{" + (b.Object.IsValueClass ? "struct" : "object") + "}",
                 CorDebugObjectValue o => "{" + (o.IsValueClass ? "struct" : "object") + "}",
@@ -603,6 +603,17 @@ internal sealed class ManagedDebugEngine
     }
 
     private static string Truncate(string s) => s.Length <= 200 ? s : s[..200] + "…";
+
+    /// <summary>Read a debuggee string in full, then bound it for display. The ClrDebug wrapper materializes the
+    /// result as <c>new string(buffer, 0, actualLength)</c> using the string's FULL length, so the buffer must be
+    /// sized to the whole string — passing a smaller cap throws ArgumentOutOfRangeException (which would drop the
+    /// value entirely, not truncate it). So fetch exactly <c>s.Length</c> and let <see cref="Truncate"/> cap the
+    /// shown text. An empty string is returned directly (GetString(0) would return E_INVALIDARG and throw).</summary>
+    private static string ReadCorString(CorDebugStringValue s)
+    {
+        int len = Math.Max(s.Length, 0);
+        return len == 0 ? "" : Truncate(s.GetString(len));
+    }
 
     // ---- helpers ----
 

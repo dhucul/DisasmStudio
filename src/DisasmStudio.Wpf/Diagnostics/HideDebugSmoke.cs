@@ -34,9 +34,13 @@ internal static class HideDebugSmoke
         var off = RunOnce(exe, hide: false, seconds, Log);
         var on = RunOnce(exe, hide: true, seconds, Log);
 
-        // "Ran" = reached the message loop: still alive at the timeout with no fatal (second-chance) exception.
+        // Hide OFF must be blocked: the app either surfaced an anti-debug exception or didn't survive to the
+        // timeout. Hide ON must have RUN: still alive at the timeout AND no anti-debug exception reached us —
+        // when the hide layer swallows the NtClose trick it does so in-engine (DBG_CONTINUE) before
+        // ExceptionObserved fires, so a swallowed trick leaves on.AntiDebugExceptions empty; a non-empty list
+        // under Hide means the swallow failed and the trick leaked through.
         bool offBlocked = off.AntiDebugExceptions.Count > 0 || !off.AliveAtTimeout;
-        bool onRan = on.AliveAtTimeout && off.AntiDebugExceptions.Count >= 0; // ran to timeout
+        bool onRan = on.AliveAtTimeout && on.AntiDebugExceptions.Count == 0;
         Log("");
         Log($"hide OFF: anti-debug exceptions={string.Join(",", off.AntiDebugExceptions.Select(c => $"0x{c:X8}"))} " +
             $"exit=0x{(uint)off.ExitCode:X8} alive@timeout={off.AliveAtTimeout}");
