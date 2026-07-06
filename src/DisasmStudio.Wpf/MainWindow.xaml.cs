@@ -51,6 +51,9 @@ public partial class MainWindow : Window
     // by (method token + IL offset) rather than address, and persist across the session; they are sent to the
     // host on launch (as pending) and live while stopped.
     private ManagedDebugSession? _mdbg;
+    private bool _mdbgFramework;          // the live managed session's target is .NET Framework (desktop CLR), not Core
+    private bool _mdbgTargetIsGui;        // target is a GUI (WinForms/WPF) app — the case where a managed debugger disables the top-level handler
+    private bool _mdbgNativeOfferDeclined; // user already declined the "run under the native debugger" offer this session
     private readonly Dictionary<int, BpLoc> _managedBps = [];   // id -> source breakpoint (module + method token + IL offset)
     private int _nextManagedBpId = 1;
     // Breakpoints toggled on the static listing before (or between) debug runs, kept as static VAs. They are
@@ -815,6 +818,9 @@ public partial class MainWindow : Window
         mdbg.Exited += OnManagedExited;
         mdbg.Error += OnManagedError;
         _mdbg = mdbg;
+        _mdbgFramework = framework;
+        _mdbgTargetIsGui = !consoleApp;
+        _mdbgNativeOfferDeclined = false;
 
         ManagedDebugDock.Visibility = Visibility.Visible;
         ManagedDebug.Clear();
@@ -878,18 +884,78 @@ public partial class MainWindow : Window
 
     private void OnManagedStopped(MdbgEvent stop)
     {
-        string where = stop.Frames is { Length: > 0 } fr ? _managed?.MethodName(fr[0].Token) ?? "" : "";
-        StatusText.Text = $"⛔ Managed stop ({stop.Reason})  {where}";
-        if (_managed is not null) ManagedDebug.Show(stop, _managed.MethodName);
-        if (stop.Frames is { Length: > 0 } f) NavigateManagedTo(f[0].Token, f[0].IlOffset);
+        var top = stop.Frames is { Length: > 0 } fr ? fr[0] : null;
+        string where = top is null ? "" : FrameLabel(top);
+        string detail = string.IsNullOrEmpty(stop.Message) ? "" : "  " + stop.Message;   // exception "Type: message"
+        StatusText.Text = $"⛔ Managed stop ({stop.Reason}){(where.Length > 0 ? "  " + where : "")}{detail}";
+        if (_managed is not null) ManagedDebug.Show(stop, FrameLabel);
+        if (top is not null) NavigateManagedTo(top);
+
+        // A .NET Framework desktop app (WinForms/WPF) relies on a top-level exception handler that the CLR disables
+        // while a MANAGED debugger is attached — so an exception it would normally absorb (often a harmless native
+        // SEHException surfaced through a UI control at startup) escapes here as unhandled and the program can't run
+        // on. The native (assembly-level) debugger doesn't set Debugger.IsAttached, so the app keeps swallowing it
+        // and runs — restoring the pre-2.14 behavior. Offer that for a GUI target (a console target has no such
+        // handler, so its unhandled exception is a real crash worth showing).
+        if (stop.Reason == Mdbg.ReasonException && _mdbgFramework && _mdbgTargetIsGui && !_mdbgNativeOfferDeclined)
+            OfferNativeForFrameworkStartupCrash(stop);
     }
 
-    /// <summary>Show a frame's method (navigating to it in the C# view if it isn't the one shown) and highlight
-    /// its line. Falls back to an in-place highlight for a method with no tree node (compiler-generated).</summary>
-    private void NavigateManagedTo(int token, int ilOffset)
+    /// <summary>Label a managed stack frame. A frame in the opened assembly resolves to its C# method name; a frame
+    /// in any other module (the BCL / a dependency, for which we have no decompiled model) shows as
+    /// <c>module!0xtoken</c> — never a name mis-resolved against the opened assembly's metadata.</summary>
+    private string FrameLabel(MdbgFrame f)
     {
-        if (_managed?.FindNode(token) is { } node) Managed.ShowMethodForStop(node, token, ilOffset);
-        else Managed.ShowStop(token, ilOffset);
+        if (_managed is not null && string.Equals(f.Module, OpenedModuleName(), StringComparison.OrdinalIgnoreCase))
+            return _managed.MethodName(f.Token);
+        return $"{f.Module}!0x{f.Token:X8}";
+    }
+
+    private string OpenedModuleName() => _image is not null ? Path.GetFileName(_image.FilePath) : "";
+
+    /// <summary>Show a frame's method (navigating to it in the C# view if it isn't the one shown) and highlight its
+    /// line — but only for a frame in the opened assembly; a BCL/dependency frame has no decompiled view, so just
+    /// clear the current-line highlight instead of jumping to whatever method shares that token here.</summary>
+    private void NavigateManagedTo(MdbgFrame f)
+    {
+        if (_managed is null || !string.Equals(f.Module, OpenedModuleName(), StringComparison.OrdinalIgnoreCase))
+        {
+            Managed.SetCurrentLine(-1);
+            return;
+        }
+        if (_managed.FindNode(f.Token) is { } node) Managed.ShowMethodForStop(node, f.Token, f.IlOffset);
+        else Managed.ShowStop(f.Token, f.IlOffset);
+    }
+
+    /// <summary>A .NET Framework target hit an unhandled exception at startup under the source-level debugger —
+    /// the classic "managed debugger disables WinForms' top-level handler" case. Offer to relaunch it under the
+    /// native debugger, which runs it (the pre-2.14 flow).</summary>
+    private void OfferNativeForFrameworkStartupCrash(MdbgEvent stop)
+    {
+        if (_image is null) return;
+        string prog = OpenedModuleName();
+        string what = string.IsNullOrEmpty(stop.Message) ? "an unhandled exception" : stop.Message!;
+        var choice = MessageBox.Show(this,
+            $"{prog} threw {what} during startup under the source-level (C#) debugger.\n\n" +
+            "This is expected for .NET Framework desktop apps (WinForms/WPF): the CLR disables their top-level " +
+            "exception handler while a managed debugger is attached, so a startup exception the app would normally " +
+            "absorb — often a harmless native SEHException from a UI control — escapes here and stops it. The " +
+            "program runs fine outside this debugger.\n\n" +
+            "Run it under the native (assembly-level) debugger instead? It launches and runs the program with " +
+            "anti-anti-debug (Hide from debugger) enabled so its own anti-debug checks don't stop it; you can " +
+            "set assembly-level breakpoints, and the C# decompilation stays available for reading.",
+            "Managed debug — .NET Framework app stopped at startup", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (choice != MessageBoxResult.Yes) { _mdbgNativeOfferDeclined = true; return; }   // don't nag again this session
+        string exe = _image.FilePath;
+        EndManagedDebug();
+        // This app just tripped an anti-debug check the CLR unmasked (the managed debugger disabled the handler
+        // that normally absorbs it) — i.e. it's a protected/anti-debug binary. A plain native launch would trip
+        // its NATIVE anti-debug too: e.g. the NtClose "close an invalid handle" trick raises STATUS_INVALID_HANDLE
+        // (0xC0000008) only under a debugger and would immediately stop us. Turn on the anti-anti-debug (hide)
+        // layer so those checks are neutralized and the program actually runs. Reflect it in the checkbox (which
+        // BeginDebug reads) so the state is visible and the user can turn it off for the next run.
+        HideDebuggerCheck.IsChecked = true;
+        BeginDebug(d => d.Launch(exe));
     }
 
     private void OnManagedExited(int code)
@@ -952,7 +1018,7 @@ public partial class MainWindow : Window
     private void OnManagedFrameActivated(int index)
     {
         if (_mdbg?.LastStop?.Frames is { } frames && index >= 0 && index < frames.Length)
-            NavigateManagedTo(frames[index].Token, frames[index].IlOffset);
+            NavigateManagedTo(frames[index]);
     }
 
     /// <summary>PE machine bitness of a file: 64 (PE32+) or 32 (PE32), or null if unreadable.</summary>

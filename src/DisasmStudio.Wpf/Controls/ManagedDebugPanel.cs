@@ -48,15 +48,16 @@ public sealed class ManagedDebugPanel : Grid
         return dock;
     }
 
-    /// <summary>Populate from a stop event. <paramref name="methodName"/> resolves a frame's method token to a label.</summary>
-    public void Show(MdbgEvent stop, Func<int, string> methodName)
+    /// <summary>Populate from a stop event. <paramref name="label"/> resolves a frame to a display label (module
+    /// aware — a frame outside the opened assembly is labelled by module + token, not a mis-resolved name).</summary>
+    public void Show(MdbgEvent stop, Func<MdbgFrame, string> label)
     {
         _frames.Items.Clear();
         if (stop.Frames is not null)
             for (int i = 0; i < stop.Frames.Length; i++)
             {
                 var f = stop.Frames[i];
-                _frames.Items.Add($"{i,2}  {methodName(f.Token)}   (IL 0x{f.IlOffset:X})");
+                _frames.Items.Add($"{i,2}  {label(f)}   (IL 0x{f.IlOffset:X})");
             }
         if (_frames.Items.Count > 0) _frames.SelectedIndex = 0;
 

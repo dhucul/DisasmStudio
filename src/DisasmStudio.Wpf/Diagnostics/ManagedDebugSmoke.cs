@@ -68,7 +68,8 @@ internal static class ManagedDebugSmoke
                 case Mdbg.Stopped:
                     stops++;
                     var top = ev.Frames is { Length: > 0 } fr ? fr[0] : null;
-                    Log($"STOPPED {ev.Reason} top={(top is null ? "-" : $"{top.Module}!0x{top.Token:X8}+IL{top.IlOffset}")} locals={ev.Locals?.Length}");
+                    string detail = string.IsNullOrEmpty(ev.Message) ? "" : $"  «{ev.Message}»";
+                    Log($"STOPPED {ev.Reason} top={(top is null ? "-" : $"{top.Module}!0x{top.Token:X8}+IL{top.IlOffset}")} locals={ev.Locals?.Length}{detail}");
                     client.Go();
                     break;
                 case Mdbg.Exited: Log($"EXITED code={ev.Code}"); exited = true; done.Set(); break;

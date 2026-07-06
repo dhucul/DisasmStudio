@@ -38,6 +38,16 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for the anti-anti-debug (Hide from debugger) layer: launch a protected target under
+        // the native debugger with Hide off then on, and confirm the NtClose invalid-handle trick (0xC0000008)
+        // stops us only with Hide off. Reproduces the "run the .NET Framework app natively" offer path headlessly.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-hidedbg")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = e.Args.Length > 1 ? Diagnostics.HideDebugSmoke.Run(e.Args[1]) : 2;
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }

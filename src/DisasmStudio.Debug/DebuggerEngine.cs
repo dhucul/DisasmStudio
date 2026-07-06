@@ -535,10 +535,12 @@ public sealed partial class DebuggerEngine
             }
         }
 
-        // Anti-anti-debug: the "close an invalid handle" trick raises STATUS_INVALID_HANDLE only under a
-        // debugger. Swallow it (continue as handled) so the program's __except never fires — exactly the
-        // no-debugger behaviour, where closing a bad handle is silent.
-        if (HideFromDebugger && code == 0xC0000008) { cont = Native.DBG_CONTINUE; return false; }
+        // Anti-anti-debug: the NtClose-based "bad handle" tricks raise an exception ONLY under a debugger — a
+        // normal process gets the status as a silent return value and never faults. Swallow the whole family
+        // (continue as handled) so the program's __except never fires, mirroring the no-debugger behaviour:
+        //   0xC0000008 STATUS_INVALID_HANDLE      — NtClose of a garbage/never-opened handle value
+        //   0xC0000235 STATUS_HANDLE_NOT_CLOSABLE — NtClose of a handle with the ProtectFromClose bit set
+        if (HideFromDebugger && (code == 0xC0000008 || code == 0xC0000235)) { cont = Native.DBG_CONTINUE; return false; }
 
         // The CLR's debugger-notification exception (raised by every .NET process that runs under a native
         // debugger, on every managed module/class load). It carries no fault — it exists only to notify a

@@ -245,9 +245,98 @@ internal sealed class ManagedDebugEngine
     {
         // Only surface an UNHANDLED (fatal) managed exception as a stop; first-chance/handled ones keep running.
         if (e.EventType != CorDebugExceptionCallbackType.DEBUG_EXCEPTION_UNHANDLED) return;
+        string? detail = DescribeException(e.Thread);   // "Type: message" so the stop says WHAT, not just a token
         lock (_gate) { _stoppedController = e.Controller; _stoppedThread = e.Thread; }
         e.Continue = false;
-        _emit(BuildStopped(e.Thread, Mdbg.ReasonException));
+        _emit(BuildStopped(e.Thread, Mdbg.ReasonException, detail));
+    }
+
+    // ---- exception detail (read the in-flight managed exception's type + message) ----
+
+    /// <summary>Best-effort "<c>Namespace.Type: message</c>" for the thread's current managed exception, for the
+    /// exception-stop display — so the user sees e.g. "System.IO.FileNotFoundException: …" instead of a bare
+    /// method token. Reads the exception object's exact type from its own module's metadata and walks the base
+    /// chain to read System.Exception's private <c>_message</c>. Any failure degrades to the type name, then null.</summary>
+    private static string? DescribeException(CorDebugThread thread)
+    {
+        CorDebugObjectValue? ex = TryGetExceptionObject(thread);
+        if (ex is null) return null;
+
+        string? type = null;
+        try
+        {
+            var cls = ex.Class;
+            type = ImportOf(cls.Module).GetTypeDefProps(cls.Token).szTypeDef;
+        }
+        catch { }
+
+        string? message = null;
+        try { message = ReadExceptionMessage(ex); } catch { }
+
+        if (string.IsNullOrEmpty(type)) type = "exception";
+        return string.IsNullOrEmpty(message) ? type : $"{type}: {message}";
+    }
+
+    private static CorDebugObjectValue? TryGetExceptionObject(CorDebugThread thread)
+    {
+        try
+        {
+            CorDebugValue v = thread.CurrentException;   // in-flight exception during an exception callback
+            if (v is null) return null;
+            if (v is CorDebugReferenceValue r) { if (r.IsNull) return null; v = r.Dereference(); }
+            return v as CorDebugObjectValue;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Read System.Exception._message off the object. It's declared on System.Exception (mscorlib /
+    /// CoreLib), so walk the exact-type base chain — each level carries its own module — until one declares it.</summary>
+    private static string? ReadExceptionMessage(CorDebugObjectValue ex)
+    {
+        CorDebugType? t; try { t = ex.ExactType; } catch { return null; }
+        for (; t is not null; t = SafeBase(t))
+        {
+            CorDebugClass cls;
+            try { cls = t.Class; } catch { break; }
+            MetaDataImport mdi;
+            try { mdi = ImportOf(cls.Module); } catch { continue; }
+            int field = FindField(mdi, cls.Token, "_message");
+            if (field == 0) continue;
+            try { return ReadString(ex.GetFieldValue(cls.Raw, new mdFieldDef(field))); }
+            catch { return null; }
+        }
+        return null;
+    }
+
+    private static CorDebugType? SafeBase(CorDebugType t) { try { return t.Base; } catch { return null; } }
+
+    private static MetaDataImport ImportOf(CorDebugModule module) =>
+        new((IMetaDataImport)module.GetMetaDataInterface(typeof(IMetaDataImport).GUID));
+
+    /// <summary>Token of the named field declared directly on <paramref name="td"/>, or 0 if it has none.</summary>
+    private static int FindField(MetaDataImport mdi, mdTypeDef td, string name)
+    {
+        IntPtr en = IntPtr.Zero;
+        var buf = new mdFieldDef[1];
+        try
+        {
+            if (mdi.TryEnumFieldsWithName(ref en, td, name, buf, out int n) == HRESULT.S_OK && n > 0)
+                return (int)buf[0].Value;
+        }
+        catch { }
+        finally { if (en != IntPtr.Zero) try { mdi.CloseEnum(en); } catch { } }
+        return 0;
+    }
+
+    private static string? ReadString(CorDebugValue v)
+    {
+        try
+        {
+            if (v is CorDebugReferenceValue r) { if (r.IsNull) return null; v = r.Dereference(); }
+            if (v is CorDebugStringValue s) return Truncate(s.GetString(Math.Min(Math.Max(s.Length, 0), 512)));
+        }
+        catch { }
+        return null;
     }
 
     private void OnExit()
@@ -387,7 +476,7 @@ internal sealed class ManagedDebugEngine
 
     // ---- stack / locals snapshot ----
 
-    private MdbgEvent BuildStopped(CorDebugThread thread, string reason)
+    private MdbgEvent BuildStopped(CorDebugThread thread, string reason, string? detail = null)
     {
         var frames = new List<MdbgFrame>();
         try
@@ -418,6 +507,7 @@ internal sealed class ManagedDebugEngine
             Thread = thread.Id,
             Frames = frames.ToArray(),
             Locals = locals,
+            Message = detail,   // exception "Type: message" on an exception stop; null otherwise
         };
     }
 
