@@ -55,6 +55,15 @@ public sealed class XrefDatabase
     public bool HasRefsTo(ulong va) => _toTarget.ContainsKey(va);
     public int TargetCount => _toTarget.Count;
 
+    /// <summary>Every reference of a given kind across the whole image (target order not guaranteed). Used to
+    /// build the static call graph from the <see cref="XrefKind.Call"/> edges collected during the sweep.</summary>
+    public IEnumerable<Xref> AllOfKind(XrefKind kind)
+    {
+        foreach (var list in _toTarget.Values)
+            foreach (var x in list)
+                if (x.Kind == kind) yield return x;
+    }
+
     /// <summary>A copy with every reference's from/to shifted by <paramref name="slide"/> — lets the live
     /// (ASLR-rebased) analysis reuse the static cross-references instead of starting empty.</summary>
     public XrefDatabase Rebased(ulong slide)

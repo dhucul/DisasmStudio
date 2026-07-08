@@ -12,6 +12,8 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.Core.Analysis.Signatures;
+using DisasmStudio.Core.IL;
 using DisasmStudio.Core.Devirt;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Export;
@@ -40,6 +42,10 @@ public partial class MainWindow : Window
     private Task _analysisDone = Task.CompletedTask;   // completes when the in-flight analysis ends (success/cancel/fault)
     private ulong[] _funcStarts = [];
     private string? _projectPath;
+    // User markup (renames / comments / bookmarks), keyed by static VA. The single source of truth for the
+    // session: re-applied to each (re-)analysis result via UseMarkup so edits survive a patch/undo re-analysis,
+    // and saved into the .dsproj. Reset on a fresh file open; loaded from the project on OpenProject.
+    private Markup _markup = new();
     private AnalysisOptions _loadOptions = AnalysisOptions.None;   // optional non-code sections / PE header folded into the listing
     private ResourceNodeVm? _selectedResource;                    // current leaf in the Resources tree (for Save)
     private ManagedAssembly? _managed;                            // the .NET model when the open image is a managed assembly
@@ -73,6 +79,7 @@ public partial class MainWindow : Window
     private bool _restartPending;           // relaunch the target once the current debuggee has exited
     private DllDebugParams? _dllDebug;      // set for a hosted-DLL session (null for an EXE); reused on Restart
     private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
+    private CallGraph? _callGraph;           // whole-program static call graph, built lazily on first Call Graph tab view
 
     // How the current DLL session is hosted, so Restart can relaunch it identically.
     private readonly record struct DllDebugParams(string HostExe, string CommandLine, string? WorkingDir, string DllPath, uint BreakRva, bool BreakIsEntry);
@@ -123,10 +130,29 @@ public partial class MainWindow : Window
         Linear.OpenInGraphRequested += va => { OpenGraph(va); CenterTabs.SelectedIndex = 1; };
         Linear.OpenInDecompilerRequested += va => { OpenDecompiler(va); CenterTabs.SelectedIndex = 3; };
         Linear.PatchRequested += OnPatchInstruction;
+        Linear.RenameRequested += OnRename;
+        Linear.CommentRequested += OnSetComment;
+        Linear.BookmarkToggleRequested += OnToggleBookmark;
+        // Bookmarks are static-VA markup; show them even while the live view is up (read-only). `va - LiveSlide`
+        // maps the shown (possibly live) address back to static space, where the session markup is keyed.
+        Linear.IsBookmarkAt = va => _markup.Bookmarks.Contains(va - LiveSlide);
         Hex.Edited += OnHexEdited;
+        Hex.RenameRequested += OnRename;
+        Hex.CommentRequested += OnSetComment;
+        Hex.BookmarkToggleRequested += OnToggleBookmark;
         Graph.BlockSelected += va => _nav.Navigate(va);
+        Graph.RenameRequested += OnRename;
+        Graph.CommentRequested += OnSetComment;
+        Graph.BookmarkToggleRequested += OnToggleBookmark;
         Decompiler.NavigateRequested += va => _nav.Navigate(va);
         Decompiler.SelectionChanged += OnAddressFocused;
+        Decompiler.RenameRequested += OnRename;
+        Decompiler.CommentRequested += OnSetComment;
+        Decompiler.BookmarkToggleRequested += OnToggleBookmark;
+        CallGraphPanel.NavigateRequested += va => _nav.Navigate(va);
+        Linear.ShowInCallGraphRequested += ShowInCallGraph;
+        Linear.EmulateFunctionRequested += OnEmulateFunction;
+        Decompiler.EmulateFunctionRequested += OnEmulateFunction;
         Linear.SaveAsmRequested += SaveFunctionAsm;
         Decompiler.SaveCRequested += SaveFunctionC;
         Linear.BreakpointToggleRequested += OnBreakpointToggle;
@@ -507,6 +533,219 @@ public partial class MainWindow : Window
         _nav.Navigate(b.Va);
     }
 
+    // ---- interactive markup: rename / comment / bookmark (persisted in the .dsproj) ----
+
+    /// <summary>Rename the symbol at <paramref name="va"/> (blank resets it to the machine name).</summary>
+    private void OnRename(ulong va)
+    {
+        if (_result is null || va == 0) return;
+        string current = _result.NameFor(va) ?? "";
+        string? name = Dialogs.AskText(this, "Rename symbol", $"New name for {va:X} (blank to reset):", current);
+        if (name is null) return;   // cancelled
+        _result.SetName(va, name);   // update the displayed result (static or live) immediately
+        MirrorToStaticMarkup(m => { ulong sva = va - LiveSlide; if (name.Length == 0) m.Names.Remove(sva); else m.Names[sva] = name; });
+        RefreshAfterMarkup(namesChanged: true);
+        StatusText.Text = name.Length == 0 ? $"Reset name at {va - LiveSlide:X}" : $"Renamed {va - LiveSlide:X} → {name}";
+    }
+
+    /// <summary>Set (or, when blank, clear) an inline comment at <paramref name="va"/>.</summary>
+    private void OnSetComment(ulong va)
+    {
+        if (_result is null || va == 0) return;
+        string current = _result.Comments.TryGetValue(va, out var c) ? c : "";
+        string? text = Dialogs.AskText(this, "Set comment", $"Comment at {va:X} (blank to clear):", current, multiline: true);
+        if (text is null) return;
+        _result.SetComment(va, text);
+        MirrorToStaticMarkup(m => { ulong sva = va - LiveSlide; if (text.Length == 0) m.Comments.Remove(sva); else m.Comments[sva] = text; });
+        RefreshAfterMarkup(namesChanged: false);
+        StatusText.Text = text.Length == 0 ? $"Cleared comment at {va - LiveSlide:X}" : $"Commented {va - LiveSlide:X}";
+    }
+
+    /// <summary>Toggle a bookmark at <paramref name="va"/> (keyed in static space so it persists across runs).</summary>
+    private void OnToggleBookmark(ulong va)
+    {
+        if (va == 0) return;
+        ulong sva = va - LiveSlide;
+        bool now = _markup.Bookmarks.Add(sva) || !_markup.Bookmarks.Remove(sva);
+        RefreshBookmarkList();
+        Linear.Refresh();
+        Graph.Refresh();
+        StatusText.Text = now ? $"Bookmarked {sva:X}" : $"Removed bookmark {sva:X}";
+    }
+
+    /// <summary>When editing while the live view is up, mirror the edit into the session (static) markup so it
+    /// persists — the displayed live result carries its own overlay. When not debugging the displayed result IS
+    /// bound to the session markup, so no mirroring is needed.</summary>
+    private void MirrorToStaticMarkup(Action<Markup> edit) { if (_dbgViewLive) edit(_markup); }
+
+    /// <summary>Repaint/rebuild every pane that bakes names or comments into its content after a markup edit.</summary>
+    private void RefreshAfterMarkup(bool namesChanged)
+    {
+        Linear.RefreshAfterPatch();     // rebuild label lines (new/changed names) + repaint; also shows comments
+        Graph.Rebuild();                // operand names/comments are baked into the block tokens → rebuild
+        Decompiler.InvalidateCache();   // emitted lines baked in the old names/comments → re-render current fn
+        if (namesChanged && _result is not null)
+        {
+            RefreshFunctionRows();      // the function list shows Function.Name snapshots
+            BuildSearchIndex(_result);  // search index text includes function names
+        }
+    }
+
+    /// <summary>Rebuild just the Functions list rows (FunctionItem snapshots the name, so an in-place rename
+    /// needs fresh rows). Mirrors the function/import portion of <see cref="PopulateLists"/>.</summary>
+    private void RefreshFunctionRows()
+    {
+        if (_result is null) return;
+        var funcRows = _result.Functions.Select(f => new FunctionItem(f, _result.Image.SectionAt(f.Va)?.Name ?? ""));
+        var importRows = _result.Image.Imports.Select(i =>
+            new FunctionItem(i.IatVa, Demangler.Demangle(i.Name), _result.Image.SectionAt(i.IatVa)?.Name ?? ""));
+        _functions = new ObservableCollection<FunctionItem>(funcRows.Concat(importRows).OrderBy(x => x.Va));
+        _functionsView = CollectionViewSource.GetDefaultView(_functions);
+        _functionsView.Filter = FuncFilterPredicate;
+        FuncList.ItemsSource = _functionsView;
+    }
+
+    /// <summary>Rebuild the Bookmarks side list from the session markup, resolving each address to its name.</summary>
+    private void RefreshBookmarkList()
+    {
+        if (BookmarkList is null) return;   // not yet built (called during construction)
+        ulong slide = LiveSlide;
+        var names = _dbgViewLive ? _dbg?.LiveResult : _result;
+        BookmarkList.ItemsSource = _markup.Bookmarks
+            .OrderBy(v => v)
+            .Select(sva =>
+            {
+                ulong va = sva + slide;
+                string name = names?.NameFor(va) ?? "";
+                string cmt = _markup.Comments.TryGetValue(sva, out var c) ? c : "";
+                string label = name.Length > 0 && cmt.Length > 0 ? $"{name}   ; {cmt}" : name.Length > 0 ? name : cmt;
+                return new BookmarkItem(va, label);
+            })
+            .ToList();
+    }
+
+    private void NavigateToBookmark()
+    {
+        if (BookmarkList.SelectedItem is not BookmarkItem b) return;
+        CenterTabs.SelectedIndex = 0;   // ensure the linear view is the one shown
+        _nav.Navigate(b.Va);
+    }
+
+    private void OnBookmarkActivate(object sender, MouseButtonEventArgs e) => NavigateToBookmark();
+    private void OnBookmarkJump(object sender, RoutedEventArgs e) => NavigateToBookmark();
+    private void OnBookmarkRemove(object sender, RoutedEventArgs e) { if (BookmarkList.SelectedItem is BookmarkItem b) OnToggleBookmark(b.Va); }
+    private void OnBookmarkListKey(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Delete && BookmarkList.SelectedItem is BookmarkItem b) { OnToggleBookmark(b.Va); e.Handled = true; }
+    }
+
+    // ---- IL emulator (deobfuscation): resolve constants / decrypt data / fold opaque predicates ----
+
+    private async void OnEmulateFunction(ulong va)
+    {
+        if (_result is null) return;
+        if (_result.Image.IsArm || _result.Image.Is8051)
+        {
+            MessageBox.Show(this, "Emulation currently supports x86/x64 functions only.", "Emulate", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var fn = FindFunction(va);
+        if (fn is null) { StatusText.Text = "No function at that address to emulate."; return; }
+
+        StatusText.Text = $"Emulating {fn.Name}…";
+        var result = _result;
+        EmulationResult er;
+        try { er = await Task.Run(() => DisasmStudio.Core.IL.Decompiler.Emulate(fn, result)); }
+        catch (Exception ex) { StatusText.Text = "Emulation failed: " + ex.Message; return; }
+        if (!ReferenceEquals(_result, result)) return;   // the image changed while emulating
+
+        StatusText.Text = $"Emulation {er.Status}: {er.Values.Count} value(s), {er.Branches.Count} branch(es), {er.MemoryWrites.Count} decrypted byte(s).";
+        var dlg = new EmulationDialog(this, fn.Name, er, v => _result?.NameFor(v),
+            onNavigate: v => { CenterTabs.SelectedIndex = 0; _nav.Navigate(v); },
+            onApplyComments: () => ApplyEmulationComments(er),
+            onApplyPatch: () => ApplyEmulationPatch(er));
+        dlg.Show();
+    }
+
+    /// <summary>Attach the emulator's resolved constants and folded predicates as inline comments (via the
+    /// Phase-A markup overlay, so they persist and show in every pane).</summary>
+    private void ApplyEmulationComments(EmulationResult er)
+    {
+        if (_result is null) return;
+        void Set(ulong v, string text) { _result!.SetComment(v, text); MirrorToStaticMarkup(m => m.Comments[v - LiveSlide] = text); }
+        foreach (var v in er.Values.Values) Set(v.Va, $"= 0x{(ulong)v.Value:X} (emulated)");
+        foreach (var b in er.Branches.DistinctBy(b => b.Va))
+            Set(b.Va, b.Taken ? "opaque: always taken (emulated)" : "opaque: never taken (emulated)");
+        RefreshAfterMarkup(namesChanged: false);
+        StatusText.Text = "Applied emulation results as comments.";
+    }
+
+    /// <summary>Write the emulator's decrypted bytes back into the image (as file-offset patches, undoable via
+    /// the change stack) and re-analyze so the decrypted strings surface in the Strings list.</summary>
+    private async void ApplyEmulationPatch(EmulationResult er)
+    {
+        if (_result is null || _image is null || er.MemoryWrites.Count == 0) return;
+        int patched = 0;
+        foreach (var (start, bytes) in ContiguousRuns(er.MemoryWrites))
+            if (_image.PatchVa(start, bytes)) { _changeStack.Push((start, start + (ulong)bytes.Length, false)); patched += bytes.Length; }
+        UpdatePatchButtons();
+        StatusText.Text = $"Patched {patched:N0} decrypted byte(s); re-analyzing to surface decrypted strings…";
+        await StartAnalysis(_image, _nav.Current, CenterTabs.SelectedIndex, fresh: false);
+    }
+
+    /// <summary>Group sorted written bytes into maximal contiguous [start, bytes] runs for patching.</summary>
+    private static List<(ulong Start, byte[] Bytes)> ContiguousRuns(SortedDictionary<ulong, byte> writes)
+    {
+        var runs = new List<(ulong, byte[])>();
+        List<byte>? cur = null;
+        ulong start = 0, prev = 0;
+        foreach (var (addr, b) in writes)
+        {
+            if (cur is null || addr != prev + 1) { if (cur is not null) runs.Add((start, cur.ToArray())); cur = []; start = addr; }
+            cur.Add(b);
+            prev = addr;
+        }
+        if (cur is not null) runs.Add((start, cur.ToArray()));
+        return runs;
+    }
+
+    // ---- library-function signatures (FLIRT/FID-lite) ----
+
+    /// <summary>Write masked prologue signatures for this binary's named functions to a .sig file (default:
+    /// the auto-scanned <c>signatures/</c> folder). Opening another binary then auto-names matching functions.</summary>
+    private void OnGenerateSignatures(object sender, RoutedEventArgs e)
+    {
+        if (_result is null) { MessageBox.Show(this, "Open a binary first.", "Generate signatures", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        var sigs = SignatureMatcher.Generate(_result);
+        if (sigs.Count == 0)
+        {
+            MessageBox.Show(this, "No named functions to generate signatures from. Rename some functions (N), or open a binary with symbols/exports, first.\n\n(ARM/8051 images aren't supported.)",
+                "Generate signatures", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        try { Directory.CreateDirectory(SignatureLibrary.DefaultDirectory); } catch { }
+        var dlg = new SaveFileDialog
+        {
+            Title = "Save signatures",
+            Filter = "Signature file|*.sig",
+            InitialDirectory = Directory.Exists(SignatureLibrary.DefaultDirectory) ? SignatureLibrary.DefaultDirectory : null,
+            FileName = ExportBaseName() + ".sig",
+        };
+        if (dlg.ShowDialog(this) != true) return;
+        try
+        {
+            var lines = new List<string> { $"# {sigs.Count} signatures generated from {Path.GetFileName(_result.Image.FilePath)} ({_result.Image.ArchName})" };
+            lines.AddRange(sigs.Select(s => s.Serialize()));
+            File.WriteAllLines(dlg.FileName, lines);
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Generate signatures failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+        SignatureLibrary.Reload();   // pick up the new file for the next binary opened
+        bool inFolder = string.Equals(Path.GetDirectoryName(Path.GetFullPath(dlg.FileName)),
+            Path.GetFullPath(SignatureLibrary.DefaultDirectory), StringComparison.OrdinalIgnoreCase);
+        StatusText.Text = $"Wrote {sigs.Count:N0} signatures to {dlg.FileName}." +
+            (inFolder ? " They'll auto-name matching functions in binaries you open next." : " Move it into the 'signatures' folder to auto-apply it.");
+    }
+
     // ---- live strings ----
 
     private bool StringsTabVisible => SideTabs.SelectedItem is TabItem { Header: "Strings" };
@@ -590,7 +829,27 @@ public partial class MainWindow : Window
     /// SelectionChanged bubbling up from the inner list boxes.</summary>
     private void OnSideTabChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (e.Source is TabControl { SelectedItem: TabItem { Header: "Strings" } }) RefreshLiveStrings();
+        if (e.Source is not TabControl tc) return;
+        if (tc.SelectedItem is TabItem { Header: "Strings" }) RefreshLiveStrings();
+        else if (tc.SelectedItem is TabItem { Header: "Call Graph" }) EnsureCallGraph();
+    }
+
+    /// <summary>Build the whole-program call graph on first view (it iterates every call xref, so it's built
+    /// lazily rather than on every analysis) and hand it to the panel.</summary>
+    private void EnsureCallGraph()
+    {
+        if (_result is null) return;
+        _callGraph ??= CallGraph.Build(_result);
+        CallGraphPanel.SetResult(_result, _callGraph);
+    }
+
+    /// <summary>Root the call graph at the function containing <paramref name="va"/> and switch to its tab.</summary>
+    private void ShowInCallGraph(ulong va)
+    {
+        EnsureCallGraph();
+        CallGraphPanel.SetRoot(va);
+        foreach (var it in SideTabs.Items)
+            if (it is TabItem { Header: "Call Graph" } tab) { SideTabs.SelectedItem = tab; break; }
     }
 
     private void OnBreakpointActivate(object sender, MouseButtonEventArgs e) => NavigateToBreakpoint();
@@ -1253,10 +1512,10 @@ public partial class MainWindow : Window
         {
             Debug.AppendCapture(recs, is32);   // bounded recent view — does not retain the whole capture
             bool addedComment = false;
-            if (_result?.Comments is IDictionary<ulong, string> comments)
+            if (_result is not null)
                 foreach (var r in recs)
                     if (!r.IsReturn && _captureCommented.Add(r.CalleeVa))
-                        { comments[r.CalleeVa] = FunctionCapture.ArgComment(r, is32); addedComment = true; }
+                        { _result.AddMachineComment(r.CalleeVa, FunctionCapture.ArgComment(r, is32)); addedComment = true; }
             if (addedComment) Linear.Refresh();   // re-render only when a NEW inline comment actually appeared
         }
 
@@ -1348,6 +1607,7 @@ public partial class MainWindow : Window
         if (_savedResult is not null && _image is not null)
         {
             _result = _savedResult; _savedResult = null;
+            _result.UseMarkup(_markup);   // re-apply any renames made during the session (they were mirrored into _markup)
             _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
             PopulateLists(_result);
             Linear.SetResult(_result);
@@ -1365,6 +1625,7 @@ public partial class MainWindow : Window
             FileInfo.Text = "";
         }
         RefreshBreakpointList();   // back to the static pre-run set (kept in sync, so it persists for the next Run)
+        RefreshBookmarkList();     // re-resolve bookmark names in static space
     }
 
     /// <summary>Debugger detached but left the process running. Same teardown as an exit, but no restart and a
@@ -1629,12 +1890,14 @@ public partial class MainWindow : Window
         }
 
         _projectPath = path;
+        _markup = proj.Markup?.Clone() ?? new Markup();   // restore user renames/comments/bookmarks (applied in StartAnalysis)
         _loadOptions = new AnalysisOptions
         {
             IncludedDataSections = proj.LoadedSections is { Count: > 0 } ls ? new HashSet<string>(ls) : new HashSet<string>(),
             IncludeHeader = proj.LoadHeader,
         };
         await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab);
+        RefreshBookmarkList();
         Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(image.FilePath)})";
     }
 
@@ -1671,6 +1934,7 @@ public partial class MainWindow : Window
             CenterTab = CenterTabs.SelectedIndex,
             LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
             LoadHeader = _loadOptions.IncludeHeader,
+            Markup = _markup.IsEmpty ? null : _markup,
         };
         try { proj.Save(path); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
@@ -1815,6 +2079,8 @@ public partial class MainWindow : Window
         }
 
         _projectPath = null; // opening a binary directly starts an unsaved session
+        _markup = new Markup();   // a new binary starts with no user renames/comments/bookmarks
+        SignatureLibrary.Reload();   // re-scan signatures/*.sig so newly-added files apply to this binary
         IBinaryImage image;
         FirmwareScan? firmware = null;
         try
@@ -1942,6 +2208,8 @@ public partial class MainWindow : Window
             if (token.IsCancellationRequested) return AnalyzeOutcome.Cancelled;
 
             _result = result;
+            result.UseMarkup(_markup);   // overlay user renames/comments (and re-apply function-start renames) onto the fresh analysis
+            _callGraph = null;           // rebuilt lazily against the new result on the next Call Graph tab view
             PopulateLists(result);
             Linear.SetResult(result);
             Hex.SetImage(image);
@@ -2034,6 +2302,7 @@ public partial class MainWindow : Window
         _selectedResource = null;
         ResHeader.Text = result.Image.Resources is { Roots.Count: > 0 } ? "Select a resource" : "No resources";
         RefreshBreakpointList();
+        RefreshBookmarkList();
     }
 
     private void ClearLists()
@@ -2051,6 +2320,9 @@ public partial class MainWindow : Window
         ResHeader.Text = "Select a resource";
         XrefList.ItemsSource = null;
         BreakpointList.ItemsSource = null;
+        BookmarkList.ItemsSource = null;
+        CallGraphPanel.Clear();
+        _callGraph = null;
         _searchIndex = [];
         SearchResults.ItemsSource = null;
         SearchRefs.ItemsSource = null;

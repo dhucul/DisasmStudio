@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using DisasmStudio.Core.Analysis;
 
 namespace DisasmStudio.Wpf;
 
@@ -11,7 +12,7 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 public sealed record ProjectFile
 {
-    public int Version { get; init; } = 4;
+    public int Version { get; init; } = 5;
     public string BinaryPath { get; init; } = "";
     public string Format { get; init; } = "";   // "PE" / "ELF" / "Raw"
     public ulong RawBaseVa { get; init; }        // raw blobs only
@@ -22,6 +23,7 @@ public sealed record ProjectFile
     public int CenterTab { get; init; }          // active center tab (Linear/Graph/Hex)
     public List<string>? LoadedSections { get; init; }   // v2: non-code sections folded into the listing
     public bool LoadHeader { get; init; }                // v2: PE header folded into the listing
+    public Markup? Markup { get; init; }                 // v5: user renames / comments / bookmarks (null on older files)
 
     private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
 

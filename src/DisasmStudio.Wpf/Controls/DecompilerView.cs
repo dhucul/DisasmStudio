@@ -49,6 +49,17 @@ public sealed class DecompilerView : Grid
     public event Action<ulong>? NavigateRequested;
     public event Action<ulong>? SelectionChanged;
     public event Action<ulong>? SaveCRequested;
+    /// <summary>Rename the symbol at the caret line's address (right-click → Rename).</summary>
+    public event Action<ulong>? RenameRequested;
+    /// <summary>Set/clear an inline comment at the caret line's address (right-click → Set comment).</summary>
+    public event Action<ulong>? CommentRequested;
+    /// <summary>Toggle a bookmark at the caret line's address (right-click → Toggle bookmark).</summary>
+    public event Action<ulong>? BookmarkToggleRequested;
+    /// <summary>Emulate the shown function to resolve constants / decrypt data (right-click → Emulate).</summary>
+    public event Action<ulong>? EmulateFunctionRequested;
+
+    /// <summary>The address of the current caret line (0 when nothing is selected / it's a synthetic line).</summary>
+    private ulong CaretVa => _caret >= 0 && _caret < _lines.Count ? _lines[(int)_caret].Va : 0;
 
     private static readonly (ILLevel Level, string Label)[] Levels =
     [
@@ -97,8 +108,21 @@ public sealed class DecompilerView : Grid
         Children.Add(host);
 
         var menu = new ContextMenu();
+        var rename = new MenuItem { Header = "Rename…", InputGestureText = "N" };
+        rename.Click += (_, _) => { if (CaretVa != 0) RenameRequested?.Invoke(CaretVa); };
+        var comment = new MenuItem { Header = "Set comment…", InputGestureText = ";" };
+        comment.Click += (_, _) => { if (CaretVa != 0) CommentRequested?.Invoke(CaretVa); };
+        var bookmark = new MenuItem { Header = "Toggle bookmark" };
+        bookmark.Click += (_, _) => { if (CaretVa != 0) BookmarkToggleRequested?.Invoke(CaretVa); };
+        var emulate = new MenuItem { Header = "Emulate function (deobfuscate)…" };
+        emulate.Click += (_, _) => { if (_shownFn != 0) EmulateFunctionRequested?.Invoke(_shownFn); };
         var saveC = new MenuItem { Header = "Save function as C…" };
         saveC.Click += (_, _) => { if (_shownFn != 0) SaveCRequested?.Invoke(_shownFn); };
+        menu.Items.Add(rename);
+        menu.Items.Add(comment);
+        menu.Items.Add(bookmark);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(emulate);
         menu.Items.Add(saveC);
         _surface.ContextMenu = menu;
 
@@ -147,6 +171,15 @@ public sealed class DecompilerView : Grid
         _top = 0;
         ConfigureScroll();
         _surface.InvalidateVisual();
+    }
+
+    /// <summary>Drop the per-function decompilation cache (its emitted lines baked in the old names/comments)
+    /// and re-render the current function, so a user rename/comment shows immediately.</summary>
+    public void InvalidateCache()
+    {
+        _cache.Clear();
+        if (_result is { } r && _shownFn != 0 && r.FunctionByVa.TryGetValue(_shownFn, out var fn))
+            SetFunction(r, fn);
     }
 
     private void Show(DecompiledFunction dc)
@@ -304,6 +337,14 @@ public sealed class DecompilerView : Grid
             e.Handled = true;
         }
 
+        // Move the caret to the right-clicked line so the context menu's Rename/Comment/Bookmark act on it.
+        protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
+        {
+            Focus();
+            long line = _owner._top + (long)(e.GetPosition(this).Y / _owner._rowHeight);
+            _owner.MoveCaret(line);
+        }
+
         protected override void OnKeyDown(KeyEventArgs e)
         {
             switch (e.Key)
@@ -313,6 +354,10 @@ public sealed class DecompilerView : Grid
                 case Key.PageDown: _owner.MoveCaret(_owner._caret + _owner.VisibleRows); break;
                 case Key.PageUp: _owner.MoveCaret(_owner._caret - _owner.VisibleRows); break;
                 case Key.Enter: _owner.Activate(_owner._caret); break;
+                case Key.N when (Keyboard.Modifiers & ModifierKeys.Control) == 0:
+                    if (_owner.CaretVa != 0) _owner.RenameRequested?.Invoke(_owner.CaretVa); break;
+                case Key.OemSemicolon:
+                    if (_owner.CaretVa != 0) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
                 default: return;
             }
             e.Handled = true;

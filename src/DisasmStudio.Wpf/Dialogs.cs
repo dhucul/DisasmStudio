@@ -435,6 +435,28 @@ internal static class Dialogs
         return ok ? ParseHex(box.Text) : null;
     }
 
+    /// <summary>Ask for a single line of text, pre-filled with <paramref name="initial"/> (selected, so typing
+    /// replaces it). Used for rename / comment prompts. Returns the entered text (which may be empty — the
+    /// caller treats empty as "clear"), or null if cancelled. <paramref name="multiline"/> gives a taller box.</summary>
+    public static string? AskText(Window owner, string title, string prompt, string initial = "", bool multiline = false)
+    {
+        var box = new TextBox
+        {
+            Text = initial,
+            FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+            AcceptsReturn = multiline,
+            MinLines = multiline ? 3 : 1,
+            MaxLines = multiline ? 8 : 1,
+            TextWrapping = multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
+        };
+        box.Loaded += (_, _) => box.SelectAll();
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label(prompt));
+        panel.Children.Add(box);
+        bool ok = ShowModal(owner, title, panel, box, 420);
+        return ok ? box.Text.Trim() : null;
+    }
+
     /// <summary>Ask the kind (Execute / Write / Read-Write) and size (1/2/4/8 bytes) of a hardware breakpoint.
     /// Execute breakpoints are forced to 1 byte. Returns null if cancelled.</summary>
     public static (HwKind Kind, int Size)? AskHardwareBreakpoint(Window owner)

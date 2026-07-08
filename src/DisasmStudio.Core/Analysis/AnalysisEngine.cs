@@ -1,4 +1,5 @@
 using System.Text;
+using DisasmStudio.Core.Analysis.Signatures;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Formats;
 using Iced.Intel;
@@ -234,7 +235,17 @@ public static class AnalysisEngine
         foreach (var ts in jumpTables.Values) foreach (var t in ts) jumpTargets.Add(t);
         var (functions, byVa) = BuildFunctions(image, names, callTargets, ptrTargets, code, jumpTargets);
 
-        progress?.Report($"Done — {functions.Count:N0} functions, {strings.Count:N0} strings, {jumpTables.Count:N0} switches.");
+        // Library-function identification (FLIRT/FID-lite): name still-unnamed functions whose prologue matches
+        // a known signature. No-op unless the user has generated/imported signatures into signatures/*.sig.
+        int libNamed = 0;
+        if (SignatureLibrary.Shared.Count > 0)
+        {
+            progress?.Report("Matching library signatures…");
+            libNamed = SignatureMatcher.Apply(image, functions, names, comments, SignatureLibrary.Shared);
+        }
+
+        progress?.Report($"Done — {functions.Count:N0} functions, {strings.Count:N0} strings, {jumpTables.Count:N0} switches" +
+            (libNamed > 0 ? $", {libNamed:N0} library-named." : "."));
 
         return new AnalysisResult
         {

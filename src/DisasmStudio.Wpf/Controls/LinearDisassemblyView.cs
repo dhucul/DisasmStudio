@@ -67,6 +67,16 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? RunToCursorRequested;
     public event Action? RunToReturnRequested;
     public event Action<ulong>? CaptureFunctionRequested;
+    /// <summary>Rename the symbol at the address (right-click → Rename, or the N key).</summary>
+    public event Action<ulong>? RenameRequested;
+    /// <summary>Set/clear an inline comment at the address (right-click → Set comment, or ';').</summary>
+    public event Action<ulong>? CommentRequested;
+    /// <summary>Toggle a bookmark at the address (right-click → Toggle bookmark).</summary>
+    public event Action<ulong>? BookmarkToggleRequested;
+    /// <summary>Root the static call graph at the function containing the address (right-click → Show in call graph).</summary>
+    public event Action<ulong>? ShowInCallGraphRequested;
+    /// <summary>Emulate the function containing the address to resolve constants / decrypt data (right-click → Emulate).</summary>
+    public event Action<ulong>? EmulateFunctionRequested;
     /// <summary>A transient one-line status message (e.g. why "Follow target" did nothing).</summary>
     public event Action<string>? StatusRequested;
 
@@ -78,6 +88,8 @@ public sealed class LinearDisassemblyView : Grid
     public Func<ulong, bool>? IsHardwareBreakpointAt { get; set; }
     /// <summary>Predicate the renderer uses to tint instructions that have executed (coverage overlay).</summary>
     public Func<ulong, bool>? IsInstrHit { get; set; }
+    /// <summary>Predicate for whether an address is bookmarked (drives the context-menu label + gutter mark).</summary>
+    public Func<ulong, bool>? IsBookmarkAt { get; set; }
 
     public LinearDisassemblyView()
     {
@@ -783,10 +795,20 @@ public sealed class LinearDisassemblyView : Grid
         xref.Click += (_, _) => { if (CaretVa != 0) ShowXrefsRequested?.Invoke(CaretVa); };
         var graph = new MenuItem { Header = "Open function in graph" };
         graph.Click += (_, _) => { if (CaretVa != 0) OpenInGraphRequested?.Invoke(CaretVa); };
+        var callGraph = new MenuItem { Header = "Show in call graph" };
+        callGraph.Click += (_, _) => { if (CaretVa != 0) ShowInCallGraphRequested?.Invoke(CaretVa); };
         var decompile = new MenuItem { Header = "Decompile function" };
         decompile.Click += (_, _) => { if (CaretVa != 0) OpenInDecompilerRequested?.Invoke(CaretVa); };
+        var emulate = new MenuItem { Header = "Emulate function (deobfuscate)…" };
+        emulate.Click += (_, _) => { if (CaretVa != 0) EmulateFunctionRequested?.Invoke(CaretVa); };
         var saveAsm = new MenuItem { Header = "Save function as ASM…" };
         saveAsm.Click += (_, _) => { if (CaretVa != 0) SaveAsmRequested?.Invoke(CaretVa); };
+        var rename = new MenuItem { Header = "Rename…", InputGestureText = "N" };
+        rename.Click += (_, _) => { if (CaretVa != 0) RenameRequested?.Invoke(CaretVa); };
+        var comment = new MenuItem { Header = "Set comment…", InputGestureText = ";" };
+        comment.Click += (_, _) => { if (CaretVa != 0) CommentRequested?.Invoke(CaretVa); };
+        var bookmark = new MenuItem { Header = "Toggle bookmark" };
+        bookmark.Click += (_, _) => { if (CaretVa != 0) BookmarkToggleRequested?.Invoke(CaretVa); };
         var follow = new MenuItem { Header = "Follow target", InputGestureText = "Enter" };
         follow.Click += (_, _) => FollowCaret();
         // Reflect the caret's actual target each time the menu opens: show where Follow goes, and grey it
@@ -807,6 +829,8 @@ public sealed class LinearDisassemblyView : Grid
             follow.IsEnabled = t is not null;
             follow.Header = t is ulong tt ? $"Follow target → {NameOrAddr(tt)}" : "Follow target";
             editBp.IsEnabled = CaretVa != 0 && IsBreakpointAt?.Invoke(CaretVa) == true;
+            rename.Header = CaretVa != 0 ? $"Rename {NameOrAddr(CaretVa)}…" : "Rename…";
+            bookmark.Header = CaretVa != 0 && IsBookmarkAt?.Invoke(CaretVa) == true ? "Remove bookmark" : "Toggle bookmark";
         };
         var runTo = new MenuItem { Header = "Run to cursor" };
         runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
@@ -820,8 +844,14 @@ public sealed class LinearDisassemblyView : Grid
         menu.Items.Add(follow);
         menu.Items.Add(xref);
         menu.Items.Add(graph);
+        menu.Items.Add(callGraph);
         menu.Items.Add(decompile);
+        menu.Items.Add(emulate);
         menu.Items.Add(saveAsm);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(rename);
+        menu.Items.Add(comment);
+        menu.Items.Add(bookmark);
         menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
         menu.Items.Add(hwBp);
@@ -913,6 +943,8 @@ public sealed class LinearDisassemblyView : Grid
                 case Key.A when ctrl: _owner.SelectAll(); break;
                 case Key.G when ctrl: _owner.GoToRequested?.Invoke(); break;
                 case Key.F2 or Key.F9: if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
+                case Key.N when !ctrl: if (_owner.CaretVa != 0) _owner.RenameRequested?.Invoke(_owner.CaretVa); break;
+                case Key.OemSemicolon: if (_owner.CaretVa != 0) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
                 default: return;
             }
             e.Handled = true;

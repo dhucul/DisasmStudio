@@ -66,6 +66,18 @@ public static class Decompiler
         }
     }
 
+    /// <summary>Emulate <paramref name="fn"/> over its Low IL from the entry with unknown inputs — resolving
+    /// obfuscated constants, decrypting constant-keyed buffers, and folding constant predicates. Builds the CFG
+    /// and lifts with the same front-end the decompiler uses.</summary>
+    public static EmulationResult Emulate(Function fn, AnalysisResult result, EmulationOptions? opts = null)
+    {
+        CfgBuilder.Build(result.Image, fn, result.JumpTables);
+        if (fn.Blocks.Count == 0) return new EmulationResult { Status = EmuStatus.NoCode };
+        if (fn.Blocks.Count > MaxBlocks) return new EmulationResult { Status = EmuStatus.NoCode };
+        var low = LiftLow(fn, result);
+        return IlEmulator.Run(low, result.Image, opts);
+    }
+
     private static DecompiledFunction Note(ulong va, string msg)
     {
         var lines = NoteLines(va, msg);

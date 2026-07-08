@@ -11,6 +11,15 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // Headless (no-GUI) mode — Ghidra analyzeHeadless-style. When the first arg is a headless verb, run the
+        // Core-only command-line front end (attach to the launching terminal, print, exit) and never show a window.
+        if (e.Args.Length > 0 && Headless.IsHeadlessVerb(e.Args[0]))
+        {
+            bool hasConsole = AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = Headless.Run(e.Args, hasConsole);
+            Shutdown(rc);
+            return;
+        }
         // Hidden self-test for the condition evaluator: print to the launching terminal and exit, no UI.
         if (e.Args.Length > 0 && e.Args[0] == "--smoke-cond")
         {

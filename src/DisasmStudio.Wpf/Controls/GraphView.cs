@@ -52,6 +52,12 @@ public sealed class GraphView : FrameworkElement
     /// <summary>Toggle a software breakpoint at the address (gutter dot, right-click → Toggle breakpoint, or F2/F9).
     /// Wired to the same handler as the linear view so both share one breakpoint set.</summary>
     public event Action<ulong>? BreakpointToggleRequested;
+    /// <summary>Rename the symbol at the right-clicked instruction (right-click → Rename).</summary>
+    public event Action<ulong>? RenameRequested;
+    /// <summary>Set/clear an inline comment at the right-clicked instruction (right-click → Set comment).</summary>
+    public event Action<ulong>? CommentRequested;
+    /// <summary>Toggle a bookmark at the right-clicked instruction (right-click → Toggle bookmark).</summary>
+    public event Action<ulong>? BookmarkToggleRequested;
 
     /// <summary>Predicate the renderer uses to tint executed (traced) instruction rows — mirrors the
     /// linear view's coverage overlay so the graph shows the same trace highlights.</summary>
@@ -63,6 +69,13 @@ public sealed class GraphView : FrameworkElement
 
     /// <summary>Repaint without rebuilding layout — e.g. when the coverage/trace set grows during a run.</summary>
     public void Refresh() => InvalidateVisual();
+
+    /// <summary>Rebuild the block lines + layout (operand names/comments are baked into the tokens at build
+    /// time, so a user rename/comment needs a rebuild, not just a repaint).</summary>
+    public void Rebuild()
+    {
+        if (_result is not null && _function is not null) { BuildLines(_result); Layout(); InvalidateVisual(); }
+    }
 
     private sealed record Line(ulong Va, string Text, AsmToken[] Tokens, double Width, string? Comment);
 
@@ -77,9 +90,23 @@ public sealed class GraphView : FrameworkElement
     private void BuildContextMenu()
     {
         var menu = new ContextMenu();
+        var rename = new MenuItem { Header = "Rename…" };
+        rename.Click += (_, _) => { if (_menuVa != 0) RenameRequested?.Invoke(_menuVa); };
+        var comment = new MenuItem { Header = "Set comment…" };
+        comment.Click += (_, _) => { if (_menuVa != 0) CommentRequested?.Invoke(_menuVa); };
+        var bookmark = new MenuItem { Header = "Toggle bookmark" };
+        bookmark.Click += (_, _) => { if (_menuVa != 0) BookmarkToggleRequested?.Invoke(_menuVa); };
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2 / F9" };
         toggleBp.Click += (_, _) => { if (_menuVa != 0) BreakpointToggleRequested?.Invoke(_menuVa); };
-        menu.Opened += (_, _) => toggleBp.IsEnabled = _menuVa != 0;
+        menu.Opened += (_, _) =>
+        {
+            bool has = _menuVa != 0;
+            rename.IsEnabled = comment.IsEnabled = bookmark.IsEnabled = toggleBp.IsEnabled = has;
+        };
+        menu.Items.Add(rename);
+        menu.Items.Add(comment);
+        menu.Items.Add(bookmark);
+        menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
         ContextMenu = menu;
     }

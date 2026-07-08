@@ -95,6 +95,16 @@ public sealed class BpDef
     }
 }
 
+/// <summary>Row in the Bookmarks list. <see cref="Va"/> is a static VA before/between runs and a live
+/// (rebased) VA while the live view is up — the same space the listing shows — so a double-click navigates
+/// straight to it. <see cref="Label"/> is the resolved symbol name (and any user comment).</summary>
+public sealed class BookmarkItem(ulong va, string label)
+{
+    public ulong Va => va;
+    public string Address => va.ToString("X");
+    public string Label => label;
+}
+
 /// <summary>Row in the Xrefs list.</summary>
 public sealed class XrefItem(Xref x)
 {

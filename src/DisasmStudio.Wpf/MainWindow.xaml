@@ -19,6 +19,7 @@
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
                 <Button Content="Save ASM…" Click="OnSaveAsm" Margin="0,3,0,3" ToolTip="Export the full disassembly listing to a .asm file" />
                 <Button Content="Save C…" Click="OnSaveC" Margin="6,3,0,3" ToolTip="Export the decompiled Pseudo-C of all functions to a .c file" />
+                <Button Content="Gen Signatures…" Click="OnGenerateSignatures" Margin="6,3,0,3" ToolTip="FLIRT/FID-style: write masked prologue signatures for this binary's named functions to a .sig file. Drop .sig files in the 'signatures' folder beside the app and they auto-name matching functions when you open other binaries." />
                 <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
                 <Button x:Name="DbgRunBtn" Style="{StaticResource RunButton}" Content="▶ Run" Click="OnDebugRun" Margin="0,3,0,3" ToolTip="Run / continue (F5)" />
                 <Button x:Name="StepIntoBtn" Style="{StaticResource StepButton}" Content="⤓ Into" Click="OnStepInto" Margin="6,3,0,3" IsEnabled="False" ToolTip="Step into (F7)" />
@@ -261,6 +262,35 @@
                                 </ListBox.ItemTemplate>
                             </ListBox>
                         </DockPanel>
+                    </TabItem>
+                    <TabItem Header="Bookmarks">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextMuted}" FontSize="11"
+                                       Text="Bookmark any address from the listing / graph / decompiler / hex (right-click → Toggle bookmark). Rename symbols (N) and add comments (;) the same way. Double-click a bookmark to jump; Delete or right-click → Remove to clear it. All of this is saved in the .dsproj." />
+                            <ListBox x:Name="BookmarkList" MouseDoubleClick="OnBookmarkActivate"
+                                     KeyDown="OnBookmarkListKey"
+                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                <ListBox.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Jump to bookmark" Click="OnBookmarkJump" />
+                                        <MenuItem Header="Remove bookmark" Click="OnBookmarkRemove" />
+                                    </ContextMenu>
+                                </ListBox.ContextMenu>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="120" />
+                                            <TextBlock Text="{Binding Label}" Foreground="{StaticResource TextPrimary}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                    </TabItem>
+                    <TabItem Header="Call Graph">
+                        <ctl:CallGraphView x:Name="CallGraphPanel" />
                     </TabItem>
                     <TabItem Header="Sections">
                         <DockPanel>

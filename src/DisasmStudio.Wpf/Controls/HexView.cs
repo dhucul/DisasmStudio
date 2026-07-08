@@ -38,6 +38,15 @@ public sealed class HexView : Grid
 
     /// <summary>Raised (with the edited VA) after a byte is changed, so the host can track the edit.</summary>
     public event Action<ulong>? Edited;
+    /// <summary>Rename the symbol at the clicked byte's address (right-click → Rename).</summary>
+    public event Action<ulong>? RenameRequested;
+    /// <summary>Set/clear an inline comment at the clicked byte's address (right-click → Set comment).</summary>
+    public event Action<ulong>? CommentRequested;
+    /// <summary>Toggle a bookmark at the clicked byte's address (right-click → Toggle bookmark).</summary>
+    public event Action<ulong>? BookmarkToggleRequested;
+
+    /// <summary>The address of the current selection caret (the clicked byte), or 0 when nothing is selected.</summary>
+    private ulong SelectedVa => _hasSelection ? _selCaret : 0;
 
     /// <summary>When set (debugging), byte edits are written by VA through this hook (e.g. to process
     /// memory) instead of the file-offset patch path — which can't address a live 64-bit process.</summary>
@@ -69,9 +78,21 @@ public sealed class HexView : Grid
         copyHex.Click += (_, _) => CopySelection(asText: false);
         var copyText = new MenuItem { Header = "Copy (text)" };
         copyText.Click += (_, _) => CopySelection(asText: true);
-        _surface.ContextMenu = new ContextMenu();
-        _surface.ContextMenu.Items.Add(copyHex);
-        _surface.ContextMenu.Items.Add(copyText);
+        var rename = new MenuItem { Header = "Rename…" };
+        rename.Click += (_, _) => { if (SelectedVa != 0) RenameRequested?.Invoke(SelectedVa); };
+        var comment = new MenuItem { Header = "Set comment…" };
+        comment.Click += (_, _) => { if (SelectedVa != 0) CommentRequested?.Invoke(SelectedVa); };
+        var bookmark = new MenuItem { Header = "Toggle bookmark" };
+        bookmark.Click += (_, _) => { if (SelectedVa != 0) BookmarkToggleRequested?.Invoke(SelectedVa); };
+        var menu = new ContextMenu();
+        menu.Opened += (_, _) => rename.IsEnabled = comment.IsEnabled = bookmark.IsEnabled = SelectedVa != 0;
+        menu.Items.Add(copyHex);
+        menu.Items.Add(copyText);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(rename);
+        menu.Items.Add(comment);
+        menu.Items.Add(bookmark);
+        _surface.ContextMenu = menu;
 
         MeasureFont();
     }
@@ -411,6 +432,13 @@ public sealed class HexView : Grid
         protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
         {
             if (_dragging) { _dragging = false; ReleaseMouseCapture(); }
+        }
+
+        // Select the right-clicked byte so the context menu's Rename/Comment/Bookmark act on it.
+        protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
+        {
+            Focus();
+            if (_owner.HitTestByte(e.GetPosition(this), out ulong addr)) _owner.StartSelect(addr, extend: false);
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
