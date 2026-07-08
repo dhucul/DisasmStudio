@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
 
@@ -17,10 +18,18 @@ public sealed class CallGraphView : DockPanel
     private readonly TreeView _tree;
     private readonly TextBlock _header;
     private readonly ComboBox _mode;
+    private readonly ToggleButton _follow;
 
     private AnalysisResult? _result;
     private CallGraph? _graph;
     private ulong _root;
+
+    /// <summary>Supplies the address currently being viewed (for the "root here" button / follow mode). Set by the host.</summary>
+    public Func<ulong>? CurrentVa { get; set; }
+
+    /// <summary>When true, navigating the disassembly re-roots the graph at the new location (host-driven via
+    /// <see cref="NavigatedTo"/>).</summary>
+    public bool Follow => _follow.IsChecked == true;
 
     // Each node's root→node VA path (inclusive), so a branch stops when it revisits an ancestor (recursion).
     // Keyed by the TreeViewItem — avoids a fragile visual/logical-tree walk for lazily-added containers.
@@ -42,6 +51,11 @@ public sealed class CallGraphView : DockPanel
         _mode.SelectedIndex = 0;
         _mode.SelectionChanged += (_, _) => Rebuild();
 
+        var here = new Button { Content = "⌖ Here", Margin = new Thickness(6, 0, 0, 0), Padding = new Thickness(6, 1, 6, 1), ToolTip = "Re-root the graph at the function you're currently viewing" };
+        here.Click += (_, _) => RootAtCurrent();
+
+        _follow = new ToggleButton { Content = "Follow", Margin = new Thickness(6, 0, 0, 0), Padding = new Thickness(6, 1, 6, 1), ToolTip = "Automatically re-root the graph as you navigate the disassembly" };
+
         var refresh = new Button { Content = "⟳", Width = 26, Margin = new Thickness(6, 0, 0, 0), ToolTip = "Rebuild the tree (e.g. after a rename)" };
         refresh.Click += (_, _) => Rebuild();
 
@@ -58,8 +72,12 @@ public sealed class CallGraphView : DockPanel
         var top = new DockPanel { Margin = new Thickness(8, 6, 8, 4) };
         DockPanel.SetDock(_mode, Dock.Right);
         DockPanel.SetDock(refresh, Dock.Right);
+        DockPanel.SetDock(_follow, Dock.Right);
+        DockPanel.SetDock(here, Dock.Right);
         top.Children.Add(_mode);
         top.Children.Add(refresh);
+        top.Children.Add(_follow);
+        top.Children.Add(here);
         top.Children.Add(_header);
         SetDock(top, Dock.Top);
         Children.Add(top);
@@ -73,13 +91,28 @@ public sealed class CallGraphView : DockPanel
         Children.Add(_tree);
     }
 
-    /// <summary>Point the view at a new analysis (and its precomputed graph); resets the root to the entry point.</summary>
-    public void SetResult(AnalysisResult? result, CallGraph? graph)
+    /// <summary>Point the view at an analysis (and its precomputed graph). Idempotent: re-attaching the SAME
+    /// result is a no-op so switching to/from the Call Graph tab preserves the current root; a DIFFERENT result
+    /// (a new binary / re-analysis) resets the root to the entry point.</summary>
+    public void Attach(AnalysisResult? result, CallGraph? graph)
     {
+        if (ReferenceEquals(result, _result) && ReferenceEquals(graph, _graph)) return;
         _result = result;
         _graph = graph;
         _root = 0;
         Rebuild();
+    }
+
+    /// <summary>Re-root at the address currently being viewed (the "⌖ Here" button).</summary>
+    private void RootAtCurrent()
+    {
+        if (CurrentVa?.Invoke() is ulong va && va != 0) SetRoot(va);
+    }
+
+    /// <summary>The host calls this when the disassembly navigates; re-roots the graph when Follow is on.</summary>
+    public void NavigatedTo(ulong va)
+    {
+        if (Follow && va != 0 && _graph is not null) SetRoot(va);
     }
 
     public void Clear()

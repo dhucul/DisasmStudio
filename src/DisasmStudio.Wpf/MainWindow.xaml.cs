@@ -150,6 +150,7 @@ public partial class MainWindow : Window
         Decompiler.CommentRequested += OnSetComment;
         Decompiler.BookmarkToggleRequested += OnToggleBookmark;
         CallGraphPanel.NavigateRequested += va => _nav.Navigate(va);
+        CallGraphPanel.CurrentVa = () => _nav.Current ?? 0;   // for the panel's "⌖ Here" / Follow re-rooting
         Linear.ShowInCallGraphRequested += ShowInCallGraph;
         Linear.EmulateFunctionRequested += OnEmulateFunction;
         Decompiler.EmulateFunctionRequested += OnEmulateFunction;
@@ -834,22 +835,27 @@ public partial class MainWindow : Window
         else if (tc.SelectedItem is TabItem { Header: "Call Graph" }) EnsureCallGraph();
     }
 
+    private bool CallGraphTabVisible => SideTabs.SelectedItem is TabItem { Header: "Call Graph" };
+
     /// <summary>Build the whole-program call graph on first view (it iterates every call xref, so it's built
-    /// lazily rather than on every analysis) and hand it to the panel.</summary>
+    /// lazily rather than on every analysis) and hand it to the panel. Attaching is idempotent, so re-selecting
+    /// the tab preserves the current root; when Follow is on it re-roots at the address you're viewing.</summary>
     private void EnsureCallGraph()
     {
         if (_result is null) return;
         _callGraph ??= CallGraph.Build(_result);
-        CallGraphPanel.SetResult(_result, _callGraph);
+        CallGraphPanel.Attach(_result, _callGraph);
+        if (CallGraphPanel.Follow && _nav.Current is ulong cur) CallGraphPanel.SetRoot(cur);
     }
 
-    /// <summary>Root the call graph at the function containing <paramref name="va"/> and switch to its tab.</summary>
+    /// <summary>Root the call graph at the function containing <paramref name="va"/> and switch to its tab.
+    /// Select the tab first (that builds/attaches the graph), then set the root so it isn't reset by the switch.</summary>
     private void ShowInCallGraph(ulong va)
     {
-        EnsureCallGraph();
-        CallGraphPanel.SetRoot(va);
         foreach (var it in SideTabs.Items)
             if (it is TabItem { Header: "Call Graph" } tab) { SideTabs.SelectedItem = tab; break; }
+        EnsureCallGraph();               // no-op build if the tab-switch already did it
+        CallGraphPanel.SetRoot(va);      // final root wins
     }
 
     private void OnBreakpointActivate(object sender, MouseButtonEventArgs e) => NavigateToBreakpoint();
@@ -2358,6 +2364,7 @@ public partial class MainWindow : Window
         Hex.GoTo(va);
         if (CenterTabs.SelectedIndex == 1) OpenGraph(va);
         if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
+        if (CallGraphTabVisible) CallGraphPanel.NavigatedTo(va);   // re-root the call graph when Follow is on
 
         // Data targets read better in the hex view (skip while debugging — keep focus on the live code).
         // But if the section/header was folded into the listing, stay on Linear — that's where the user put it.
