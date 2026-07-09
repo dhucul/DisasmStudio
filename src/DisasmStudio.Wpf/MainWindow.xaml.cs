@@ -50,7 +50,12 @@ public partial class MainWindow : Window
     private ResourceNodeVm? _selectedResource;                    // current leaf in the Resources tree (for Save)
     private ManagedAssembly? _managed;                            // the .NET model when the open image is a managed assembly
     private int _managedSeq;                                      // guards the async managed-load against a newer file open
-    private readonly Stack<(ulong Start, ulong End, bool IsPatch)> _changeStack = new();   // mirrors the image undo stack
+    // Unified undo stack: byte patches / hex edits (kept in lock-step with the image's own undo stack) plus
+    // model edits like "create function". Ctrl+Z / the Undo button pop the most recent entry, whatever its kind.
+    private readonly Stack<EditEntry> _changeStack = new();
+    private abstract record EditEntry;
+    private sealed record ByteEdit(ulong Start, ulong End, bool IsPatch) : EditEntry;               // patch → RepairIndex, hex → InvalidateView
+    private sealed record CreateFunctionEdit(ulong StaticVa, bool AddedName) : EditEntry;  // user "create function here" (StaticVa = unslid)
 
     private DebugSession? _dbg;
     // Managed (.NET source-level) debugging: a separate out-of-process ICorDebug session. Breakpoints are kept
@@ -133,6 +138,8 @@ public partial class MainWindow : Window
         Linear.RenameRequested += OnRename;
         Linear.CommentRequested += OnSetComment;
         Linear.BookmarkToggleRequested += OnToggleBookmark;
+        Linear.CreateFunctionRequested += OnCreateFunction;
+        Linear.IsFunctionStart = va => _result?.FunctionByVa.ContainsKey(va) == true;
         // Bookmarks are static-VA markup; show them even while the live view is up (read-only). `va - LiveSlide`
         // maps the shown (possibly live) address back to static space, where the session markup is keyed.
         Linear.IsBookmarkAt = va => _markup.Bookmarks.Contains(va - LiveSlide);
@@ -286,7 +293,7 @@ public partial class MainWindow : Window
         if (e.Key == Key.Z && (Keyboard.Modifiers & ModifierKeys.Control) != 0
             && Keyboard.FocusedElement is not TextBox)   // let text fields keep their own undo
         {
-            UndoLastPatch();
+            UndoLastEdit();
             e.Handled = true;
             return;
         }
@@ -574,6 +581,27 @@ public partial class MainWindow : Window
         StatusText.Text = now ? $"Bookmarked {sva:X}" : $"Removed bookmark {sva:X}";
     }
 
+    /// <summary>"Create function here": register the caret address as a function start so an isolated block can
+    /// be listed, navigated and decompiled (its CFG/extent is discovered lazily on view). Persisted in the
+    /// session markup (survives reload / re-analysis via <see cref="AnalysisResult.UseMarkup"/>) and pushed on
+    /// the undo stack so Ctrl+Z / ↶ Undo removes it. Then opens the decompiler on the new function.</summary>
+    private void OnCreateFunction(ulong va)
+    {
+        if (_result is null || va == 0) return;
+        if (_result.FunctionByVa.ContainsKey(va)) { StatusText.Text = $"{va - LiveSlide:X} is already a function"; return; }
+        var (fn, addedName) = _result.AddFunction(va);
+        ulong sva = va - LiveSlide;                                     // markup is keyed in static space (like bookmarks)
+        _markup.Functions.Add(sva);
+        _funcStarts = _result.Functions.Select(f => f.Va).ToArray();    // AddFunction inserts sorted, so this stays ordered
+        RefreshAfterMarkup(namesChanged: true);                        // rebuild label lines, function rows, search index, decompiler cache
+        _changeStack.Push(new CreateFunctionEdit(sva, addedName));
+        UpdatePatchButtons();
+        _nav.Navigate(va);                                             // caret to the new function header
+        // Show its pseudo-C — except 8051, which has no decompiler path (OpenDecompiler would just show a notice).
+        if (_result.Image.Is8051 != true) { OpenDecompiler(va); CenterTabs.SelectedIndex = 3; }
+        StatusText.Text = $"Created function {fn.Name}";
+    }
+
     /// <summary>When editing while the live view is up, mirror the edit into the session (static) markup so it
     /// persists — the displayed live result carries its own overlay. When not debugging the displayed result IS
     /// bound to the session markup, so no mirroring is needed.</summary>
@@ -688,7 +716,7 @@ public partial class MainWindow : Window
         if (_result is null || _image is null || er.MemoryWrites.Count == 0) return;
         int patched = 0;
         foreach (var (start, bytes) in ContiguousRuns(er.MemoryWrites))
-            if (_image.PatchVa(start, bytes)) { _changeStack.Push((start, start + (ulong)bytes.Length, false)); patched += bytes.Length; }
+            if (_image.PatchVa(start, bytes)) { _changeStack.Push(new ByteEdit(start, start + (ulong)bytes.Length, false)); patched += bytes.Length; }
         UpdatePatchButtons();
         StatusText.Text = $"Patched {patched:N0} decrypted byte(s); re-analyzing to surface decrypted strings…";
         await StartAnalysis(_image, _nav.Current, CenterTabs.SelectedIndex, fresh: false);
@@ -1699,7 +1727,7 @@ public partial class MainWindow : Window
             return;
         }
         ulong end = va + (ulong)final.Length;
-        _changeStack.Push((va, end, true));
+        _changeStack.Push(new ByteEdit(va, end, true));
         RepairIndex(va, end);          // local re-decode of just this region — no full re-sweep
         UpdatePatchButtons();
     }
@@ -1708,7 +1736,7 @@ public partial class MainWindow : Window
     {
         // Hex byte edits stay view-local (no linear re-index — typing must stay snappy on huge files);
         // tracked so undo stays in lock-step with the image's undo stack.
-        _changeStack.Push((va, va + 1, false));
+        _changeStack.Push(new ByteEdit(va, va + 1, false));
         UpdatePatchButtons();
     }
 
@@ -1746,19 +1774,38 @@ public partial class MainWindow : Window
     private void UpdatePatchButtons()
     {
         SavePatchedBtn.IsEnabled = _image?.IsDirty == true;
-        UndoBtn.IsEnabled = _image?.CanUndo == true;
+        // Byte edits push to _changeStack in lock-step with the image's own undo stack, and create-function
+        // edits push there too (without touching the image), so the stack is the single source of "can undo".
+        UndoBtn.IsEnabled = _changeStack.Count > 0;
     }
 
-    private void OnUndoPatch(object sender, RoutedEventArgs e) => UndoLastPatch();
+    private void OnUndoPatch(object sender, RoutedEventArgs e) => UndoLastEdit();
 
-    private void UndoLastPatch()
+    /// <summary>Undo the most recent edit — a byte patch/hex edit (reverted through the image's undo stack) or
+    /// a "create function" (the function is removed). LIFO across both kinds.</summary>
+    private void UndoLastEdit()
     {
-        if (_image is null || !_image.CanUndo) return;
-        _image.Undo();
-        if (_changeStack.Count > 0)
+        if (_changeStack.Count == 0) return;
+        // Peek first: a byte edit that can't be reverted right now must stay on the stack (don't drop it).
+        switch (_changeStack.Peek())
         {
-            var (start, end, isPatch) = _changeStack.Pop();
-            if (isPatch) RepairIndex(start, end); else Hex.InvalidateView();
+            case ByteEdit b:
+                if (_image is null || !_image.CanUndo) return;
+                _changeStack.Pop();
+                _image.Undo();
+                if (b.IsPatch) RepairIndex(b.Start, b.End); else Hex.InvalidateView();
+                break;
+            case CreateFunctionEdit c:
+                _changeStack.Pop();
+                // Remove from the displayed result at its shown VA — the static VA rebased by the current slide,
+                // so this is correct whether or not a debug session is active now vs. when it was created.
+                _result?.RemoveFunction(c.StaticVa + LiveSlide, c.AddedName);
+                _markup.Functions.Remove(c.StaticVa);
+                if (c.AddedName) _markup.Names.Remove(c.StaticVa);   // drop any rename left on the address we created
+                if (_result is not null) _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
+                RefreshAfterMarkup(namesChanged: true);
+                StatusText.Text = $"Removed function sub_{c.StaticVa:X}";
+                break;
         }
         UpdatePatchButtons();
     }
@@ -2221,7 +2268,7 @@ public partial class MainWindow : Window
             Hex.SetImage(image);
             if (fresh) ProbeManaged(image);   // light up the C#/.NET tabs when this PE is a managed assembly
             SavePatchedBtn.IsEnabled = image.IsDirty;
-            UndoBtn.IsEnabled = image.CanUndo;
+            UndoBtn.IsEnabled = _changeStack.Count > 0;   // unified stack: also stays live for a pending create-function edit
             _funcStarts = result.Functions.Select(f => f.Va).ToArray();
 
             ulong target = initialVa ?? (image.EntryVa != 0 ? image.EntryVa

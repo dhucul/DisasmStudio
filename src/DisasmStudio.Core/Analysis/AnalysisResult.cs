@@ -11,9 +11,22 @@ public sealed class AnalysisResult
     /// Settable so a local patch repair can splice in a re-decoded region without a full re-analysis.</summary>
     public required LinearIndex Linear { get; set; }
 
-    /// <summary>Discovered functions (entry, exports, call targets), CFG built lazily per function.</summary>
-    public required IReadOnlyList<Function> Functions { get; init; }
-    public required IReadOnlyDictionary<ulong, Function> FunctionByVa { get; init; }
+    private List<Function> _functions = [];
+    private Dictionary<ulong, Function> _functionByVa = [];
+
+    /// <summary>Discovered functions (entry, exports, call targets), CFG built lazily per function. Kept
+    /// sorted by <see cref="Function.Va"/> so <c>FindFunction</c> can binary-search by address. The backing
+    /// store is a concrete mutable list so <see cref="AddFunction"/> (user "create function") can splice in.</summary>
+    public required IReadOnlyList<Function> Functions
+    {
+        get => _functions;
+        init => _functions = value as List<Function> ?? [.. value];
+    }
+    public required IReadOnlyDictionary<ulong, Function> FunctionByVa
+    {
+        get => _functionByVa;
+        init => _functionByVa = value as Dictionary<ulong, Function> ?? new(value);
+    }
 
     public required XrefDatabase Xrefs { get; init; }
     public required IReadOnlyList<FoundString> Strings { get; init; }
@@ -64,8 +77,43 @@ public sealed class AnalysisResult
         _markup = markup;
         _names = null;
         _comments = null;
+        foreach (var va in markup.Functions) AddFunction(va);   // re-materialize user-defined function starts
         foreach (var (va, name) in markup.Names)
             if (FunctionByVa.TryGetValue(va, out var fn)) fn.Name = name;
+    }
+
+    /// <summary>Register a user-defined function starting at <paramref name="va"/> so it appears in the
+    /// function list / linear header and can be navigated and decompiled (its CFG/extent is built lazily by
+    /// <c>CfgBuilder</c> on first view). Idempotent: if a function already starts there it is returned as-is
+    /// with <c>AddedName == false</c>. Inserts in <see cref="Function.Va"/> order so <see cref="Functions"/>
+    /// stays sorted. When the address had no name a <c>sub_XXXX</c> machine name is added so a label line
+    /// renders; <c>AddedName</c> reports that, so an undo can strip exactly what this added.</summary>
+    public (Function Fn, bool AddedName) AddFunction(ulong va)
+    {
+        if (_functionByVa.TryGetValue(va, out var existing)) return (existing, false);
+        bool hadName = Names.ContainsKey(va);
+        string name = hadName ? Names[va] : $"sub_{va:X}";
+        var fn = new Function { Va = va, Name = name };
+        _functionByVa[va] = fn;
+        int pos = _functions.FindIndex(f => f.Va > va);
+        if (pos < 0) _functions.Add(fn); else _functions.Insert(pos, fn);
+        if (!hadName)
+        {
+            _machineNames[va] = name;
+            _names = null;   // rebuild the overlay so the new label shows
+        }
+        return (fn, !hadName);
+    }
+
+    /// <summary>Remove a user-defined function (undo of <see cref="AddFunction"/>). When
+    /// <paramref name="removeName"/> the <c>sub_XXXX</c> machine name that <see cref="AddFunction"/> added is
+    /// stripped too, restoring the prior label state. Returns false if no function started at <paramref name="va"/>.</summary>
+    public bool RemoveFunction(ulong va, bool removeName)
+    {
+        if (!_functionByVa.Remove(va, out var fn)) return false;
+        _functions.Remove(fn);
+        if (removeName && _machineNames.Remove(va)) _names = null;
+        return true;
     }
 
     /// <summary>Apply a user rename at <paramref name="va"/> (blank clears it back to the machine name).

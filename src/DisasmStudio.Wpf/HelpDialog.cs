@@ -28,7 +28,7 @@ internal static class HelpDialog
             ("Click the gutter", "Toggle a breakpoint on that instruction (the left margin)"),
             ("Breakpoints panel", "Lists breakpoints; double-click to jump, Delete to remove"),
             ("◴ Trace / Clear trace", "Instruction trace from where you're stopped: single-steps the loaded module on Continue and tints each executed instruction (system DLLs run at full speed); click ◴ Trace again to stop (no pause needed)"),
-            ("Ctrl+Z", "Undo the last patch"),
+            ("Ctrl+Z", "Undo the last edit (patch or created function)"),
             ("(toolbar)", "Pause · Stop · Restart · Attach… · Exceptions…"),
         ]),
         ("Navigation", [
@@ -45,8 +45,9 @@ internal static class HelpDialog
         ("Linear view", [
             ("Ctrl+C", "Copy the selected lines"),
             ("Ctrl+A", "Select all"),
+            ("C", "Create a function at the caret, then decompile it"),
             ("Shift + move keys", "Extend the selection"),
-            ("Right-click", "Xrefs · open in graph · decompile · save ASM · run-to-cursor · capture · patch…"),
+            ("Right-click", "Xrefs · open in graph · create function · decompile · save ASM · run-to-cursor · capture · patch…"),
             ("Drag the divider", "Resize the bytes / disassembly split"),
         ]),
         ("Hex view", [

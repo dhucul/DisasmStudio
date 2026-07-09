@@ -18,8 +18,12 @@ public sealed class Markup
     /// <summary>Bookmarked addresses.</summary>
     public HashSet<ulong> Bookmarks { get; init; } = [];
 
+    /// <summary>User-defined function start addresses (created via "Create function here"). Re-materialized
+    /// onto each analysis by <see cref="AnalysisResult.UseMarkup"/> so they survive re-analysis and reload.</summary>
+    public HashSet<ulong> Functions { get; init; } = [];
+
     [System.Text.Json.Serialization.JsonIgnore]
-    public bool IsEmpty => Names.Count == 0 && Comments.Count == 0 && Bookmarks.Count == 0;
+    public bool IsEmpty => Names.Count == 0 && Comments.Count == 0 && Bookmarks.Count == 0 && Functions.Count == 0;
 
     /// <summary>A deep copy — used to snapshot the loaded project markup so the live session can't alias it.</summary>
     public Markup Clone() => new()
@@ -27,6 +31,7 @@ public sealed class Markup
         Names = new(Names),
         Comments = new(Comments),
         Bookmarks = new(Bookmarks),
+        Functions = new(Functions),
     };
 }
 
