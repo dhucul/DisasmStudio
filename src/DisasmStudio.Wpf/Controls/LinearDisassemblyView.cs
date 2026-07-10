@@ -91,8 +91,10 @@ public sealed class LinearDisassemblyView : Grid
     /// <summary>A transient one-line status message (e.g. why "Follow target" did nothing).</summary>
     public event Action<string>? StatusRequested;
 
-    /// <summary>Set the debuggee's current instruction (highlighted + centred); 0 clears it.</summary>
-    public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va); else _surface.InvalidateVisual(); }
+    /// <summary>Set the debuggee's current instruction (highlighted + centred); 0 clears it. Does not take
+    /// keyboard focus — this fires on every debugger stop/step, and stealing focus here would yank it away
+    /// from whatever pane the user is typing in (e.g. the memory dump's address box).</summary>
+    public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va, focus: false); else _surface.InvalidateVisual(); }
     /// <summary>Predicate the gutter uses to mark addresses that have a breakpoint.</summary>
     public Func<ulong, bool>? IsBreakpointAt { get; set; }
     /// <summary>Predicate the gutter uses to colour a hardware breakpoint's dot differently from a software one.</summary>
@@ -165,7 +167,7 @@ public sealed class LinearDisassemblyView : Grid
     }
 
     /// <summary>Centre the view on a VA and select that instruction.</summary>
-    public void GoToVa(ulong va)
+    public void GoToVa(ulong va, bool focus = true)
     {
         if (_result is null || _result.Linear.Count == 0) return;
         long line = _result.Linear.IndexOf(va);
@@ -181,7 +183,7 @@ public sealed class LinearDisassemblyView : Grid
         long firstThird = Math.Max(0, VisibleRows / 3);
         _topDisplay = Math.Clamp(vis - firstThird, 0, Math.Max(0, VisibleCount - 1));
         SyncScrollValue();
-        _surface.Focus();
+        if (focus) _surface.Focus();
         _surface.InvalidateVisual();
         SelectionChanged?.Invoke(va);
     }

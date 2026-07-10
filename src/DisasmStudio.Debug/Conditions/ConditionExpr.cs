@@ -32,14 +32,18 @@ public sealed class ConditionExpr
     public bool EvaluateBool(EvalContext ctx) => _root.Eval(ctx) != 0;
 
     /// <summary>Parse <paramref name="text"/>. Empty/whitespace yields <paramref name="expr"/> == null with no
-    /// error (an empty condition means "unconditional"). On a syntax error returns false with a message.</summary>
-    public static bool TryParse(string? text, out ConditionExpr? expr, out string? error)
+    /// error (an empty condition means "unconditional"). On a syntax error returns false with a message.
+    /// <paramref name="hexNumbers"/> selects the radix of un-prefixed number literals: false (the default, used
+    /// for breakpoint conditions like <c>rax == 5</c>) reads them as decimal; true (used by the memory address
+    /// box) reads them as hex, so <c>401000</c> is 0x401000 and <c>eax+10</c> adds 0x10 — x64dbg-style. An
+    /// explicit <c>0x</c> prefix is always hex regardless.</summary>
+    public static bool TryParse(string? text, out ConditionExpr? expr, out string? error, bool hexNumbers = false)
     {
         expr = null; error = null;
         if (string.IsNullOrWhiteSpace(text)) return true;
         try
         {
-            var p = new Parser(Tokenize(text));
+            var p = new Parser(Tokenize(text, hexNumbers));
             Node node = p.ParseExpression();
             p.ExpectEnd();
             expr = new ConditionExpr(node, text.Trim());
@@ -137,7 +141,7 @@ public sealed class ConditionExpr
 
     private sealed class ParseException(string msg) : Exception(msg);
 
-    private static List<Tok> Tokenize(string s)
+    private static List<Tok> Tokenize(string s, bool hexNumbers)
     {
         var toks = new List<Tok>();
         int i = 0;
@@ -164,6 +168,17 @@ public sealed class ConditionExpr
                     // ulong.TryParse (not Convert.ToUInt64) so an over-large literal returns a clean parse error
                     // instead of throwing OverflowException out of TryParse.
                     if (!ulong.TryParse(s.AsSpan(hs, i - hs), System.Globalization.NumberStyles.HexNumber,
+                                        System.Globalization.CultureInfo.InvariantCulture, out ulong hv))
+                        throw new ParseException($"invalid or too-large hex literal '{s[start..i]}'");
+                    toks.Add(new(TokKind.Num, s[start..i], hv));
+                }
+                else if (hexNumbers)
+                {
+                    // Hex-default context (memory address box): a bare number is hex — 1C = 0x1C, and an
+                    // offset like eax+10 adds 0x10. A leading digit is still required to enter this branch,
+                    // so a hex value starting with a-f needs a 0x prefix (e.g. 0xabc) to be a number not an ident.
+                    while (i < s.Length && Uri.IsHexDigit(s[i])) i++;
+                    if (!ulong.TryParse(s.AsSpan(start, i - start), System.Globalization.NumberStyles.HexNumber,
                                         System.Globalization.CultureInfo.InvariantCulture, out ulong hv))
                         throw new ParseException($"invalid or too-large hex literal '{s[start..i]}'");
                     toks.Add(new(TokKind.Num, s[start..i], hv));

@@ -108,11 +108,16 @@ public sealed class HexView : Grid
 
     public void InvalidateView() => _surface.InvalidateVisual();
 
-    public void GoTo(ulong address)
+    public void GoTo(ulong address, bool select = false)
     {
         if (_image is null) return;
         if (address < _image.MinVa) address = _image.MinVa;
         if (address > _image.MaxVa) address = _image.MaxVa;
+
+        // Highlight the exact target byte so navigation is visible even between two addresses in the same 16-byte
+        // row (e.g. rsp+4 vs rsp+8, which otherwise render identically and look like nothing happened), and so a
+        // target that lands in unmapped memory is still clearly shown at the address the expression resolved to.
+        if (select) { _selAnchor = _selCaret = address; _hasSelection = true; _editNibble = 0; }
 
         ulong aligned = address - (address % BytesPerRow);
         ulong back = (ulong)(Math.Max(0, VisibleRows / 2) * BytesPerRow);

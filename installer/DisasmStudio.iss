@@ -7,7 +7,7 @@
 ; Output: installer\Output\DisasmStudio-Setup-<version>.exe
 
 #define MyAppName "DisasmStudio"
-#define MyAppVersion "2.18.0"
+#define MyAppVersion "2.19.0"
 #define MyAppPublisher "David Hucul"
 #define MyAppExeName "DisasmStudio.exe"
 #define PublishDir "..\src\DisasmStudio.Wpf\bin\Release\net10.0-windows\win-x64\publish"

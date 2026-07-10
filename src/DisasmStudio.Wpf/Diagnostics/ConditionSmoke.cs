@@ -52,6 +52,22 @@ internal static class ConditionSmoke
             Log($"  [{(pass ? "PASS" : "FAIL")}] {desc}");
         }
 
+        // Hex-default (the memory address box): whole expression evaluated, un-prefixed numbers are hex.
+        ulong EvalHex(string text, RegisterSet r, Func<ulong, int, ulong?>? mem = null)
+        {
+            if (!ConditionExpr.TryParse(text, out var ex, out var err, hexNumbers: true) || ex is null)
+                throw new Exception($"parse failed: {err ?? "(empty)"}");
+            return ex.Evaluate(new EvalContext { Regs = r, ReadMem = mem ?? ((_, _) => null) });
+        }
+
+        void CheckVal(string desc, ulong actual, ulong expected)
+        {
+            total++;
+            bool pass = actual == expected;
+            if (!pass) fail++;
+            Log($"  [{(pass ? "PASS" : "FAIL")}] {desc}  (got 0x{actual:X})");
+        }
+
         void CheckParseError(string text)
         {
             total++;
@@ -98,6 +114,25 @@ internal static class ConditionSmoke
         Check("unsigned: 0 - 1 > 0", Eval("0 - 1 > 0", regs), true);
         Check("divide by zero -> 0 (no throw)", Eval("rax / 0 == 0", regs), true);
         Check("logical or short-circuit", Eval("rcx == 0x1C || [0x9999] == 1", regs, Mem), true);
+
+        // hex-default address-box expressions (the feature: `eax` worked but `eax+4` did not)
+        Log("hex-default (memory address box)");
+        CheckVal("eax -> 0x90ABCDEF", EvalHex("eax", regs), 0x90ABCDEF);
+        CheckVal("bare 401000 is hex", EvalHex("401000", regs), 0x401000);
+        CheckVal("eax+4", EvalHex("eax+4", regs), 0x90ABCDF3);
+        CheckVal("eax+10 (offset is hex)", EvalHex("eax+10", regs), 0x90ABCDFF);
+        CheckVal("1C is hex 0x1C", EvalHex("1C", regs), 0x1C);
+        CheckVal("rbx*2", EvalHex("rbx*2", regs), 0x20);
+        CheckVal("0x10 + 10 (both hex)", EvalHex("0x10 + 10", regs), 0x20);
+        CheckVal("[rsp+8] deref", EvalHex("[rsp+8]", regs, Mem), 0xDEAD);
+        CheckVal("[rsp+8]+2", EvalHex("[rsp+8]+2", regs, Mem), 0xDEAF);
+        CheckVal("rcx register only", EvalHex("rcx", regs), 0x1C);
+        // rsp+4 vs rsp+8 resolve to distinct addresses (they only *look* the same because both fall in one
+        // 16-byte hex row); rax+N resolves to rax+N even when rax holds a small, unmapped value.
+        CheckVal("rsp+4 (rsp=0x1000)", EvalHex("rsp+4", regs), 0x1004);
+        CheckVal("rsp+8 (rsp=0x1000)", EvalHex("rsp+8", regs), 0x1008);
+        CheckVal("rax+4", EvalHex("rax+4", regs), 0x1234567890ABCDF3);
+        CheckVal("rax+8", EvalHex("rax+8", regs), 0x1234567890ABCDF7);
 
         // x64-only register on a 32-bit target resolves to 0 (full32 == null)
         var regs32 = new RegisterSet { Is32 = true };

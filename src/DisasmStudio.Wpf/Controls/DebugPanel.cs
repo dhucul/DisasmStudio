@@ -88,8 +88,8 @@ public sealed class DebugPanel : Grid
 
         var memPanel = new DockPanel();
         _dump = new HexView();   // editable hex view over the whole live address space
-        _dumpAddrBox = new TextBox { FontFamily = Mono, Margin = new Thickness(4), ToolTip = "Address or register to follow (Enter); type hex over a byte to edit memory" };
-        _dumpAddrBox.KeyDown += (_, e) => { if (e.Key == Key.Enter) { _dumpAddr = ParseAddr(_dumpAddrBox.Text); _dump.GoTo(_dumpAddr); } };
+        _dumpAddrBox = new TextBox { FontFamily = Mono, Margin = new Thickness(4), ToolTip = "Address or expression to follow, e.g. 401000, eax, eax+4, [esp+8] (Enter; numbers are hex); type hex over a byte to edit memory" };
+        _dumpAddrBox.KeyDown += (_, e) => { if (e.Key == Key.Enter) { _dumpAddr = ParseAddr(_dumpAddrBox.Text); _dump.GoTo(_dumpAddr, select: true); } };
         DockPanel.SetDock(_dumpAddrBox, Dock.Top);
         memPanel.Children.Add(_dumpAddrBox);
         memPanel.Children.Add(_dump);
@@ -301,11 +301,32 @@ public sealed class DebugPanel : Grid
 
     private void NavTo(List<ulong> vas, int idx) { if (idx >= 0 && idx < vas.Count && vas[idx] != 0) NavigateRequested?.Invoke(vas[idx]); }
 
+    /// <summary>Resolve the memory box text to a target address. Accepts a full expression — registers and
+    /// sub-registers, CPU flags, memory derefs (<c>[esp+8]</c>, <c>dword [eax]</c>) and arithmetic (<c>eax+4</c>,
+    /// <c>rbx*2 - 10</c>) — evaluated against the stopped thread's registers and live memory via the same engine
+    /// as breakpoint conditions. Numbers are hex by default (x64dbg-style: <c>401000</c> is 0x401000). Empty or
+    /// unparseable input leaves the view where it is.</summary>
     private ulong ParseAddr(string s)
     {
-        s = s.Trim();
-        if (_session?.Engine.GetRegisters(_viewTid) is { } r) foreach (var (name, value) in r.Items) if (string.Equals(name, s, StringComparison.OrdinalIgnoreCase)) return value;
-        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
-        return ulong.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var v) ? v : _dumpAddr;
+        if (_session?.Engine is not { } eng) return _dumpAddr;
+        if (!ConditionExpr.TryParse(s, out var expr, out _, hexNumbers: true) || expr is null) return _dumpAddr;
+        // Registers may be unavailable (e.g. the target is free-running); fall back to an empty set so plain
+        // addresses and memory derefs still resolve — a register reference just reads 0 there. Never gate the
+        // whole box on registers, or a bare hex address would stop working the moment they can't be read.
+        var regs = eng.GetRegisters(_viewTid) ?? new RegisterSet { Is32 = eng.Is32 };
+        var ctx = new EvalContext
+        {
+            Regs = regs,
+            ReadMem = (a, n) =>
+            {
+                var b = eng.ReadMemory(a, n);
+                if (b.Length != n) return null;
+                ulong v = 0;
+                for (int i = 0; i < n; i++) v |= (ulong)b[i] << (8 * i);
+                return v;
+            },
+        };
+        try { return expr.Evaluate(ctx); }
+        catch { return _dumpAddr; }
     }
 }
