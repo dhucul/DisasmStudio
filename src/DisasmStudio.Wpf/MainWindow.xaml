@@ -119,12 +119,15 @@
                                 <MenuItem Header="Capture this function" Click="OnCaptureSelectedFunc" />
                             </ContextMenu>
                         </DataGrid.ContextMenu>
+                        <!-- Name / Section size to content (not star), so a long function name
+                             overflows the panel and the grid shows a horizontal scrollbar to reach
+                             it — the same "scroll instead of widen the panel" behaviour as the lists. -->
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="200"
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="Auto" MinWidth="140"
                                                 ElementStyle="{StaticResource GridCellText}" />
                             <DataGridTextColumn Header="Address" Binding="{Binding Address, StringFormat='0x{0}'}" Width="104"
                                                 ElementStyle="{StaticResource GridCellAccent}" />
-                            <DataGridTextColumn Header="Section" Binding="{Binding Section}" Width="*"
+                            <DataGridTextColumn Header="Section" Binding="{Binding Section}" Width="Auto" MinWidth="70"
                                                 ElementStyle="{StaticResource GridCellMuted}" />
                         </DataGrid.Columns>
                     </DataGrid>
