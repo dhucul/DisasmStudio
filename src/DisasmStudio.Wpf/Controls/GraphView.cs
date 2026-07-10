@@ -211,6 +211,21 @@ public sealed class GraphView : FrameworkElement
         InvalidateVisual();
     }
 
+    /// <summary>Highlight <paramref name="va"/> as the selected instruction so the graph mirrors the linear
+    /// view's caret — the two stay in step as you click/arrow around, not only on a debugger stop. When
+    /// <paramref name="center"/> is set, scroll that instruction's block into view at the current zoom. Assumes
+    /// the containing function is already loaded (the host calls <see cref="SetFunction"/> first when it changes).</summary>
+    public void SetSelected(ulong va, bool center)
+    {
+        _selVa = va;
+        if (center && va != 0 && _blocks.Any(b => va >= b.Start && va < b.End))
+        {
+            _pend = Pend.Focus; _pendVa = va; _pendResetZoom = false;
+            ApplyPending();
+        }
+        InvalidateVisual();
+    }
+
     private void MeasureFont()
     {
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
@@ -454,10 +469,11 @@ public sealed class GraphView : FrameworkElement
         CaptureMouse();
 
         var g = ToGraph(_lastDrag);
-        _selVa = InstrAt(_lastDrag);   // remember the instruction so F2/F9 can toggle a breakpoint on it
+        ulong clicked = InstrAt(_lastDrag);   // exact instruction under the cursor (0 on a block header)
+        _selVa = clicked;                     // remember it so F2/F9 can toggle a breakpoint on it
         foreach (var b in _blocks)
             if (g.X >= b.X && g.X <= b.X + b.Width && g.Y >= b.Y && g.Y <= b.Y + b.Height)
-            { BlockSelected?.Invoke(b.Start); break; }
+            { BlockSelected?.Invoke(clicked != 0 ? clicked : b.Start); break; }   // sync linear to the exact line
         InvalidateVisual();   // reflect the new selection highlight
     }
 

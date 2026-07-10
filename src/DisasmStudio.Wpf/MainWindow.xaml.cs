@@ -89,6 +89,7 @@ public partial class MainWindow : Window
     private bool _restartPending;           // relaunch the target once the current debuggee has exited
     private DllDebugParams? _dllDebug;      // set for a hosted-DLL session (null for an EXE); reused on Restart
     private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
+    private bool _openingGraph;              // guards OnCenterTabChanged from re-opening the graph at the caret during an explicit "open in graph"
     private CallGraph? _callGraph;           // whole-program static call graph, built lazily on first Call Graph tab view
 
     // How the current DLL session is hosted, so Restart can relaunch it identically.
@@ -137,7 +138,7 @@ public partial class MainWindow : Window
         Linear.GoToRequested += GoToDialog;
         Linear.SelectionChanged += OnAddressFocused;
         Linear.ShowXrefsRequested += va => { SideTabs.SelectedIndex = 0; ShowXrefs(va); };
-        Linear.OpenInGraphRequested += va => { OpenGraph(va); CenterTabs.SelectedIndex = 1; };
+        Linear.OpenInGraphRequested += OpenGraphTab;
         Linear.OpenInDecompilerRequested += va => { OpenDecompiler(va); CenterTabs.SelectedIndex = 3; };
         Linear.PatchRequested += OnPatchInstruction;
         Linear.RenameRequested += OnRename;
@@ -1666,7 +1667,7 @@ public partial class MainWindow : Window
         // Re-scan process memory for strings on every stop except a pure single-step (where it would thrash) —
         // unless the Strings tab is showing, in which case scan then too so stepping updates it live.
         if (_dbg.LastReason != StopReason.Step || StringsTabVisible) RefreshLiveStrings();
-        if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp);   // graph follows RIP too
+        if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp, center: false);   // graph follows RIP too (SetCurrentIp centres it)
         string? name = _result?.NameFor(_dbg.CurrentIp);
         string extra = _dbg.LastReason == StopReason.Exception ? $" (code 0x{_dbg.LastExceptionCode:X8})" : "";
         StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
@@ -2470,7 +2471,10 @@ public partial class MainWindow : Window
 
         Linear.GoToVa(va);          // raises SelectionChanged → xrefs/status update
         Hex.GoTo(va);
-        if (CenterTabs.SelectedIndex == 1) OpenGraph(va);
+        // Reflect a navigation in an already-open graph without recentring: SetFunction frames a new function,
+        // and a same-function nav (e.g. a graph block-click echoing back) only re-highlights, so the view
+        // doesn't lurch under the cursor.
+        if (CenterTabs.SelectedIndex == 1) OpenGraph(va, center: false);
         if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
         if (CallGraphTabVisible) CallGraphPanel.NavigatedTo(va);   // re-root the call graph when Follow is on
 
@@ -2506,7 +2510,7 @@ public partial class MainWindow : Window
         XrefHeader.Text = $"{va:X}{(name is null ? "" : $"  {name}")} — {list.Count} xref(s)";
     }
 
-    private void OpenGraph(ulong va)
+    private void OpenGraph(ulong va, bool center)
     {
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
@@ -2516,6 +2520,20 @@ public partial class MainWindow : Window
         // instruction (resetting the zoom only when we move to a different function, not on every step).
         if (changed) { Graph.SetFunction(_result, fn, _dbg?.LiveDecoder, autoFit: _dbg is null); _graphFn = fn; }
         if (_dbg is not null) Graph.SetCurrentIp(_dbg.CurrentIp, resetZoom: changed);
+        // Mirror the linear caret: highlight the focused instruction in the graph, and — when asked, and the
+        // function was already framed (a freshly loaded one is fit-to-view / IP-centred above) — scroll it into
+        // view. So the graph tracks whatever you highlight, in static browsing and during a run, the same way
+        // it follows the IP on a debugger stop.
+        Graph.SetSelected(va, center: center && !changed);
+    }
+
+    /// <summary>Open the CFG graph for <paramref name="va"/> and switch to the Graph tab. The guard stops the
+    /// tab-change handler re-opening the graph at the (possibly stale) linear caret and overriding this target.</summary>
+    private void OpenGraphTab(ulong va)
+    {
+        _openingGraph = true;
+        try { OpenGraph(va, center: true); CenterTabs.SelectedIndex = 1; }
+        finally { _openingGraph = false; }
     }
 
     private void OpenDecompiler(ulong va)
@@ -2536,8 +2554,13 @@ public partial class MainWindow : Window
     // Populate the graph / decompiler when the user switches to that tab (they build lazily).
     private void OnCenterTabChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (e.Source is not TabControl || _result is null || _nav.Current is not ulong va) return;
-        if (CenterTabs.SelectedIndex == 1) OpenGraph(va);
+        if (e.Source is not TabControl || _result is null || _openingGraph) return;
+        // Land on whatever instruction is highlighted in the linear listing (its caret), falling back to the
+        // navigation address — so switching to Graph/Decompiler syncs to your current selection, and (for the
+        // graph) scrolls it into view, not just to the last explicit jump.
+        ulong va = Linear.CaretVa != 0 ? Linear.CaretVa : _nav.Current ?? 0;
+        if (va == 0) return;
+        if (CenterTabs.SelectedIndex == 1) OpenGraph(va, center: true);
         else if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
     }
 
@@ -2584,8 +2607,7 @@ public partial class MainWindow : Window
     {
         if (FuncList.SelectedItem is not FunctionItem fi) return;
         if (fi.Function is null) { NavigateToImport(fi.Va, fi.Name); return; }   // import row — no CFG
-        OpenGraph(fi.Va);
-        CenterTabs.SelectedIndex = 1;
+        OpenGraphTab(fi.Va);
     }
     private void OnFuncFilter(object sender, TextChangedEventArgs e) => _functionsView?.Refresh();
 

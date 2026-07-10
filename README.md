@@ -52,7 +52,9 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   leaf navigates the other views to its address.
 - **Graph view:** per-function control-flow graph — basic-block cards of coloured instructions with
   colour-coded edges (taken / fall-through / jump / switch-case). Pan (drag), zoom (Ctrl+wheel),
-  fit-to-view, click-to-sync with the linear view.
+  fit-to-view. The graph and linear listing stay **two-way synced on the highlighted instruction** —
+  selecting a line in either view highlights and scrolls to the same instruction in the other, in both
+  static browsing and during a debug run (the same way both views follow the IP on a breakpoint).
 - **Decompiler (multi-level IL + Pseudo-C):** a per-function decompiler in the Binary Ninja mold,
   shown in a *Decompiler* tab with a Low IL / Medium IL / High IL / Pseudo-C selector. **Low IL**
   lifts each instruction to register/memory/flag semantics (flags handled as deferred conditions so a

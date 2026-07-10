@@ -464,7 +464,9 @@ public sealed class LinearDisassemblyView : Grid
 
     private string NameOrAddr(ulong va) => _result?.NameFor(va) is { Length: > 0 } n ? n : va.ToString("X" + _addrDigits);
 
-    private ulong CaretVa => _result is not null && _caretInstr >= 0 ? _result.Linear.VaAt(_caretInstr) : 0;
+    /// <summary>VA of the instruction under the caret (the highlighted line), or 0 when nothing is selected.
+    /// The host reads this to sync the other views (graph/decompiler) to whatever the user has highlighted.</summary>
+    public ulong CaretVa => _result is not null && _caretInstr >= 0 ? _result.Linear.VaAt(_caretInstr) : 0;
 
     /// <summary>True when the instruction at <paramref name="va"/> is a conditional jump — the only kind whose
     /// line the "Toggle jump" colour mark applies to.</summary>
