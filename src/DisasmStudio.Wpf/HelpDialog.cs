@@ -46,6 +46,7 @@ internal static class HelpDialog
             ("Ctrl+C", "Copy the selected lines"),
             ("Ctrl+A", "Select all"),
             ("C", "Create a function at the caret, then decompile it"),
+            ("Space", "Toggle jump: send the conditional jump under the caret the other way — while stopped on it in the debugger this flips the real CPU flags (ZF/CF/…) so execution actually changes; elsewhere it's a what-if. The branch line turns green (taken) or red (not taken)"),
             ("Shift + move keys", "Extend the selection"),
             ("Right-click", "Xrefs · open in graph · create function · decompile · save ASM · run-to-cursor · capture · patch…"),
             ("Drag the divider", "Resize the bytes / disassembly split"),

@@ -51,6 +51,10 @@ public sealed class LinearDisassemblyView : Grid
     private double _charWidth = 8;
     private int _addrDigits = 8;
 
+    // Untoggled jump arrows are drawn faint so a toggled (green/red) one clearly stands out.
+    private static readonly Brush DimEdgeJump = FrozenDim(SyntaxTheme.EdgeJump, 0.4);
+    private static Brush FrozenDim(Brush b, double opacity) { var c = b.Clone(); c.Opacity = opacity; c.Freeze(); return c; }
+
     public event Action<ulong>? NavigateRequested;
     public event Action? GoToRequested;
     public event Action<ulong>? SelectionChanged;
@@ -73,6 +77,10 @@ public sealed class LinearDisassemblyView : Grid
     public event Action<ulong>? CommentRequested;
     /// <summary>Toggle a bookmark at the address (right-click → Toggle bookmark).</summary>
     public event Action<ulong>? BookmarkToggleRequested;
+    /// <summary>Toggle the conditional jump at the address so it goes the other way — flips the deciding CPU flags
+    /// while stopped on it in the debugger, or a static what-if otherwise; the line recolours green ("taken") /
+    /// red ("not taken") (right-click → Toggle jump, or Space).</summary>
+    public event Action<ulong>? ToggleJumpRequested;
     /// <summary>Register the caret address as a function start so it can be decompiled (right-click → Create
     /// function here, or the C key).</summary>
     public event Action<ulong>? CreateFunctionRequested;
@@ -95,6 +103,9 @@ public sealed class LinearDisassemblyView : Grid
     public Func<ulong, bool>? IsBookmarkAt { get; set; }
     /// <summary>Predicate for whether an address already starts a function (greys out "Create function here").</summary>
     public Func<ulong, bool>? IsFunctionStart { get; set; }
+    /// <summary>Per-jump colour mark: true = green ("taken"), false = red ("not taken"), null = untoggled (blue).
+    /// Drives the branch-line colour; flipped by the "Toggle jump" action.</summary>
+    public Func<ulong, bool?>? JumpMark { get; set; }
 
     public LinearDisassemblyView()
     {
@@ -453,6 +464,10 @@ public sealed class LinearDisassemblyView : Grid
 
     private ulong CaretVa => _result is not null && _caretInstr >= 0 ? _result.Linear.VaAt(_caretInstr) : 0;
 
+    /// <summary>True when the instruction at <paramref name="va"/> is a conditional jump — the only kind whose
+    /// line the "Toggle jump" colour mark applies to.</summary>
+    private bool IsCondJumpAt(ulong va) => _dis is not null && _dis.TryDecode(va, out var i) && i.Flow == FlowKind.CondJump;
+
     // ---- hit testing ----
     private void OnClick(Point p, bool extend = false)
     {
@@ -749,35 +764,122 @@ public sealed class LinearDisassemblyView : Grid
     private void DrawBranchArrows(DrawingContext dc, int rows)
     {
         if (_result is null || _dis is null) return;
-        double midGutter = GutterW - _charWidth;
-        var pen = new Pen(SyntaxTheme.EdgeJump, 1) { EndLineCap = PenLineCap.Triangle };
 
-        for (int r = 0; r < rows; r++)
+        double xCode = GutterW - 2;        // arrows hug the right edge of the gutter (nearest the code)
+        const double MinX = 4;             // don't cross into the fold-marker column at the far left
+        const double LaneStep = 4;         // horizontal gap between nested arrow lanes
+        const int Margin = 600;            // rows scanned beyond the view so a toggled arrow keeps drawing (anchored
+                                           // to its real target) while you scroll past its source
+        double bottomY = rows * _rowHeight;
+
+        // 1) Collect every jump whose vertical span crosses the visible window — including jumps whose source has
+        //    scrolled off-screen, so each connector keeps running to its real target as you scroll. A conditional
+        //    jump routes to where control actually goes — its branch target when taken/untoggled, the fall-through
+        //    (next instruction) when toggled to "not taken". Colour: green = taken, red = falls through, blue =
+        //    untoggled. Off-screen endpoints are clamped to the view edge (the target edge gets an ↑/↓ head).
+        var arrows = new List<(int SrcOff, int TgtOff, Brush Brush, bool Marked)>();
+        long scanLo = Math.Max(0, _topDisplay - Margin);
+        long scanHi = Math.Min(VisibleCount, _topDisplay + rows + Margin);
+        for (long visible = scanLo; visible < scanHi; visible++)
         {
-            long visible = _topDisplay + r;
-            if (visible >= VisibleCount) break;
             var (isLabel, instrLine) = ContentAt(ToDisplay(visible));
             if (isLabel || _result.Linear.IsDataAt(instrLine)) continue;
             int ri = RegionStartAt(instrLine);
             if (ri >= 0 && _collapsed.Contains(_regions[ri].Va)) continue;   // collapsed header — no arrow
             ulong va = _result.Linear.VaAt(instrLine);
+            int srcOff = (int)(visible - _topDisplay);
             if (!_dis.TryDecode(va, out var instr)) continue;
-            if (instr.DirectTarget is not ulong target) continue;
-            if (instr.Flow == FlowKind.Call) continue; // arrows for jumps only
+            if (instr.DirectTarget is not ulong branchTarget) continue;
+            if (instr.Flow == FlowKind.Call) continue;   // arrows for jumps only
 
+            bool? mark = JumpMark?.Invoke(va);
+            ulong target = mark == false ? va + (ulong)instr.Length : branchTarget;   // not-taken reroutes to fall-through
+            Brush brush = mark switch
+            {
+                true => SyntaxTheme.EdgeTaken,      // green: taken
+                false => Palette.RedBrush,          // red: falls through
+                _ => SyntaxTheme.EdgeJump,          // blue: untoggled
+            };
             long targetInstr = _result.Linear.IndexOf(target);
-            if (_result.Linear.VaAt(targetInstr) != target) continue;
+            if (_result.Linear.VaAt(targetInstr) != target) continue;      // target not a clean instruction boundary
             long targetVis = ToVisible(DisplayIndexOfInstr(targetInstr));
-            if (targetVis < 0) continue;   // target hidden inside a collapsed region
-            long visTop = _topDisplay, visBot = _topDisplay + rows;
-            if (targetVis < visTop || targetVis >= visBot) continue;
+            if (targetVis < 0) continue;                                   // hidden inside a collapsed region
+            long relTgt = targetVis - _topDisplay;
+            // Clamp an off-screen target to just-above (-1) / just-below (rows) so a very distant target can't
+            // overflow the int; on-screen targets keep their exact row offset.
+            int tgtOff = relTgt < 0 ? -1 : relTgt >= rows ? rows : (int)relTgt;
+            if (Math.Max(srcOff, tgtOff) < 0 || Math.Min(srcOff, tgtOff) >= rows) continue;   // span misses the view
+            arrows.Add((srcOff, tgtOff, brush, mark is not null));
+        }
 
-            double y0 = (visible - _topDisplay) * _rowHeight + _rowHeight / 2;
-            double y1 = (targetVis - _topDisplay) * _rowHeight + _rowHeight / 2;
-            double xElbow = Math.Max(2, midGutter - Math.Min(8, Math.Abs(r)) );
-            dc.DrawLine(pen, new Point(midGutter, y0), new Point(xElbow, y0));
-            dc.DrawLine(pen, new Point(xElbow, y0), new Point(xElbow, y1));
-            dc.DrawLine(pen, new Point(xElbow, y1), new Point(midGutter, y1));
+        // 2) Give each arrow a lane so nested/overlapping jumps don't draw on top of each other (greedy interval
+        //    colouring; shorter spans take the inner lanes nearest the code). Intervals are clamped to the window.
+        var order = new List<int>();
+        for (int k = 0; k < arrows.Count; k++) order.Add(k);
+        order.Sort((x, y) => Math.Abs(arrows[x].TgtOff - arrows[x].SrcOff) - Math.Abs(arrows[y].TgtOff - arrows[y].SrcOff));
+        var lanes = new List<List<(int Lo, int Hi)>>();
+        var laneOf = new int[arrows.Count];
+        foreach (int k in order)
+        {
+            int aLo = Math.Max(0, Math.Min(arrows[k].SrcOff, arrows[k].TgtOff));
+            int aHi = Math.Min(rows, Math.Max(arrows[k].SrcOff, arrows[k].TgtOff));
+            int lane = 0;
+            for (; lane < lanes.Count; lane++)
+            {
+                bool clash = false;
+                foreach (var iv in lanes[lane]) if (aLo <= iv.Hi && iv.Lo <= aHi) { clash = true; break; }
+                if (!clash) break;
+            }
+            if (lane == lanes.Count) lanes.Add(new List<(int, int)>());
+            lanes[lane].Add((aLo, aHi));
+            laneOf[k] = lane;
+        }
+
+        // 3) Draw. Each endpoint connects into the code (on-screen) or runs to the view edge (off-screen); the
+        //    target edge gets an ↑/↓ head, an on-screen target gets a → head into the code. A toggled jump is
+        //    drawn as a bright core over a translucent glow so it stands out; untoggled ones are thin and faint.
+        void DrawPath(Pen pen, int srcOff, int tgtOff, double laneX)
+        {
+            double srcY;
+            if (srcOff < 0) srcY = 0;                            // source above → spine enters from the top
+            else if (srcOff >= rows) srcY = bottomY;             // source below → enters from the bottom
+            else { srcY = srcOff * _rowHeight + _rowHeight / 2; dc.DrawLine(pen, new Point(xCode, srcY), new Point(laneX, srcY)); }
+
+            double tgtY;
+            if (tgtOff < 0)          // target above → up-head at the top edge
+            {
+                tgtY = 0;
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX - 3, tgtY + 5));
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX + 3, tgtY + 5));
+            }
+            else if (tgtOff >= rows) // target below → down-head at the bottom edge
+            {
+                tgtY = bottomY;
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX - 3, tgtY - 5));
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX + 3, tgtY - 5));
+            }
+            else                     // target on-screen → elbow into the code with a right-pointing head
+            {
+                tgtY = tgtOff * _rowHeight + _rowHeight / 2;
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(xCode, tgtY));
+                dc.DrawLine(pen, new Point(xCode, tgtY), new Point(xCode - 4, tgtY - 3));
+                dc.DrawLine(pen, new Point(xCode, tgtY), new Point(xCode - 4, tgtY + 3));
+            }
+
+            dc.DrawLine(pen, new Point(laneX, srcY), new Point(laneX, tgtY));   // vertical lane spine
+        }
+
+        for (int k = 0; k < arrows.Count; k++)
+        {
+            var a = arrows[k];
+            double laneX = Math.Max(MinX, xCode - LaneStep * (laneOf[k] + 1));
+            if (a.Marked)
+            {
+                var glow = a.Brush.Clone(); glow.Opacity = 0.3; glow.Freeze();   // luminous halo under the core
+                DrawPath(new Pen(glow, 5) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round }, a.SrcOff, a.TgtOff, laneX);
+                DrawPath(new Pen(a.Brush, 2.3), a.SrcOff, a.TgtOff, laneX);      // bright full-colour core
+            }
+            else DrawPath(new Pen(DimEdgeJump, 0.6), a.SrcOff, a.TgtOff, laneX);   // untoggled: thin + faint
         }
     }
 
@@ -824,6 +926,8 @@ public sealed class LinearDisassemblyView : Grid
         patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2 / F9" };
         toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
+        var toggleJump = new MenuItem { Header = "Toggle jump", InputGestureText = "Space" };
+        toggleJump.Click += (_, _) => { if (CaretVa != 0 && IsCondJumpAt(CaretVa)) ToggleJumpRequested?.Invoke(CaretVa); };
         var hwBp = new MenuItem { Header = "Hardware breakpoint…" };
         hwBp.Click += (_, _) => { if (CaretVa != 0) HardwareBreakpointRequested?.Invoke(CaretVa); };
         var editBp = new MenuItem { Header = "Edit breakpoint…" };
@@ -841,6 +945,9 @@ public sealed class LinearDisassemblyView : Grid
             bool alreadyFn = CaretVa != 0 && IsFunctionStart?.Invoke(CaretVa) == true;
             createFn.IsEnabled = CaretVa != 0 && !alreadyFn;
             createFn.Header = alreadyFn ? "Create function here (already a function)" : "Create function here";
+            // "Toggle jump" flips a conditional jump's line colour between green and red; enabled on any
+            // conditional jump (a stable item you click repeatedly to toggle back and forth).
+            toggleJump.IsEnabled = CaretVa != 0 && IsCondJumpAt(CaretVa);
         };
         var runTo = new MenuItem { Header = "Run to cursor" };
         runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
@@ -865,6 +972,7 @@ public sealed class LinearDisassemblyView : Grid
         menu.Items.Add(bookmark);
         menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
+        menu.Items.Add(toggleJump);
         menu.Items.Add(hwBp);
         menu.Items.Add(editBp);
         menu.Items.Add(runTo);
@@ -955,6 +1063,7 @@ public sealed class LinearDisassemblyView : Grid
                 case Key.A when ctrl: _owner.SelectAll(); break;
                 case Key.G when ctrl: _owner.GoToRequested?.Invoke(); break;
                 case Key.F2 or Key.F9: if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
+                case Key.Space: if (_owner.CaretVa != 0 && _owner.IsCondJumpAt(_owner.CaretVa)) _owner.ToggleJumpRequested?.Invoke(_owner.CaretVa); break;
                 case Key.N when !ctrl: if (_owner.CaretVa != 0) _owner.RenameRequested?.Invoke(_owner.CaretVa); break;
                 case Key.OemSemicolon: if (_owner.CaretVa != 0) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
                 default: return;

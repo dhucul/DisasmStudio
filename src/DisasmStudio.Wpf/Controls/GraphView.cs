@@ -58,6 +58,10 @@ public sealed class GraphView : FrameworkElement
     public event Action<ulong>? CommentRequested;
     /// <summary>Toggle a bookmark at the right-clicked instruction (right-click → Toggle bookmark).</summary>
     public event Action<ulong>? BookmarkToggleRequested;
+    /// <summary>Toggle the conditional jump at the address so it goes the other way — flips the deciding CPU flags
+    /// while stopped on it in the debugger, or a static what-if otherwise; the edges recolour green ("taken") /
+    /// red ("not taken") (right-click → Toggle jump, or Space).</summary>
+    public event Action<ulong>? ToggleJumpRequested;
 
     /// <summary>Predicate the renderer uses to tint executed (traced) instruction rows — mirrors the
     /// linear view's coverage overlay so the graph shows the same trace highlights.</summary>
@@ -66,6 +70,9 @@ public sealed class GraphView : FrameworkElement
     public Func<ulong, bool>? IsBreakpointAt { get; set; }
     /// <summary>Predicate the renderer uses to colour a hardware breakpoint's dot differently from a software one.</summary>
     public Func<ulong, bool>? IsHardwareBreakpointAt { get; set; }
+    /// <summary>Per-jump colour mark: true = green ("taken"), false = red ("not taken"), null = untoggled. Recolours
+    /// that block's Taken/FallThrough edges; flipped by the "Toggle jump" action.</summary>
+    public Func<ulong, bool?>? JumpMark { get; set; }
 
     /// <summary>Repaint without rebuilding layout — e.g. when the coverage/trace set grows during a run.</summary>
     public void Refresh() => InvalidateVisual();
@@ -98,17 +105,34 @@ public sealed class GraphView : FrameworkElement
         bookmark.Click += (_, _) => { if (_menuVa != 0) BookmarkToggleRequested?.Invoke(_menuVa); };
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2 / F9" };
         toggleBp.Click += (_, _) => { if (_menuVa != 0) BreakpointToggleRequested?.Invoke(_menuVa); };
+        var toggleJump = new MenuItem { Header = "Toggle jump", InputGestureText = "Space" };
+        toggleJump.Click += (_, _) => { if (_menuVa != 0 && IsCondJumpAt(_menuVa)) ToggleJumpRequested?.Invoke(_menuVa); };
         menu.Opened += (_, _) =>
         {
             bool has = _menuVa != 0;
             rename.IsEnabled = comment.IsEnabled = bookmark.IsEnabled = toggleBp.IsEnabled = has;
+            // "Toggle jump" flips a conditional jump's edge colours between green and red; enabled on any
+            // conditional jump (click it repeatedly to toggle back and forth).
+            toggleJump.IsEnabled = has && IsCondJumpAt(_menuVa);
         };
         menu.Items.Add(rename);
         menu.Items.Add(comment);
         menu.Items.Add(bookmark);
         menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
+        menu.Items.Add(toggleJump);
         ContextMenu = menu;
+    }
+
+    /// <summary>True when <paramref name="va"/> terminates a block with a Taken edge — i.e. it's a conditional
+    /// jump, the only kind the "Toggle jump" colour mark applies to.</summary>
+    private bool IsCondJumpAt(ulong va)
+    {
+        foreach (var b in _blocks)
+            if (b.InstrVas.Count > 0 && b.InstrVas[^1] == va)
+                foreach (var e in b.Out)
+                    if (e.Kind == EdgeKind.Taken) return true;
+        return false;
     }
 
     public void SetFunction(AnalysisResult result, Function function, IInstructionDecoder? decoder = null, bool autoFit = true)
@@ -303,17 +327,22 @@ public sealed class GraphView : FrameworkElement
         foreach (var b in _blocks)
         {
             double sx = b.X + b.Width / 2, sy = b.Y + b.Height;
+            // When the user has toggled this block's terminating jump, colour its two outgoing edges by the mark:
+            // green for the branch it's marked toward, red for the other. Otherwise use the static colours.
+            bool? jt = b.InstrVas.Count > 0 ? JumpMark?.Invoke(b.InstrVas[^1]) : null;
             foreach (var e in b.Out)
             {
                 if (!_byStart.TryGetValue(e.ToBlockStart, out var t)) continue;
                 double tx = t.X + t.Width / 2, ty = t.Y;
-                var brush = e.Kind switch
-                {
-                    EdgeKind.Taken => SyntaxTheme.EdgeTaken,
-                    EdgeKind.Jump => SyntaxTheme.EdgeJump,
-                    EdgeKind.Switch => SyntaxTheme.EdgeSwitch,
-                    _ => SyntaxTheme.EdgeFall,
-                };
+                var brush = jt is bool taken && e.Kind is EdgeKind.Taken or EdgeKind.FallThrough
+                    ? ((e.Kind == EdgeKind.Taken) == taken ? SyntaxTheme.EdgeTaken : Palette.RedBrush)
+                    : e.Kind switch
+                    {
+                        EdgeKind.Taken => SyntaxTheme.EdgeTaken,
+                        EdgeKind.Jump => SyntaxTheme.EdgeJump,
+                        EdgeKind.Switch => SyntaxTheme.EdgeSwitch,
+                        _ => SyntaxTheme.EdgeFall,
+                    };
                 var pen = new Pen(brush, 1.4);
                 double midY = ty > sy ? (sy + ty) / 2 : sy + 24;
                 var fig = new PathFigure { StartPoint = new Point(sx, sy) };
@@ -445,6 +474,7 @@ public sealed class GraphView : FrameworkElement
         switch (e.Key)
         {
             case Key.F2 or Key.F9: if (_selVa != 0) BreakpointToggleRequested?.Invoke(_selVa); break;
+            case Key.Space: if (_selVa != 0 && IsCondJumpAt(_selVa)) ToggleJumpRequested?.Invoke(_selVa); break;
             default: return;
         }
         e.Handled = true;

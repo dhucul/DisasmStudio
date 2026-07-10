@@ -58,6 +58,11 @@ public partial class MainWindow : Window
     private sealed record CreateFunctionEdit(ulong StaticVa, bool AddedName) : EditEntry;  // user "create function here" (StaticVa = unslid)
 
     private DebugSession? _dbg;
+    // "Toggle jump" state. While debugging, the current-IP conditional jump is coloured from the REAL live flags
+    // (cached here on each stop) and a toggle flips those flags so the debuggee takes the other path. Anywhere
+    // else it's a static what-if: a per-jump assumed direction (static VA → true = taken/green, false = red).
+    private (ulong Va, bool Taken)? _curJump;                       // current-IP jump evaluated from real flags
+    private readonly Dictionary<ulong, bool> _jumpAssume = new();   // static what-if assumptions, keyed in static VA
     // Managed (.NET source-level) debugging: a separate out-of-process ICorDebug session. Breakpoints are kept
     // by (method token + IL offset) rather than address, and persist across the session; they are sent to the
     // host on launch (as pending) and live while stopped.
@@ -151,6 +156,12 @@ public partial class MainWindow : Window
         Graph.RenameRequested += OnRename;
         Graph.CommentRequested += OnSetComment;
         Graph.BookmarkToggleRequested += OnToggleBookmark;
+        // "Toggle jump" (shared by both views): flips the deciding CPU flags on the current-IP jump while
+        // debugging, else a static what-if; JumpMark tells each view how to colour the jump's line (green/red).
+        Linear.ToggleJumpRequested += OnToggleJump;
+        Graph.ToggleJumpRequested += OnToggleJump;
+        Linear.JumpMark = JumpMarkAt;
+        Graph.JumpMark = JumpMarkAt;
         Decompiler.NavigateRequested += va => _nav.Navigate(va);
         Decompiler.SelectionChanged += OnAddressFocused;
         Decompiler.RenameRequested += OnRename;
@@ -579,6 +590,53 @@ public partial class MainWindow : Window
         Linear.Refresh();
         Graph.Refresh();
         StatusText.Text = now ? $"Bookmarked {sva:X}" : $"Removed bookmark {sva:X}";
+    }
+
+    /// <summary>Colour the linear + graph views use for a jump's line: true = green (goes / assumed taken), false =
+    /// red (falls through / assumed not-taken), null = untoggled (blue). The current-IP jump is coloured from the
+    /// real live flags; every other jump from its static what-if assumption.</summary>
+    private bool? JumpMarkAt(ulong va)
+    {
+        if (_curJump is { } cj && cj.Va == va) return cj.Taken;                 // real flags win at the current IP
+        return _jumpAssume.TryGetValue(va - LiveSlide, out var v) ? v : (bool?)null;
+    }
+
+    /// <summary>Re-evaluate, from the real live flags, whether the conditional jump at the current IP will be taken,
+    /// and cache it for the branch colouring. Cleared unless we're stopped on a flag-based Jcc.</summary>
+    private void RecomputeCurrentJump()
+    {
+        _curJump = null;
+        if (_dbg is not { IsStopped: true } || _dbg.LiveDecoder is not { } dec) return;
+        if (!dec.TryDecodeAt(_dbg.CurrentIp, out var i) || !JccEval.CanToggle(i.ConditionCode)) return;
+        if (_dbg.Engine.GetRegisters() is not { } regs) return;
+        ulong fl = regs[regs.Is32 ? "eflags" : "rflags"];
+        if (JccEval.Evaluate(i.ConditionCode, fl) is bool taken) _curJump = (_dbg.CurrentIp, taken);
+    }
+
+    /// <summary>"Toggle jump": send a conditional jump the other way. Stopped on that jump in the debugger it flips
+    /// the real EFLAGS bit(s) that decide it (so the debuggee actually takes the other path); anywhere else it flips
+    /// a static what-if assumption. Either way the branch line recolours green (taken) / red (not-taken).</summary>
+    private void OnToggleJump(ulong va)
+    {
+        if (va == 0) return;
+        // Real flag flip — only valid on the instruction we're stopped at (the one whose flags are live).
+        if (_dbg is { IsStopped: true } && va == _dbg.CurrentIp && _dbg.LiveDecoder is { } dec
+            && dec.TryDecodeAt(va, out var i) && JccEval.CanToggle(i.ConditionCode)
+            && _dbg.Engine.GetRegisters() is { } regs)
+        {
+            string fn = regs.Is32 ? "eflags" : "rflags";
+            _dbg.Engine.SetRegister(fn, JccEval.FlipToInvert(i.ConditionCode, regs[fn]));
+            RecomputeCurrentJump();                                 // recolour from the new real flags
+            Linear.Refresh(); Graph.Refresh(); Debug.Refresh();     // Debug.Refresh so the flags grid updates too
+            StatusText.Text = $"Flipped {JccEval.FlipDescription(i.ConditionCode)} — jump @ {va:X} {(_curJump?.Taken == true ? "will be taken" : "falls through")}";
+            return;
+        }
+        // Static what-if: flip this jump's assumed direction (first toggle → taken/green).
+        ulong sva = va - LiveSlide;
+        bool taken = _jumpAssume.TryGetValue(sva, out var cur) ? !cur : true;
+        _jumpAssume[sva] = taken;
+        Linear.Refresh(); Graph.Refresh();
+        StatusText.Text = $"Jump {sva:X} assumed {(taken ? "taken (green)" : "not taken (red)")}";
     }
 
     /// <summary>"Create function here": register the caret address as a function start so an isolated block can
@@ -1593,6 +1651,7 @@ public partial class MainWindow : Window
         }
         DbgRunBtn.Content = "▶ Continue"; DbgRunBtn.IsEnabled = true; SetStepButtons(true);   // Run doubles as Continue (F5) during a session
         Linear.SetCurrentIp(_dbg.CurrentIp);
+        RecomputeCurrentJump();   // colour the current conditional jump from the live flags (auto, before any toggle)
         Linear.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();   // now showing live (rebased) breakpoints; reflects the pre-run set just armed
@@ -1633,6 +1692,7 @@ public partial class MainWindow : Window
         CoverageToggle.IsEnabled = false;
         if (CoverageToggle.IsChecked == true) CoverageToggle.IsChecked = false;   // programmatic: does not fire Click
         Linear.SetCurrentIp(0);
+        _curJump = null;   // no live flags now — drop the current-IP jump colour (static what-if marks persist)
         Hex.WriteByteAt = null;
         _dbg = null; _dbgViewLive = false;   // gutter now reads the static pre-run set again (IsBreakpointAt stays wired)
         Graph.Clear(); _graphFn = null;
@@ -2236,6 +2296,7 @@ public partial class MainWindow : Window
             _result = null;
             _dllDebug = null;   // a stale DLL-host config must not leak into a later EXE's Restart
             _pendingBreakpoints.Clear();   // breakpoints belong to the old file's addresses
+            _jumpAssume.Clear();           // jump what-if assumptions belong to the old file's addresses too
             // Trace highlights belong to the old image's addresses — drop them.
             _coverageEnabled = false;
             _coveredInstrs.Clear(); StopCoverageTimer();
