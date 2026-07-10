@@ -47,8 +47,9 @@ internal static class HelpDialog
             ("Ctrl+A", "Select all"),
             ("C", "Create a function at the caret, then decompile it"),
             ("Space", "Toggle jump: send the conditional jump under the caret the other way — while stopped on it in the debugger this flips the real CPU flags (ZF/CF/…) so execution actually changes; elsewhere it's a what-if. The branch line turns green (taken) or red (not taken)"),
+            ("Jump arrows (left margin)", "Lines link each branch to its target; a toggled jump is bold and glows — green if taken, red if it falls through — and points at the instruction that actually runs next. Arrows keep drawing to off-screen targets (↑/↓ at the edge) so you can follow them by scrolling"),
             ("Shift + move keys", "Extend the selection"),
-            ("Right-click", "Xrefs · open in graph · create function · decompile · save ASM · run-to-cursor · capture · patch…"),
+            ("Right-click", "Xrefs · open in graph · create function · decompile · save ASM · run-to-cursor · capture · toggle jump · patch…"),
             ("Drag the divider", "Resize the bytes / disassembly split"),
         ]),
         ("Hex view", [
@@ -64,6 +65,7 @@ internal static class HelpDialog
             ("Shift + Wheel", "Pan vertically"),
             ("Drag", "Pan"),
             ("Click a block", "Sync the linear view to it"),
+            ("Space / right-click", "Toggle jump: flip the conditional jump the other way (flips the real CPU flags while debugging, else a what-if); the block's edges recolour green (taken) / red (not taken)"),
         ]),
         ("Decompiler", [
             ("↑ / ↓, PageUp/Down", "Move the caret"),
