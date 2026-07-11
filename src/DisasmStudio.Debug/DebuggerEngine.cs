@@ -205,6 +205,7 @@ public sealed partial class DebuggerEngine
         {
             if (!Native.WaitForDebugEvent(out var ev, 0xFFFFFFFF)) break;
             CurrentThreadId = ev.dwThreadId;
+            ClearExecCache();   // the target just ran; its committed-memory map may have changed since the last stop
             uint cont = Native.DBG_CONTINUE;
             bool stop = HandleEvent(ev, ref cont);
             if (_ended) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont); break; }
@@ -461,9 +462,14 @@ public sealed partial class DebuggerEngine
             bool stepping = _stepping.TryGetValue(ev.dwThreadId, out var st) || tracing;   // a trace step is a step too (not a watchpoint)
             // Hardware watchpoint? Dr6 low bits identify the slot — but only when THIS thread isn't the one we
             // armed a software single-step on (its trap #DB is indistinguishable from a watchpoint otherwise), nor the one completing an SMC guard-step (same trap-flag #DB).
-            using (var c = new Ctx(Is32))
+            // Only read the thread context for this check when the #DB could actually BE a watchpoint (we didn't
+            // arm a software step or SMC guard-step on this thread). Gating it here spares a Ctx allocation +
+            // GetThreadContext syscall on every single-step we *did* arm — above all, on every instruction of a
+            // continuous trace (the hottest loop in the app), whose own step reads the context separately.
+            if (!stepping && !smcStep)
             {
-                if (c.Get(hThread) && (c.Dr6 & 0xF) != 0 && !stepping && !smcStep)
+                using var c = new Ctx(Is32);
+                if (c.Get(hThread) && (c.Dr6 & 0xF) != 0)
                 {
                     int slot = System.Numerics.BitOperations.TrailingZeroCount(c.Dr6 & 0xF);
                     Breakpoint? hb; lock (_lock) hb = _hwBps.FirstOrDefault(b => b.Slot == slot);
@@ -1280,6 +1286,29 @@ public sealed partial class DebuggerEngine
         ulong end = addr + (ulong)buf.Length;
         lock (_lock)
         {
+            // Two equivalent strategies; pick whichever touches fewer entries. Iterating all six breakpoint
+            // collections is O(total bps) — fine for a large dump, but during a FunCap "capture all" _swBps
+            // holds thousands of armed entries and every tiny per-hit read would walk them all. For a small
+            // read, probe by address instead so the read costs O(bytes), not O(breakpoints). Both paths apply
+            // the collections in the same order, so a byte tracked by more than one wins identically.
+            int total = _swBps.Count + _tempBps.Count + _coverageBps.Count + _traceResumeBps.Count + _internalBps.Count + _pendingReturns.Count;
+            if (total == 0) return;
+
+            if ((long)buf.Length * 6 <= total)
+            {
+                for (int i = 0; i < buf.Length; i++)
+                {
+                    ulong a = addr + (ulong)i;
+                    if (_swBps.TryGetValue(a, out var sw) && sw.Armed) buf[i] = sw.Original;
+                    if (_tempBps.TryGetValue(a, out var tb)) buf[i] = tb;
+                    if (_coverageBps.TryGetValue(a, out var cb)) buf[i] = cb;
+                    if (_traceResumeBps.TryGetValue(a, out var tr)) buf[i] = tr;
+                    if (_internalBps.TryGetValue(a, out var ib) && ib.Armed) buf[i] = ib.Original;
+                    if (_pendingReturns.TryGetValue(a, out var pr)) buf[i] = pr.Orig;
+                }
+                return;
+            }
+
             foreach (var bp in _swBps.Values)
                 if (bp.Armed && bp.Address >= addr && bp.Address < end) buf[bp.Address - addr] = bp.Original;
             foreach (var kv in _tempBps)
@@ -1384,11 +1413,34 @@ public sealed partial class DebuggerEngine
         _ => $"prot 0x{p:X}",
     };
 
+    // IsExecutable region cache. VirtualQueryEx is a syscall; a deref-on FunCap capture calls IsExecutable
+    // ~15x per hit (IsReturnAddress + one per argument inside DereferenceResolver.SymbolFor). Committed
+    // regions can't change while the target is frozen, so cache each queried region [Base,End) for the
+    // duration of a stop. Invalidated the moment the target runs again (ClearExecCache at the top of the
+    // debug loop) and whenever we deliberately re-protect pages (GuardRegion/ClearGuards). Small ring —
+    // the addresses touched in one hit cluster in a handful of module regions.
+    private readonly object _execCacheLock = new();
+    private readonly (ulong Base, ulong End, bool Exec)[] _execCache = new (ulong, ulong, bool)[8];
+    private int _execCacheCount, _execCacheNext;
+
+    private void ClearExecCache() { lock (_execCacheLock) { _execCacheCount = 0; _execCacheNext = 0; } }
+
     public bool IsExecutable(ulong addr)
     {
         if (_proc == IntPtr.Zero) return false;
+        lock (_execCacheLock)
+            for (int i = 0; i < _execCacheCount; i++)
+                if (addr >= _execCache[i].Base && addr < _execCache[i].End) return _execCache[i].Exec;
         if (Native.VirtualQueryEx(_proc, addr, out var mbi, (nuint)System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>()) == 0) return false;
-        return mbi.State == Native.MEM_COMMIT && (mbi.Protect & 0xF0) != 0;   // any PAGE_EXECUTE_*
+        bool exec = mbi.State == Native.MEM_COMMIT && (mbi.Protect & 0xF0) != 0;   // any PAGE_EXECUTE_*
+        if (mbi.RegionSize != 0)
+            lock (_execCacheLock)
+            {
+                _execCache[_execCacheNext] = (mbi.BaseAddress, mbi.BaseAddress + mbi.RegionSize, exec);
+                _execCacheNext = (_execCacheNext + 1) % _execCache.Length;
+                if (_execCacheCount < _execCache.Length) _execCacheCount++;
+            }
+        return exec;
     }
 
     // ---- execute (NX/DEP) memory breakpoints (generic unpacker OEP catch) ----
@@ -1423,6 +1475,7 @@ public sealed partial class DebuggerEngine
             }
             else lock (_lock) _guarded[p] = prot;
         }
+        ClearExecCache();   // we stripped execute from pages — cached executability for them is now stale
     }
 
     /// <summary>Map an executable page protection to its non-executable equivalent, preserving read/write
@@ -1449,6 +1502,7 @@ public sealed partial class DebuggerEngine
             foreach (var (page, prot) in _guarded) Native.VirtualProtectEx(_proc, page, 0x1000, prot, out _);
             _guarded.Clear();
         }
+        ClearExecCache();   // execute permission restored — re-query executability next time
     }
 
     public bool HasGuards { get { lock (_lock) return _guarded.Count > 0; } }

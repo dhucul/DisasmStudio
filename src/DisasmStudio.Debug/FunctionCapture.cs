@@ -34,6 +34,7 @@ public sealed class FunctionCapture
     private readonly HashSet<ulong> _entries = [];          // function-entry breakpoints we set
     private readonly HashSet<ulong> _retBps = [];           // return-address breakpoints we added
     private readonly Dictionary<(uint Tid, ulong Ret), Stack<CaptureRecord>> _pending = [];   // (thread, retAddr) -> calls awaiting return
+    private readonly Dictionary<uint, int> _depthByTid = [];   // per-thread live nesting depth (sum of _pending stack counts) — maintained on push/pop instead of re-summed every hit
     // Records awaiting display, drained by the UI each tick. Bounded — the complete capture is persisted to the
     // log file, not held in memory; the panel only shows a recent window. Capped so a fast capture with a slow
     // UI can't grow the heap (and slow the GUI) without bound.
@@ -239,7 +240,7 @@ public sealed class FunctionCapture
             Active = false; Draining = false;
             foreach (var va in _entries) { try { _eng.RemoveBreakpoint(va); } catch { } }
             foreach (var va in _retBps) { try { _eng.RemoveBreakpoint(va); } catch { } }
-            _entries.Clear(); _retBps.Clear(); _pending.Clear();
+            _entries.Clear(); _retBps.Clear(); _pending.Clear(); _depthByTid.Clear();
         }
         _eng.PassFirstChanceExceptions = false;   // restore normal stop-on-exception behavior
         lock (_logLock) { try { _log?.Flush(); _log?.Dispose(); } catch { } _log = null; }
@@ -291,11 +292,12 @@ public sealed class FunctionCapture
 
         lock (_lock)
         {
-            rec.Depth = _pending.Where(kv => kv.Key.Tid == tid).Sum(kv => kv.Value.Count);   // this thread's nesting depth
+            rec.Depth = _depthByTid.GetValueOrDefault(tid);   // this thread's nesting depth (maintained on push/pop below)
             if (captureReturn)
             {
                 if (!_pending.TryGetValue((tid, retAddr), out var stack)) { stack = new Stack<CaptureRecord>(); _pending[(tid, retAddr)] = stack; }
                 stack.Push(rec);
+                _depthByTid[tid] = _depthByTid.GetValueOrDefault(tid) + 1;   // one more call in flight on this thread
                 // Own the return breakpoint only if we set it; never touch a pre-existing (user/entry) one.
                 if (!_eng.HasBreakpoint(retAddr)) { try { _eng.SetBreakpoint(retAddr); _retBps.Add(retAddr); } catch { } }
             }
@@ -320,6 +322,7 @@ public sealed class FunctionCapture
         {
             if (!_pending.TryGetValue((tid, ea), out var stack) || stack.Count == 0) return;
             call = stack.Pop();
+            if (_depthByTid.GetValueOrDefault(tid) > 0) _depthByTid[tid]--;   // matches the push in HandleEntry
             if (stack.Count == 0)
             {
                 _pending.Remove((tid, ea));
@@ -356,12 +359,26 @@ public sealed class FunctionCapture
         var list = new List<(string, ulong, string)>();
         if (_eng.Is32)
         {
-            for (int i = 0; i < 6; i++) { ulong v = ReadPtr(regs.Sp + (ulong)(4 * (i + 1))); list.Add(($"arg{i}", v, Annotate(v))); }
+            // All six args are consecutive dwords at [esp+4 .. esp+0x18] — read them in one shot (was 6 syscalls).
+            var b = _eng.ReadMemory(regs.Sp + 4, 24);
+            for (int i = 0; i < 6; i++)
+            {
+                int off = i * 4;
+                ulong v = off + 4 <= b.Length ? BitConverter.ToUInt32(b, off) : 0;
+                list.Add(($"arg{i}", v, Annotate(v)));
+            }
         }
         else
         {
             foreach (var r in new[] { "rcx", "rdx", "r8", "r9" }) { ulong v = regs[r]; list.Add((r, v, Annotate(v))); }
-            for (int i = 0; i < 2; i++) { ulong v = ReadPtr(regs.Sp + 0x28 + (ulong)(8 * i)); list.Add(($"arg{4 + i}", v, Annotate(v))); }
+            // Args 5 and 6 sit at [rsp+0x28] and [rsp+0x30] — one 16-byte read covers both (was 2 syscalls).
+            var b = _eng.ReadMemory(regs.Sp + 0x28, 16);
+            for (int i = 0; i < 2; i++)
+            {
+                int off = i * 8;
+                ulong v = off + 8 <= b.Length ? BitConverter.ToUInt64(b, off) : 0;
+                list.Add(($"arg{4 + i}", v, Annotate(v)));
+            }
         }
         return list;
     }
