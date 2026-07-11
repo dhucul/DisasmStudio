@@ -49,6 +49,10 @@ public sealed class GraphView : FrameworkElement
     private const double HeaderH = 18;
 
     public event Action<ulong>? BlockSelected;
+    /// <summary>Follow a direct call/branch to its target: double-click (or Enter) on a call/jump navigates to the
+    /// callee/target — mirroring the linear view's "Follow target". Wired to the same navigator so Back/Forward
+    /// walk the trail. Fires only when the instruction has a resolvable, in-image target.</summary>
+    public event Action<ulong>? NavigateRequested;
     /// <summary>Toggle a software breakpoint at the address (gutter dot, right-click → Toggle breakpoint, or F2/F9).
     /// Wired to the same handler as the linear view so both share one breakpoint set.</summary>
     public event Action<ulong>? BreakpointToggleRequested;
@@ -462,6 +466,16 @@ public sealed class GraphView : FrameworkElement
         return 0;
     }
 
+    /// <summary>The direct branch/call target of the instruction at <paramref name="va"/>, or null when it has
+    /// nothing to follow (not a direct call/jump, or the target lies outside the loaded image). Mirrors the linear
+    /// view's <c>CaretFollowTarget</c> so double-clicking a call in the graph jumps to the callee.</summary>
+    private ulong? FollowTargetOf(ulong va)
+    {
+        if (_result is null || va == 0) return null;
+        var dis = NeutralDisasm.For(_result.Image, _result.Names, _decoder);
+        return dis.TryDecode(va, out var insn) && insn.DirectTarget is ulong t && _result.Image.IsMappedVa(t) ? t : null;
+    }
+
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
         // Mouse wheel zooms the graph about the cursor (Shift+wheel pans vertically instead).
@@ -484,12 +498,22 @@ public sealed class GraphView : FrameworkElement
     {
         Focus();
         _lastDrag = e.GetPosition(this);
-        _dragging = true;
-        CaptureMouse();
 
         var g = ToGraph(_lastDrag);
         ulong clicked = InstrAt(_lastDrag);   // exact instruction under the cursor (0 on a block header)
         _selVa = clicked;                     // remember it so F2/F9 can toggle a breakpoint on it
+
+        // Double-click a direct call/branch → follow its target to the callee, like double-clicking in the linear
+        // view. Don't start a pan-drag on this click; the follow (below) reframes the graph on the new function.
+        if (e.ClickCount == 2 && FollowTargetOf(clicked) is ulong target)
+        {
+            InvalidateVisual();
+            NavigateRequested?.Invoke(target);
+            return;
+        }
+
+        _dragging = true;
+        CaptureMouse();
         foreach (var b in _blocks)
             if (g.X >= b.X && g.X <= b.X + b.Width && g.Y >= b.Y && g.Y <= b.Y + b.Height)
             { BlockSelected?.Invoke(clicked != 0 ? clicked : b.Start); break; }   // sync linear to the exact line
@@ -510,6 +534,7 @@ public sealed class GraphView : FrameworkElement
         {
             case Key.F2 or Key.F9: if (_selVa != 0) BreakpointToggleRequested?.Invoke(_selVa); break;
             case Key.Space: if (_selVa != 0 && IsCondJumpAt(_selVa)) ToggleJumpRequested?.Invoke(_selVa); break;
+            case Key.Enter: if (FollowTargetOf(_selVa) is ulong t) NavigateRequested?.Invoke(t); break;
             default: return;
         }
         e.Handled = true;

@@ -154,6 +154,7 @@ public partial class MainWindow : Window
         Hex.CommentRequested += OnSetComment;
         Hex.BookmarkToggleRequested += OnToggleBookmark;
         Graph.BlockSelected += va => _nav.Navigate(va);
+        Graph.NavigateRequested += va => _nav.Navigate(va);   // double-click / Enter on a call → follow to the callee
         Graph.RenameRequested += OnRename;
         Graph.CommentRequested += OnSetComment;
         Graph.BookmarkToggleRequested += OnToggleBookmark;
@@ -2554,15 +2555,16 @@ public partial class MainWindow : Window
         if (fn is null || _result is null) return;
         // Rebuild only when the function changes (object identity differs across the static↔live swap too).
         bool changed = !ReferenceEquals(fn, _graphFn);
-        // Disassembler mode fits the whole function; debugger mode keeps a readable zoom on the current
-        // instruction (resetting the zoom only when we move to a different function, not on every step).
-        if (changed) { Graph.SetFunction(_result, fn, _dbg?.LiveDecoder, autoFit: _dbg is null); _graphFn = fn; }
+        bool firstFrame = _graphFn is null;   // nothing shown yet → fit-to-view once for a sensible default frame
+        // Fit-to-view only on the very first function shown (while debugging, the IP-follow below frames it). Once
+        // a graph is up and the user has a zoom they like, following a call to another function KEEPS that zoom and
+        // just snaps the target to the middle (below) — the view no longer resizes to each function's size.
+        if (changed) { Graph.SetFunction(_result, fn, _dbg?.LiveDecoder, autoFit: firstFrame && _dbg is null); _graphFn = fn; }
         if (_dbg is not null) Graph.SetCurrentIp(_dbg.CurrentIp, resetZoom: changed);
-        // Mirror the linear caret: highlight the focused instruction in the graph, and — when asked, and the
-        // function was already framed (a freshly loaded one is fit-to-view / IP-centred above) — scroll it into
-        // view. So the graph tracks whatever you highlight, in static browsing and during a run, the same way
-        // it follows the IP on a debugger stop.
-        Graph.SetSelected(va, center: center && !changed);
+        // Mirror the linear caret and centre the navigation target. On a function change (that wasn't the initial
+        // fit) centre the target at the preserved zoom; on a same-function nav centre only when explicitly asked,
+        // so a graph block-click echoing back doesn't lurch the view under the cursor.
+        Graph.SetSelected(va, center: changed ? (!firstFrame && _dbg is null) : center);
     }
 
     /// <summary>Open the CFG graph for <paramref name="va"/> and switch to the Graph tab. The guard stops the
