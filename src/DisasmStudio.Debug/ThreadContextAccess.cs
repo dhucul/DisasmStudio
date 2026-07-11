@@ -61,8 +61,11 @@ internal sealed unsafe class Ctx : IDisposable
         Marshal.WriteInt32(_p, FlagsOff, (int)_flags);
     }
 
-    public bool Get(IntPtr hThread) =>
-        Is32 ? Native.Wow64GetThreadContext(hThread, _p) : Native.GetThreadContext(hThread, _p);
+    public bool Get(IntPtr hThread)
+    {
+        Marshal.WriteInt32(_p, FlagsOff, (int)_flags);   // a prior Get/Set may have changed ContextFlags — reset it so a reused buffer still retrieves the full context
+        return Is32 ? Native.Wow64GetThreadContext(hThread, _p) : Native.GetThreadContext(hThread, _p);
+    }
 
     public bool Set(IntPtr hThread)
     {

@@ -94,6 +94,10 @@ public sealed partial class DebuggerEngine
     private ulong _traceLo, _traceHi;                 // [lo, hi): the loaded module's VA span — single-step inside it, run through outside
     private readonly Dictionary<uint, ulong> _traceStep = [];        // thread -> user bp disarmed to take its trace step (0 = none)
     private readonly Dictionary<ulong, byte> _traceResumeBps = [];   // run-through return addrs; on hit, silently resume tracing
+    // A single CONTEXT buffer reused by the per-instruction trace path (HandleTraceStep/ArmTraceStep) instead of
+    // allocating + freeing one per step — the trace is the hottest loop in the app. Loop-thread-owned: created
+    // lazily on the first step (bitness known by then), disposed in Cleanup. Never touched by any other thread.
+    private Ctx? _loopCtx;
 
     private readonly BlockingCollection<(ResumeMode Mode, ulong Target)> _resume = new();
     private readonly Queue<ulong[]> _runToAnyTargets = new();
@@ -779,6 +783,7 @@ public sealed partial class DebuggerEngine
     private void Cleanup()
     {
         IsActive = false; IsStopped = false;
+        _loopCtx?.Dispose(); _loopCtx = null;   // free the pooled trace CONTEXT buffer (loop thread is ending)
         // Release the OS handles the debug events handed us: any thread handles still open (threads that never
         // delivered EXIT_THREAD because the process was terminated) and the process handle itself.
         lock (_lock) { foreach (var h in _threads.Values) Native.CloseHandle(h); _threads.Clear(); }
@@ -1155,7 +1160,7 @@ public sealed partial class DebuggerEngine
         // Trace turned off (toggle while running): stop single-stepping and let the program run free.
         if (!_traceMode || _clearTraceRequested) { _clearTraceRequested = false; _traceMode = false; ClearTraceResumeBps(); return false; }
 
-        using var c = new Ctx(Is32);
+        var c = _loopCtx ??= new Ctx(Is32);   // pooled: reused across steps, not disposed here (freed in Cleanup)
         if (!c.Get(hThread)) return false;
         ulong ip = c.Ip;
 
@@ -1208,7 +1213,7 @@ public sealed partial class DebuggerEngine
     private void ArmTraceStep(uint tid, IntPtr hThread)
     {
         _traceStep[tid] = 0;
-        using var c = new Ctx(Is32);
+        var c = _loopCtx ??= new Ctx(Is32);   // pooled (see _loopCtx); loop-thread-only, freed in Cleanup
         if (c.Get(hThread)) { c.TrapFlag = true; c.Set(hThread); }
     }
 
