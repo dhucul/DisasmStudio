@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Debug;
@@ -141,6 +142,33 @@ public sealed class ReferenceItem(Xref x, string context)
     public string From => x.From.ToString("X");
     public string Kind => x.Kind.ToString().ToLowerInvariant();
     public string Context => context;
+}
+
+/// <summary>Row in the Find (instruction search) list — one matched instruction. <see cref="Hit"/> is toggled
+/// live while hit-tracing so the row shows a ● once that site has executed.</summary>
+public sealed class InsnMatchItem(ulong va, string text) : INotifyPropertyChanged
+{
+    public ulong Va => va;
+    public string Address => va.ToString("X");
+    public string Text => text;
+
+    private bool _hit;
+    public bool Hit
+    {
+        get => _hit;
+        set
+        {
+            if (_hit == value) return;
+            _hit = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Hit)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HitMark)));
+        }
+    }
+
+    /// <summary>"●" once this site has been hit during a trace, else empty.</summary>
+    public string HitMark => _hit ? "●" : "";
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 /// <summary>Node in the Resources tree. Carries the top-level resource <see cref="TypeId"/> down to every

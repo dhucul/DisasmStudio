@@ -438,6 +438,40 @@
                             </Grid>
                         </DockPanel>
                     </TabItem>
+                    <TabItem x:Name="FindTab" Header="Find">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Top" Margin="8,6,8,4">
+                                <TextBlock Text="Find instruction — type asm, press Enter (e.g. cmp eax, 5)"
+                                           Foreground="{StaticResource TextMuted}" FontSize="11" Margin="2,0,0,4" />
+                                <TextBox x:Name="FindInsnBox" KeyDown="OnFindInsnKeyDown"
+                                         ToolTip="Case- and spacing-insensitive substring over the whole disassembly. Press Enter to search; click a result to jump to it." />
+                                <DockPanel Margin="0,4,0,0">
+                                    <Button x:Name="FindTraceBtn" DockPanel.Dock="Right" Content="◴ Trace hits" Click="OnFindTraceHits"
+                                            IsEnabled="False" Padding="6,1"
+                                            ToolTip="Instrument every match so you can see which ones run. Armed automatically when you Run (or now, if paused); sites that execute get a ● here and are tinted in the listing." />
+                                    <CheckBox x:Name="FindHitsOnly" DockPanel.Dock="Right" Content="Hits only" VerticalAlignment="Center"
+                                              Margin="0,0,8,0" IsEnabled="False" Click="OnFindHitsOnly"
+                                              ToolTip="Show only the matches that were hit during tracing (hides the ones that never ran)." />
+                                    <TextBlock x:Name="FindInsnHeader" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}"
+                                               FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                                </DockPanel>
+                            </StackPanel>
+                            <ListBox x:Name="FindInsnResults" SelectionChanged="OnFindInsnActivate" MouseDoubleClick="OnFindInsnActivate"
+                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding HitMark}" Foreground="{StaticResource StringRef}" Width="14" FontWeight="Bold"
+                                                       ToolTip="Executed during hit-tracing" />
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="84" />
+                                            <TextBlock Text="{Binding Text}" Foreground="{StaticResource TextPrimary}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </DockPanel>
+                    </TabItem>
                 </TabControl>
             </Border>
         </Grid>

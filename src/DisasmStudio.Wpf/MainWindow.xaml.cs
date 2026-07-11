@@ -108,6 +108,13 @@ public partial class MainWindow : Window
     private ObservableCollection<ExportItem> _exports = [];
     private List<SearchResultItem> _searchIndex = [];   // all searchable items (functions/imports/exports/strings), built on load
     private const int MaxSearchRows = 500;              // cap the rendered result list; the header notes when a query matched more
+    private const int MaxInsnMatches = 2000;            // cap the Find-instruction result list; the header notes when it stopped early
+    private CancellationTokenSource? _findInsnCts;      // cancels an in-flight instruction scan when a newer search starts
+    private List<InsnMatchItem> _findResults = [];      // current Find-tab match rows (for live hit marking)
+    private readonly HashSet<ulong> _pendingCoveragePoints = [];   // static VAs to hit-trace; armed with coverage bps on each Run
+    private bool _findTraceArmed;                       // coverage bps for the Find matches are currently live on the engine
+    private bool _findHitsOnly;                         // Find list is filtered to only the hit matches
+    private int _findShownHits;                         // hit count last reflected in the filtered view (to refresh only on change)
     private ICollectionView? _functionsView;
     private ICollectionView? _stringsView;
     private ICollectionView? _exportsView;
@@ -343,6 +350,7 @@ public partial class MainWindow : Window
             case Key.F11 when shift: OnStepOut(sender, e); e.Handled = true; break;
             case Key.F9 when ctrl: OnRunToReturn(sender, e); e.Handled = true; break;
             case Key.F1: HelpDialog.ShowShortcuts(this); e.Handled = true; break;
+            case Key.F when ctrl: SideTabs.SelectedItem = FindTab; FindInsnBox.Focus(); e.Handled = true; break;
         }
     }
 
@@ -1085,6 +1093,7 @@ public partial class MainWindow : Window
         _coveredInstrs.Clear();
         _dbg?.ClearCoveredPoints();
         ClearCoverageBtn.IsEnabled = false;
+        UpdateFindHits();   // reset the ● hit markers in the Find list too
         Linear.Refresh();
         Graph.Refresh();
         Decompiler.Refresh();
@@ -1106,12 +1115,13 @@ public partial class MainWindow : Window
             Graph.Refresh();   // the graph carries the same trace overlay; repaint it as coverage grows
             Decompiler.Refresh();
         }
+        UpdateFindHits();   // refresh the ● hit markers in the Find list
     }
 
     private void StartCoverageTimer()
     {
         _coverageTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(400), DispatcherPriority.Background,
-            (_, _) => { if (_coverageEnabled && _dbg is { IsStopped: false }) HarvestCoverage(); }, Dispatcher);
+            (_, _) => { if ((_coverageEnabled || _findTraceArmed) && _dbg is { IsStopped: false }) HarvestCoverage(); }, Dispatcher);
         _coverageTimer.Start();
     }
 
@@ -1668,6 +1678,7 @@ public partial class MainWindow : Window
             CoverageToggle.IsEnabled = true;   // execution-coverage recording can now be armed
             RestartBtn.IsEnabled = _image is not null;   // a fileless attach has no binary to relaunch
             ApplyPendingBreakpoints();   // arm breakpoints set on the static listing before launch, now that memory exists
+            ArmCoverageTrace();          // arm hit-tracing (Find-tab "Trace hits") on the same first stop
             if (_image is null)   // attach-without-file: label the window from the analyzed process image
             {
                 var img = _result.Image;
@@ -1690,6 +1701,7 @@ public partial class MainWindow : Window
             HarvestCoverage();   // repaints (Refresh) when it adds anything
             if (added) { ClearCoverageBtn.IsEnabled = true; Linear.Refresh(); Decompiler.Refresh(); }   // ensure the stepped row paints
         }
+        else if (_findTraceArmed) HarvestCoverage();   // hit-trace: pull the traced sites hit since the last stop
         // Re-scan process memory for strings on every stop except a pure single-step (where it would thrash) —
         // unless the Strings tab is showing, in which case scan then too so stepping updates it live.
         if (_dbg.LastReason != StopReason.Step || StringsTabVisible) RefreshLiveStrings();
@@ -1715,6 +1727,8 @@ public partial class MainWindow : Window
         // Trace is per-session: turn it off so a Restart doesn't keep single-stepping into the next run. Keep
         // _coveredInstrs (static VAs) so the run's highlights persist for inspection on the static listing; the
         // user re-enables ◴ Trace if they want more. The engine's trace state is gone with the session.
+        if (_findTraceArmed) HarvestCoverage();   // capture the final hit-trace results before the session drops
+        _findTraceArmed = false;                  // keep _pendingCoveragePoints so a Restart re-arms the same sites
         StopCoverageTimer();
         _coverageEnabled = false;
         CoverageToggle.IsEnabled = false;
@@ -2331,6 +2345,11 @@ public partial class MainWindow : Window
             _coverageEnabled = false;
             _coveredInstrs.Clear(); StopCoverageTimer();
             if (CoverageToggle is not null) { CoverageToggle.IsChecked = false; CoverageToggle.IsEnabled = false; ClearCoverageBtn.IsEnabled = false; }
+            // The hit-trace set belongs to the old file's addresses — drop it and clear the Find list.
+            _pendingCoveragePoints.Clear(); _findTraceArmed = false; _findResults = []; _findHitsOnly = false; _findShownHits = 0;
+            if (FindInsnResults is not null) { FindInsnResults.ItemsSource = null; FindInsnHeader.Text = ""; }
+            if (FindTraceBtn is not null) FindTraceBtn.IsEnabled = false;
+            if (FindHitsOnly is not null) { FindHitsOnly.IsChecked = false; FindHitsOnly.IsEnabled = false; }
             _nav.Reset();
             _changeStack.Clear();
             ClearLists();
@@ -2808,6 +2827,158 @@ public partial class MainWindow : Window
         if (SearchRefs.SelectedItem is not ReferenceItem r) return;
         CenterTabs.SelectedIndex = 0;          // show the referencing code in the linear listing
         _nav.Navigate(r.Va);
+    }
+
+    // ---- Find instruction: static asm-text search over the whole listing ----
+
+    private void OnFindInsnKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) { RunInstructionSearch(); e.Handled = true; }
+    }
+
+    /// <summary>Scan every decoded instruction for the query text (case- and spacing-insensitive substring)
+    /// off the UI thread and list the matches; clicking one navigates to it. Cancels any in-flight scan.</summary>
+    private async void RunInstructionSearch()
+    {
+        if (_result is null) { FindInsnResults.ItemsSource = null; _findResults = []; FindTraceBtn.IsEnabled = false; FindHitsOnly.IsEnabled = false; FindHitsOnly.IsChecked = false; _findHitsOnly = false; FindInsnHeader.Text = "Load a file first"; return; }
+        string q = FindInsnBox.Text.Trim();
+        if (q.Length == 0) { FindInsnResults.ItemsSource = null; _findResults = []; FindTraceBtn.IsEnabled = false; FindHitsOnly.IsEnabled = false; FindHitsOnly.IsChecked = false; _findHitsOnly = false; FindInsnHeader.Text = ""; return; }
+
+        _findInsnCts?.Cancel();
+        var cts = _findInsnCts = new CancellationTokenSource();
+        var ct = cts.Token;
+        FindInsnHeader.Text = "searching…";
+
+        string needle = Norm(q);
+        var r = _result;
+        try
+        {
+            var (rows, capped) = await Task.Run(() => ScanInstructions(r, needle, ct), ct);
+            if (ct.IsCancellationRequested) return;
+            _findResults = rows;
+            _findHitsOnly = false; FindHitsOnly.IsChecked = false; _findShownHits = 0;   // fresh results: show all
+            FindInsnResults.ItemsSource = rows;
+            FindTraceBtn.IsEnabled = rows.Count > 0;
+            FindHitsOnly.IsEnabled = rows.Count > 0;
+            FindInsnHeader.Text = rows.Count == 0
+                ? "no matches"
+                : capped ? $"first {MaxInsnMatches:N0} matches (stopped early) — narrow the query"
+                         : $"{rows.Count:N0} match(es)";
+            UpdateFindHits();   // reflect any sites already recorded by a running/earlier trace
+        }
+        catch (OperationCanceledException) { /* superseded by a newer search */ }
+    }
+
+    /// <summary>Decode+format every instruction line through the architecture-neutral seam (x86/x64/ARM/8051)
+    /// and collect those whose text contains the already-normalized needle. Runs on a background thread with
+    /// its own decoder (decoders are not thread-safe). Returns the matches and whether the cap was hit.</summary>
+    private static (List<InsnMatchItem> Rows, bool Capped) ScanInstructions(AnalysisResult r, string needle, CancellationToken ct)
+    {
+        var rows = new List<InsnMatchItem>();
+        var dis = NeutralDisasm.For(r.Image, r.Names);
+        try
+        {
+            long count = r.Linear.Count;
+            for (long i = 0; i < count; i++)
+            {
+                if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
+                if (r.Linear.IsDataAt(i)) continue;                       // instructions only
+                ulong va = r.Linear.VaAt(i);
+                var toks = dis.Format(va);                                // reused buffer — concat before the next Format
+                if (toks.Count == 0) continue;
+                string text = string.Concat(toks.Select(t => t.Text));
+                if (Norm(text).Contains(needle, StringComparison.Ordinal))
+                {
+                    rows.Add(new InsnMatchItem(va, text.Trim()));
+                    if (rows.Count >= MaxInsnMatches) return (rows, true);
+                }
+            }
+        }
+        finally { (dis as IDisposable)?.Dispose(); }                      // the ARM (Capstone) decoder is disposable
+        return (rows, false);
+    }
+
+    /// <summary>Lowercase and drop all whitespace so a query matches regardless of the formatter's spacing
+    /// (e.g. "cmp eax, 5" ≡ "cmp     eax,5").</summary>
+    private static string Norm(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (char c in s) if (!char.IsWhiteSpace(c)) sb.Append(char.ToLowerInvariant(c));
+        return sb.ToString();
+    }
+
+    // Wired to both SelectionChanged (single click / arrow-key browse) and MouseDoubleClick (re-jump), so a
+    // click on a match jumps straight to it. RoutedEventArgs is the common base of both event-arg types.
+    private void OnFindInsnActivate(object sender, RoutedEventArgs e)
+    {
+        if (FindInsnResults.SelectedItem is InsnMatchItem it && _result is not null)
+        {
+            CenterTabs.SelectedIndex = 0;   // show the match in the linear listing
+            _nav.Navigate(it.Va);
+        }
+    }
+
+    /// <summary>Instrument every current match for hit-tracing. The set is remembered and armed with silent
+    /// one-shot coverage breakpoints automatically on each Run (or immediately if a session is already paused);
+    /// as each site executes it is marked ● in the list and tinted in the listing. Replaces any previous set.</summary>
+    private void OnFindTraceHits(object sender, RoutedEventArgs e)
+    {
+        if (_findResults.Count == 0) { FindInsnHeader.Text = "nothing to trace — search first"; return; }
+
+        _pendingCoveragePoints.Clear();
+        foreach (var m in _findResults) { m.Hit = false; _pendingCoveragePoints.Add(m.Va); }
+        _findShownHits = 0;
+        if (_findHitsOnly) RefreshFindView();   // hits were just reset — clear the filtered view too
+
+        if (_dbg is { IsStopped: true } && _dbgViewLive)
+        {
+            _dbg.ClearCoverage();          // drop any prior coverage instrumentation + recorded hits
+            _coveredInstrs.Clear();
+            _findTraceArmed = false;
+            ArmCoverageTrace();            // plant on the current matches from here
+            Linear.Refresh(); Graph.Refresh(); Decompiler.Refresh();
+        }
+
+        FindInsnHeader.Text = _findTraceArmed
+            ? $"tracing {_pendingCoveragePoints.Count:N0} site(s) — Continue (F5); hits mark ●"
+            : $"{_pendingCoveragePoints.Count:N0} site(s) will be traced on Run";
+    }
+
+    /// <summary>Plant silent one-shot coverage breakpoints on the pending trace sites (translated to live VAs)
+    /// and start harvesting hits. Requires a paused live session; a no-op otherwise (armed at the next stop).</summary>
+    private void ArmCoverageTrace()
+    {
+        if (_findTraceArmed || _dbg is not { IsStopped: true } || !_dbgViewLive || _pendingCoveragePoints.Count == 0) return;
+        ulong slide = LiveSlide;
+        _dbg.SetCoveragePoints(_pendingCoveragePoints.Select(v => v + slide));
+        _findTraceArmed = true;
+        ClearCoverageBtn.IsEnabled = true;
+        StartCoverageTimer();
+    }
+
+    /// <summary>Mark each Find row hit/not-hit from the covered-instruction set (static VAs) and show the count.</summary>
+    private void UpdateFindHits()
+    {
+        if (_findResults.Count == 0) return;
+        int hit = 0;
+        foreach (var m in _findResults) { bool h = _coveredInstrs.Contains(m.Va); m.Hit = h; if (h) hit++; }
+        if (_findTraceArmed || hit > 0)
+            FindInsnHeader.Text = $"{_findResults.Count:N0} match(es) · {hit:N0} hit";
+        if (_findHitsOnly && hit != _findShownHits) RefreshFindView();   // surface newly-hit rows in the filtered view
+        _findShownHits = hit;
+    }
+
+    /// <summary>Toggle the Find list between all matches and only the hit ones ("Hits only").</summary>
+    private void OnFindHitsOnly(object sender, RoutedEventArgs e)
+    {
+        _findHitsOnly = FindHitsOnly.IsChecked == true;
+        RefreshFindView();
+    }
+
+    /// <summary>Point the Find list at either every match or only the hit ones, per the "Hits only" toggle.</summary>
+    private void RefreshFindView()
+    {
+        FindInsnResults.ItemsSource = _findHitsOnly ? _findResults.Where(m => m.Hit).ToList() : _findResults;
     }
 
     private void OnImportActivate(object sender, MouseButtonEventArgs e)

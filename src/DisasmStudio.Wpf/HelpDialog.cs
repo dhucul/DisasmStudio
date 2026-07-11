@@ -42,6 +42,13 @@ internal static class HelpDialog
             ("Address box + Go", "Jump to a hex address"),
             ("Double-click a row", "Jump from a side panel (Functions, Strings, Imports, Exports, Sections, Xrefs)"),
         ]),
+        ("Find instructions", [
+            ("Ctrl+F", "Open the Find tab and focus its search box"),
+            ("Type + Enter", "Search the whole disassembly for instruction text (e.g. \"cmp eax, 5\") — case- and spacing-insensitive"),
+            ("Click a result", "Jump to that instruction in the linear listing"),
+            ("◴ Trace hits", "Instrument every match; on Run, the sites that actually execute are marked ● and tinted — so you can see which of the matches run"),
+            ("Hits only", "Filter the results down to just the matches that were hit"),
+        ]),
         ("Linear view", [
             ("Ctrl+C", "Copy the selected lines"),
             ("Ctrl+A", "Select all"),
