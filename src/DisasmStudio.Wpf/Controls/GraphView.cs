@@ -167,17 +167,36 @@ public sealed class GraphView : FrameworkElement
         else
         {
             if (_pendResetZoom) _scale = DebugZoom;
-            // centre on the IP's block; if the IP isn't in this function (browsing another), centre its entry
-            var b = _blocks.FirstOrDefault(x => _pendVa >= x.Start && _pendVa < x.End) ?? _blocks.FirstOrDefault();
-            if (b is not null) CenterOn(b);
+            // Centre on the IP's *instruction row*, not the block's geometric centre — otherwise a block taller
+            // than the viewport keeps its middle pinned while the current line drifts down and off-screen as you
+            // step. If the IP isn't in this function (browsing another), centre its entry block instead.
+            var b = _blocks.FirstOrDefault(x => _pendVa >= x.Start && _pendVa < x.End);
+            if (b is not null) CenterOnInstr(b, _pendVa);
+            else if (_blocks.FirstOrDefault() is { } entry) CenterOn(entry);
         }
         _pend = Pend.None;
     }
 
-    private void CenterOn(BasicBlock b)
-    {
-        double cx = b.X + b.Width / 2, cy = b.Y + b.Height / 2;
+    private void CenterOn(BasicBlock b) => CenterOnPoint(b.X + b.Width / 2, b.Y + b.Height / 2);
+
+    /// <summary>Scroll so instruction <paramref name="va"/> sits at the viewport centre. Centring on the
+    /// instruction row (rather than the block centre) keeps the current line mid-screen while stepping through a
+    /// block taller than the window, instead of letting it slide off the bottom.</summary>
+    private void CenterOnInstr(BasicBlock b, ulong va) => CenterOnPoint(b.X + b.Width / 2, RowCenterY(b, va));
+
+    private void CenterOnPoint(double cx, double cy) =>
         _offset = new Vector(ActualWidth / 2 - cx * _scale, ActualHeight / 2 - cy * _scale);
+
+    /// <summary>Vertical centre (graph coords) of the row that renders <paramref name="va"/> in block
+    /// <paramref name="b"/>; falls back to the block centre if the row can't be found. Mirrors the row layout
+    /// in <see cref="DrawBlock"/> (header + one <see cref="_rowHeight"/> per rendered line).</summary>
+    private double RowCenterY(BasicBlock b, ulong va)
+    {
+        if (_lines.TryGetValue(b.Start, out var lines))
+            for (int i = 0; i < lines.Count; i++)
+                if (lines[i].Va == va)
+                    return b.Y + HeaderH + 1 + i * _rowHeight + _rowHeight / 2;
+        return b.Y + b.Height / 2;
     }
 
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
