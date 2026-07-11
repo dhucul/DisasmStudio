@@ -20,6 +20,18 @@ public static class CfgBuilder
 
         INeutralDisassembler dis = decoder ?? NeutralDisasm.For(image, null);
 
+        // Reachability gate for the descent. Normally an address must sit in an *executable* section — this
+        // stops a mis-identified data "function" from decoding pointer bytes into a junk CFG. But some images
+        // don't flag their code executable at all: a live-process / memory dump whose region protections read
+        // non-exec, a packed section, an odd firmware/ELF layout. There the strict gate rejects even a valid
+        // entry the linear listing happily disassembles, so the CFG comes back empty and the graph + every
+        // decompiler level show "no code recovered". When the entry is NOT flagged executable yet is mapped and
+        // actually decodes to an instruction (and isn't a known IAT data slot), fall back to a mapped-only gate
+        // so we still recover the function's control flow, matching what the listing shows.
+        bool lenient = !image.IsExecutableVa(fn.Va) && !image.ImportsByIatVa.ContainsKey(fn.Va)
+                       && image.IsMappedVa(fn.Va) && dis.TryDecode(fn.Va, out _);
+        bool Reachable(ulong va) => lenient ? image.IsMappedVa(va) : image.IsExecutableVa(va);
+
         // Recursive descent normally begins at the function's entry. If the entry VA doesn't decode —
         // typically because the function was recovered from a code pointer that landed in the middle of
         // an instruction — nudge the start forward to the first decodable instruction so we still
@@ -29,9 +41,9 @@ public static class CfgBuilder
         // call-through target looks like a function), so it's left to produce no blocks rather than
         // decoding the pointer bytes into a junk CFG.
         ulong entry = fn.Va;
-        if (image.IsExecutableVa(entry) && !image.ImportsByIatVa.ContainsKey(entry) && !dis.TryDecode(entry, out _))
+        if (Reachable(entry) && !image.ImportsByIatVa.ContainsKey(entry) && !dis.TryDecode(entry, out _))
             for (int k = 1; k <= 15; k++)
-                if (image.IsExecutableVa(entry + (ulong)k) && dis.TryDecode(entry + (ulong)k, out _))
+                if (Reachable(entry + (ulong)k) && dis.TryDecode(entry + (ulong)k, out _))
                 { entry += (ulong)k; break; }
 
         var insns = new SortedDictionary<ulong, NeutralInsn>();
@@ -44,7 +56,7 @@ public static class CfgBuilder
         {
             ulong va = work.Pop();
             if (!visited.Add(va)) continue;
-            if (!image.IsExecutableVa(va) || !dis.TryDecode(va, out var instr)) continue;
+            if (!Reachable(va) || !dis.TryDecode(va, out var instr)) continue;
 
             insns[va] = instr;
             ulong fall = va + (ulong)instr.Length;

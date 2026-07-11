@@ -164,7 +164,7 @@ public partial class MainWindow : Window
         Linear.JumpMark = JumpMarkAt;
         Graph.JumpMark = JumpMarkAt;
         Decompiler.NavigateRequested += va => _nav.Navigate(va);
-        Decompiler.SelectionChanged += OnAddressFocused;
+        Decompiler.SelectionChanged += OnDecompilerFocused;
         Decompiler.RenameRequested += OnRename;
         Decompiler.CommentRequested += OnSetComment;
         Decompiler.BookmarkToggleRequested += OnToggleBookmark;
@@ -192,6 +192,19 @@ public partial class MainWindow : Window
         Graph.BreakpointToggleRequested += OnBreakpointToggle;
         Graph.IsBreakpointAt = Linear.IsBreakpointAt;
         Graph.IsHardwareBreakpointAt = Linear.IsHardwareBreakpointAt;
+        // The decompiler (all IL levels + pseudo-C) shares the SAME breakpoint/trace state and handlers as the
+        // linear view — assign the same delegate instances — so breakpoints, the trace tint and run-control work
+        // from the decompiler tab and stay in lockstep with the listing. Each pseudo-C/IL line acts on its source
+        // instruction's VA (DecompLine.Va), translated by the handlers via LiveSlide exactly like the listing.
+        Decompiler.BreakpointToggleRequested += OnBreakpointToggle;
+        Decompiler.HardwareBreakpointRequested += OnHardwareBreakpointRequest;
+        Decompiler.EditBreakpointRequested += OnEditBreakpointRequest;
+        Decompiler.RunToCursorRequested += va => _dbg?.RunToCursor(va);
+        Decompiler.RunToReturnRequested += () => OnRunToReturn(this, new RoutedEventArgs());
+        Decompiler.CaptureFunctionRequested += CaptureFunctionAt;
+        Decompiler.IsBreakpointAt = Linear.IsBreakpointAt;
+        Decompiler.IsHardwareBreakpointAt = Linear.IsHardwareBreakpointAt;
+        Decompiler.IsInstrHit = Linear.IsInstrHit;
         // Managed (.NET) source-level breakpoints: toggle from the C# view, navigate the call stack.
         Managed.BreakpointToggleRequested += OnManagedBreakpointToggle;
         ManagedDebug.FrameActivated += OnManagedFrameActivated;
@@ -447,6 +460,10 @@ public partial class MainWindow : Window
     /// when the view isn't showing live addresses.</summary>
     private ulong LiveSlide => _dbgViewLive && _dbg?.LiveResult is { } lr && _image is not null ? lr.Image.ImageBase - _image.ImageBase : 0;
 
+    /// <summary>The decoder to lift/emulate/export with: the live one while the view shows a running process
+    /// (reads its memory), else null so the default file-backed decoder is used. Same rule as the decompiler view.</summary>
+    private IInstructionDecoder? AnalysisDecoder => _dbgViewLive ? _dbg?.LiveDecoder : null;
+
     // F2 / gutter / context-menu breakpoint toggle. While the listing shows live (rebased) addresses the
     // engine is the source of truth; otherwise the address is a static VA we stash in the pre-run set. Either
     // way the static set is kept in sync, so breakpoints survive across Run / Restart and stay shown after exit.
@@ -462,6 +479,7 @@ public partial class MainWindow : Window
             _pendingBreakpoints[va] = new BpDef();
         Linear.Refresh();
         Graph.Refresh();
+        Decompiler.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
     }
@@ -484,6 +502,7 @@ public partial class MainWindow : Window
         }
         Linear.Refresh();
         Graph.Refresh();
+        Decompiler.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
     }
@@ -500,6 +519,7 @@ public partial class MainWindow : Window
             d.Engine.ConfigureBreakpoint(va, updated.Condition, updated.HitMode, updated.HitTarget, updated.Enabled);
         Linear.Refresh();
         Graph.Refresh();
+        Decompiler.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
     }
@@ -742,8 +762,9 @@ public partial class MainWindow : Window
 
         StatusText.Text = $"Emulating {fn.Name}…";
         var result = _result;
+        var decoder = AnalysisDecoder;   // read process memory when emulating a running function
         EmulationResult er;
-        try { er = await Task.Run(() => DisasmStudio.Core.IL.Decompiler.Emulate(fn, result)); }
+        try { er = await Task.Run(() => DisasmStudio.Core.IL.Decompiler.Emulate(fn, result, decoder: decoder)); }
         catch (Exception ex) { StatusText.Text = "Emulation failed: " + ex.Message; return; }
         if (!ReferenceEquals(_result, result)) return;   // the image changed while emulating
 
@@ -1039,6 +1060,7 @@ public partial class MainWindow : Window
             StartCoverageTimer();
             Linear.Refresh();
             Graph.Refresh();
+            Decompiler.Refresh();
             StatusText.Text = $"Trace started at {_dbg.CurrentIp:X} — Continue (F5) or step to record the instruction path.";
         }
         else
@@ -1064,6 +1086,7 @@ public partial class MainWindow : Window
         ClearCoverageBtn.IsEnabled = false;
         Linear.Refresh();
         Graph.Refresh();
+        Decompiler.Refresh();
     }
 
     /// <summary>Pull the instruction VAs the engine has recorded so far and repaint. In trace mode each covered
@@ -1080,6 +1103,7 @@ public partial class MainWindow : Window
             ClearCoverageBtn.IsEnabled = true;
             Linear.Refresh();
             Graph.Refresh();   // the graph carries the same trace overlay; repaint it as coverage grows
+            Decompiler.Refresh();
         }
     }
 
@@ -1636,6 +1660,7 @@ public partial class MainWindow : Window
             _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
             PopulateLists(_result);
             Linear.SetResult(_result, _dbg.LiveDecoder);
+            Decompiler.LiveDecoder = _dbg.LiveDecoder;   // decompile over process memory (the file decoder can't read it)
             Hex.SetImage(_result.Image);
             Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
             CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true; DerefCheck.IsEnabled = true;
@@ -1662,12 +1687,13 @@ public partial class MainWindow : Window
             // the trace too — not only the continuous single-step a Continue drives. Stored in static space.
             bool added = _coveredInstrs.Add(_dbg.CurrentIp - LiveSlide);
             HarvestCoverage();   // repaints (Refresh) when it adds anything
-            if (added) { ClearCoverageBtn.IsEnabled = true; Linear.Refresh(); }   // ensure the stepped row paints
+            if (added) { ClearCoverageBtn.IsEnabled = true; Linear.Refresh(); Decompiler.Refresh(); }   // ensure the stepped row paints
         }
         // Re-scan process memory for strings on every stop except a pure single-step (where it would thrash) —
         // unless the Strings tab is showing, in which case scan then too so stepping updates it live.
         if (_dbg.LastReason != StopReason.Step || StringsTabVisible) RefreshLiveStrings();
         if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp, center: false);   // graph follows RIP too (SetCurrentIp centres it)
+        if (CenterTabs.SelectedIndex == 3) { OpenDecompiler(_dbg.CurrentIp); Decompiler.SetCurrentIp(_dbg.CurrentIp); }   // decompiler follows RIP: reframe + amber IP line
         string? name = _result?.NameFor(_dbg.CurrentIp);
         string extra = _dbg.LastReason == StopReason.Exception ? $" (code 0x{_dbg.LastExceptionCode:X8})" : "";
         StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
@@ -1693,6 +1719,8 @@ public partial class MainWindow : Window
         CoverageToggle.IsEnabled = false;
         if (CoverageToggle.IsChecked == true) CoverageToggle.IsChecked = false;   // programmatic: does not fire Click
         Linear.SetCurrentIp(0);
+        Decompiler.SetCurrentIp(0);   // clear the decompiler's amber IP band too
+        Decompiler.LiveDecoder = null;   // back to the static file image; the next decompile uses the file decoder
         _curJump = null;   // no live flags now — drop the current-IP jump colour (static what-if marks persist)
         Hex.WriteByteAt = null;
         _dbg = null; _dbgViewLive = false;   // gutter now reads the static pre-run set again (IsBreakpointAt stays wired)
@@ -2156,8 +2184,8 @@ public partial class MainWindow : Window
         try
         {
             using var sw = new StreamWriter(dlg.FileName);
-            if (dlg.FilterIndex == 2) SourceExporter.WriteCompilableCFunction(sw, _result, fn);
-            else SourceExporter.WriteCFunction(sw, _result, fn);
+            if (dlg.FilterIndex == 2) SourceExporter.WriteCompilableCFunction(sw, _result, fn, AnalysisDecoder);
+            else SourceExporter.WriteCFunction(sw, _result, fn, AnalysisDecoder);
             StatusText.Text = $"Saved {fn.Name} to {dlg.FileName}";
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error); }
@@ -2501,6 +2529,16 @@ public partial class MainWindow : Window
         ShowXrefs(va);
     }
 
+    // Selecting a line in the decompiler focuses that address (status + xrefs) and — so switching back to the
+    // linear listing lands on the matching instruction — moves the (hidden) linear caret there too. Quiet:
+    // GoToVa doesn't steal focus, and the decompiler's own GoToVa sync doesn't raise SelectionChanged, so
+    // this never loops.
+    private void OnDecompilerFocused(ulong va)
+    {
+        OnAddressFocused(va);
+        Linear.GoToVa(va, focus: false);
+    }
+
     private void ShowXrefs(ulong va)
     {
         if (_result is null) return;
@@ -2548,7 +2586,7 @@ public partial class MainWindow : Window
             return;
         }
         var fn = FindFunction(va);
-        if (fn is not null && _result is not null) Decompiler.SetFunction(_result, fn);
+        if (fn is not null && _result is not null) { Decompiler.SetFunction(_result, fn); Decompiler.GoToVa(va); }
     }
 
     // Populate the graph / decompiler when the user switches to that tab (they build lazily).
@@ -2561,7 +2599,7 @@ public partial class MainWindow : Window
         ulong va = Linear.CaretVa != 0 ? Linear.CaretVa : _nav.Current ?? 0;
         if (va == 0) return;
         if (CenterTabs.SelectedIndex == 1) OpenGraph(va, center: true);
-        else if (CenterTabs.SelectedIndex == 3) OpenDecompiler(va);
+        else if (CenterTabs.SelectedIndex == 3) { OpenDecompiler(va); if (_dbg is { IsStopped: true }) Decompiler.SetCurrentIp(_dbg.CurrentIp); }
     }
 
     private Function? FindFunction(ulong va)

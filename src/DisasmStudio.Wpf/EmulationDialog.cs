@@ -58,12 +58,21 @@ public sealed class EmulationDialog : Window
             findings.Add(new Finding(b.Va, b.Va.ToString("X"), "branch",
                 b.Taken ? "condition always TRUE (take the branch)" : "condition always FALSE (fall through)"));
 
-        var list = new ListView { FontFamily = mono, FontSize = 12, Margin = new Thickness(16, 0, 16, 8) };
-        var gv = new GridView();
-        gv.Columns.Add(new GridViewColumn { Header = "Address", Width = 130, DisplayMemberBinding = new System.Windows.Data.Binding(nameof(Finding.Address)) });
-        gv.Columns.Add(new GridViewColumn { Header = "Kind", Width = 70, DisplayMemberBinding = new System.Windows.Data.Binding(nameof(Finding.Kind)) });
-        gv.Columns.Add(new GridViewColumn { Header = "Detail", Width = 460, DisplayMemberBinding = new System.Windows.Data.Binding(nameof(Finding.Detail)) });
-        list.View = gv;
+        // A DataGrid (not a ListView) so the results pick up the app's dark theme from Dark.xaml — the
+        // implicit TextBlock style pins cell text to the light TextPrimary, which on a ListView's default
+        // (unstyled) white background rendered light-on-white and was unreadable.
+        var list = new DataGrid
+        {
+            Margin = new Thickness(16, 0, 16, 8),
+            AutoGenerateColumns = false,
+            HeadersVisibility = DataGridHeadersVisibility.Column,
+            CanUserAddRows = false, CanUserDeleteRows = false, CanUserResizeRows = false, IsReadOnly = true,
+            SelectionMode = DataGridSelectionMode.Single,
+            GridLinesVisibility = DataGridGridLinesVisibility.None,
+        };
+        list.Columns.Add(new DataGridTextColumn { Header = "Address", Width = 130, Binding = new System.Windows.Data.Binding(nameof(Finding.Address)) });
+        list.Columns.Add(new DataGridTextColumn { Header = "Kind", Width = 70, Binding = new System.Windows.Data.Binding(nameof(Finding.Kind)) });
+        list.Columns.Add(new DataGridTextColumn { Header = "Detail", Width = new DataGridLength(1, DataGridLengthUnitType.Star), Binding = new System.Windows.Data.Binding(nameof(Finding.Detail)) });
         list.ItemsSource = findings;
         list.MouseDoubleClick += (_, _) => { if (list.SelectedItem is Finding f) onNavigate(f.Va); };
 

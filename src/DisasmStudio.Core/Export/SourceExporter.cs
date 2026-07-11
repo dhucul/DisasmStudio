@@ -141,8 +141,10 @@ public static class SourceExporter
         }
     }
 
-    /// <summary>Write the Pseudo-C of one function.</summary>
-    public static void WriteCFunction(TextWriter w, AnalysisResult r, Function fn) => WriteCBody(w, Decompiler.Decompile(fn, r));
+    /// <summary>Write the Pseudo-C of one function. <paramref name="decoder"/> reads a live debuggee's memory
+    /// when exporting during a debug session (the default file decoder can't).</summary>
+    public static void WriteCFunction(TextWriter w, AnalysisResult r, Function fn, IInstructionDecoder? decoder = null)
+        => WriteCBody(w, Decompiler.Decompile(fn, r, decoder));
 
     private static void WriteCBody(TextWriter w, DecompiledFunction dc)
     {
@@ -178,13 +180,14 @@ public static class SourceExporter
         w.Write(body.ToString());
     }
 
-    /// <summary>Write a compilable C translation unit for one function.</summary>
-    public static void WriteCompilableCFunction(TextWriter w, AnalysisResult r, Function fn)
+    /// <summary>Write a compilable C translation unit for one function. <paramref name="decoder"/> reads a live
+    /// debuggee's memory when exporting during a debug session.</summary>
+    public static void WriteCompilableCFunction(TextWriter w, AnalysisResult r, Function fn, IInstructionDecoder? decoder = null)
     {
         var regs = new SortedSet<string>(StringComparer.Ordinal);
         var protos = new SortedSet<string>(StringComparer.Ordinal) { ExprWriter.Sanitize(fn.Name) };
         var body = new StringBuilder();
-        RenderCompilable(Decompiler.DecompileToCompilableC(fn, r), body, regs, protos);
+        RenderCompilable(Decompiler.DecompileToCompilableC(fn, r, decoder), body, regs, protos);
         WriteCompilablePreamble(w, regs, protos);
         w.Write(body.ToString());
     }

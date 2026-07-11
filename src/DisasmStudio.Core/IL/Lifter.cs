@@ -22,19 +22,22 @@ public sealed class Lifter : ILifter
     private readonly IBinaryImage _image;
     private readonly IReadOnlyDictionary<ulong, string> _names;
     private readonly IReadOnlyDictionary<ulong, ulong[]> _jumpTables;
-    private readonly Disassembler _dis;
+    private readonly IInstructionDecoder _dis;
     private readonly AsmFormatter _fmt;
     private readonly bool _is64;
 
     private FlagDef _flag;
 
+    /// <summary><paramref name="decoder"/> lets a caller supply a live/debugger decoder that reads process
+    /// memory; when null the lifter builds the default file-backed <see cref="Disassembler"/>. The default
+    /// can't read a running process's memory, so decompiling during a debug session must pass the live one.</summary>
     public Lifter(IBinaryImage image, IReadOnlyDictionary<ulong, string> names,
-        IReadOnlyDictionary<ulong, ulong[]> jumpTables)
+        IReadOnlyDictionary<ulong, ulong[]> jumpTables, IInstructionDecoder? decoder = null)
     {
         _image = image;
         _names = names;
         _jumpTables = jumpTables;
-        _dis = new Disassembler(image);
+        _dis = decoder ?? new Disassembler(image);
         _fmt = new AsmFormatter(names);
         _is64 = image.Bitness == 64;
     }
