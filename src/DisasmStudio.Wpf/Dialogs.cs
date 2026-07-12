@@ -435,6 +435,90 @@ internal static class Dialogs
         return ok ? ParseHex(box.Text) : null;
     }
 
+    /// <summary>A parsed byte-search pattern from <see cref="AskSearchPattern"/>: the bytes to match, an
+    /// optional wildcard <see cref="Mask"/> (null = every byte significant), and a short display string for
+    /// the status bar.</summary>
+    public readonly record struct SearchQuery(byte[] Pattern, bool[]? Mask, string Display);
+
+    /// <summary>Prompt for a byte search: a mode (Hex / ASCII text / UTF-16 text) and the pattern text.
+    /// Self-contained so OK can validate inline — a malformed hex pattern keeps the dialog open with a message
+    /// instead of silently failing (same idea as <see cref="AskBreakpointEdit"/>). Returns null if cancelled.</summary>
+    public static SearchQuery? AskSearchPattern(Window owner)
+    {
+        var mode = new ComboBox { Margin = new Thickness(0, 0, 0, 10) };
+        mode.Items.Add("Hex bytes (?? = wildcard)");
+        mode.Items.Add("Text (ASCII)");
+        mode.Items.Add("Text (UTF-16)");
+        mode.SelectedIndex = 0;
+
+        var box = new TextBox { FontFamily = new FontFamily("Cascadia Mono, Consolas") };
+        var error = new TextBlock
+        {
+            Foreground = Palette.RedBrush, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0),
+        };
+
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label("Search"));
+        panel.Children.Add(mode);
+        panel.Children.Add(box);
+        panel.Children.Add(error);
+
+        var win = new Window
+        {
+            Title = "Find bytes",
+            Owner = owner,
+            Width = 380,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            Background = Bg,
+            Foreground = Fg,
+        };
+
+        SearchQuery? result = null;
+        var ok = new Button { Content = "Find", IsDefault = true, MinWidth = 70, Margin = new Thickness(0, 0, 8, 0) };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 70 };
+        ok.Click += (_, _) =>
+        {
+            string text = box.Text;
+            if (mode.SelectedIndex == 0)
+            {
+                if (!ByteSearch.TryParseHex(text, out var pat, out var mask))
+                {
+                    error.Text = "Enter whole hex bytes, e.g. 48 8B ?? 05  (?? = any byte).";
+                    return;
+                }
+                result = new SearchQuery(pat, mask, "hex " + text.Trim());
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(text)) { error.Text = "Enter some text to search for."; return; }
+                bool wide = mode.SelectedIndex == 2;
+                result = new SearchQuery(ByteSearch.ParseText(text, wide), null, $"{(wide ? "utf-16 " : "")}\"{text}\"");
+            }
+            win.DialogResult = true;
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(16, 0, 16, 16),
+        };
+        buttons.Children.Add(ok);
+        buttons.Children.Add(cancel);
+
+        var root = new DockPanel();
+        DockPanel.SetDock(buttons, Dock.Bottom);
+        root.Children.Add(buttons);
+        root.Children.Add(panel);
+        win.Content = root;
+
+        box.Loaded += (_, _) => box.Focus();
+        win.ShowDialog();
+        return result;
+    }
+
     /// <summary>Ask for a single line of text, pre-filled with <paramref name="initial"/> (selected, so typing
     /// replaces it). Used for rename / comment prompts. Returns the entered text (which may be empty — the
     /// caller treats empty as "clear"), or null if cancelled. <paramref name="multiline"/> gives a taller box.</summary>

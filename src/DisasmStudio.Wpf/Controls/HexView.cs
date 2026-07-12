@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Wpf.Services;
 
@@ -44,6 +45,23 @@ public sealed class HexView : Grid
     public event Action<ulong>? CommentRequested;
     /// <summary>Toggle a bookmark at the clicked byte's address (right-click → Toggle bookmark).</summary>
     public event Action<ulong>? BookmarkToggleRequested;
+    /// <summary>Raised (with the caret VA) when the user moves the selection caret — click, drag, or keyboard —
+    /// so the host can sync the status bar / xrefs. Programmatic <see cref="GoTo"/> and search selections stay
+    /// quiet, so a sync from another view never bounces back.</summary>
+    public event Action<ulong>? SelectionChanged;
+    /// <summary>Raised (with the byte VA) on a double-click, so the host can navigate every view there.</summary>
+    public event Action<ulong>? NavigateRequested;
+    /// <summary>Raised (right-click → Find, matching the Ctrl+F shortcut) so the host shows the search dialog.</summary>
+    public event Action? FindRequested;
+    /// <summary>Raised (right-click → Find next) to repeat the last search forward.</summary>
+    public event Action? FindNextRequested;
+    /// <summary>Raised (right-click → Find previous) to repeat the last search backward.</summary>
+    public event Action? FindPreviousRequested;
+
+    // Nested Surface is a separate class and can't raise the owner's events directly (C# event-access rule),
+    // so route double-click / drag-end notifications through these.
+    private void NotifySelection() => SelectionChanged?.Invoke(_selCaret);
+    private void NotifyNavigate(ulong addr) => NavigateRequested?.Invoke(addr);
 
     /// <summary>The address of the current selection caret (the clicked byte), or 0 when nothing is selected.</summary>
     private ulong SelectedVa => _hasSelection ? _selCaret : 0;
@@ -84,10 +102,20 @@ public sealed class HexView : Grid
         comment.Click += (_, _) => { if (SelectedVa != 0) CommentRequested?.Invoke(SelectedVa); };
         var bookmark = new MenuItem { Header = "Toggle bookmark" };
         bookmark.Click += (_, _) => { if (SelectedVa != 0) BookmarkToggleRequested?.Invoke(SelectedVa); };
+        var find = new MenuItem { Header = "Find…", InputGestureText = "Ctrl+F" };
+        find.Click += (_, _) => FindRequested?.Invoke();
+        var findNext = new MenuItem { Header = "Find next", InputGestureText = "F3" };
+        findNext.Click += (_, _) => FindNextRequested?.Invoke();
+        var findPrev = new MenuItem { Header = "Find previous", InputGestureText = "Shift+F3" };
+        findPrev.Click += (_, _) => FindPreviousRequested?.Invoke();
         var menu = new ContextMenu();
         menu.Opened += (_, _) => rename.IsEnabled = comment.IsEnabled = bookmark.IsEnabled = SelectedVa != 0;
         menu.Items.Add(copyHex);
         menu.Items.Add(copyText);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(find);
+        menu.Items.Add(findNext);
+        menu.Items.Add(findPrev);
         menu.Items.Add(new Separator());
         menu.Items.Add(rename);
         menu.Items.Add(comment);
@@ -108,18 +136,92 @@ public sealed class HexView : Grid
 
     public void InvalidateView() => _surface.InvalidateVisual();
 
-    public void GoTo(ulong address, bool select = false)
+    public void GoTo(ulong address, bool select = false, int length = 1)
     {
         if (_image is null) return;
         if (address < _image.MinVa) address = _image.MinVa;
         if (address > _image.MaxVa) address = _image.MaxVa;
 
-        // Highlight the exact target byte so navigation is visible even between two addresses in the same 16-byte
-        // row (e.g. rsp+4 vs rsp+8, which otherwise render identically and look like nothing happened), and so a
-        // target that lands in unmapped memory is still clearly shown at the address the expression resolved to.
-        if (select) { _selAnchor = _selCaret = address; _hasSelection = true; _editNibble = 0; }
+        // Highlight the target so navigation is visible even between two addresses in the same 16-byte row
+        // (e.g. rsp+4 vs rsp+8, which otherwise render identically and look like nothing happened), and so a
+        // target that lands in unmapped memory is still clearly shown. `length` highlights the whole instruction
+        // (all its opcode bytes), not just the first — the caller passes the instruction's byte count.
+        if (select)
+        {
+            ulong end = address + (ulong)(Math.Max(1, length) - 1);
+            if (end >= _image.MaxVa) end = _image.MaxVa > _image.MinVa ? _image.MaxVa - 1 : address;
+            _selAnchor = address;
+            _selCaret = end;
+            _hasSelection = true;
+            _editNibble = 0;
+        }
 
         ulong aligned = address - (address % BytesPerRow);
+        ulong back = (ulong)(Math.Max(0, VisibleRows / 2) * BytesPerRow);
+        _topAddress = aligned > _image.MinVa + back ? aligned - back : _image.MinVa;
+
+        SyncScrollValue();
+        _surface.InvalidateVisual();
+    }
+
+    // ---- byte / text search (see DisasmStudio.Core.Analysis.ByteSearch) ----
+    private byte[]? _lastPattern;
+    private bool[]? _lastMask;
+
+    public enum FindResult { NoImage, NotFound, Found, FoundWrapped }
+
+    /// <summary>Search for <paramref name="pattern"/> (with an optional wildcard <paramref name="mask"/>) from
+    /// just past the current selection, wrapping around the image once. Records the pattern for
+    /// <see cref="SearchAgain"/> (F3). On a hit, selects the whole match and scrolls it into view.</summary>
+    public FindResult Search(byte[] pattern, bool[]? mask, bool forward)
+    {
+        _lastPattern = pattern;
+        _lastMask = mask;
+        return RunSearch(forward);
+    }
+
+    /// <summary>Repeat the last <see cref="Search"/> in the given direction (F3 / Shift+F3). No-op if none.</summary>
+    public FindResult SearchAgain(bool forward) => _lastPattern is null ? FindResult.NotFound : RunSearch(forward);
+
+    private FindResult RunSearch(bool forward)
+    {
+        if (_image is null) return FindResult.NoImage;
+        if (_lastPattern is null) return FindResult.NotFound;
+
+        // Resume from just outside the current selection so repeated searches step through matches: past its
+        // end going forward, before its start going backward. With nothing selected, sweep from the near edge.
+        ulong start;
+        if (_hasSelection)
+        {
+            var (lo, hi) = SelRange();
+            start = forward
+                ? (hi + 1 < _image.MaxVa ? hi + 1 : _image.MinVa)
+                : (lo > _image.MinVa ? lo - 1 : _image.MaxVa - 1);
+        }
+        else start = forward ? _image.MinVa : _image.MaxVa - 1;
+
+        ulong? hit = ByteSearch.Find(_image, start, _lastPattern, _lastMask, forward);
+        if (hit is null) return FindResult.NotFound;
+
+        ulong matchLo = hit.Value;
+        ulong matchHi = matchLo + (ulong)_lastPattern.Length - 1;
+        bool wrapped = forward ? matchLo < start : matchLo > start;
+        SelectRange(matchLo, matchHi);
+        return wrapped ? FindResult.FoundWrapped : FindResult.Found;
+    }
+
+    /// <summary>Select the byte range [<paramref name="lo"/>, <paramref name="hi"/>] and scroll it into view.
+    /// Quiet (programmatic, like <see cref="GoTo"/>) — raises no <see cref="SelectionChanged"/>.</summary>
+    private void SelectRange(ulong lo, ulong hi)
+    {
+        if (_image is null) return;
+        _selAnchor = lo;
+        _selCaret = hi;
+        _hasSelection = true;
+        _editNibble = 0;
+
+        // Centre the match's first byte, reusing GoTo's row alignment.
+        ulong aligned = lo - (lo % BytesPerRow);
         ulong back = (ulong)(Math.Max(0, VisibleRows / 2) * BytesPerRow);
         _topAddress = aligned > _image.MinVa + back ? aligned - back : _image.MinVa;
 
@@ -209,6 +311,7 @@ public sealed class HexView : Grid
         else { _selAnchor = addr; _selCaret = addr; _hasSelection = true; }
         _editNibble = 0;
         _surface.InvalidateVisual();
+        NotifySelection();
     }
 
     /// <summary>Move the edit caret by <paramref name="delta"/> bytes, scrolling it into view.</summary>
@@ -222,6 +325,7 @@ public sealed class HexView : Grid
         _editNibble = 0;
         EnsureCaretVisible();
         _surface.InvalidateVisual();
+        NotifySelection();
     }
 
     private void EnsureCaretVisible()
@@ -417,8 +521,8 @@ public sealed class HexView : Grid
             {
                 bool extend = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
                 _owner.StartSelect(addr, extend);
-                CaptureMouse();
-                _dragging = true;
+                if (e.ClickCount == 2) _owner.NotifyNavigate(addr);   // double-click → navigate every view
+                else { CaptureMouse(); _dragging = true; }
             }
             e.Handled = true;
         }
@@ -436,7 +540,9 @@ public sealed class HexView : Grid
 
         protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
         {
-            if (_dragging) { _dragging = false; ReleaseMouseCapture(); }
+            // Fire once at the end of a drag (not per-move in ExtendSelect) so the caret lands, then sync
+            // the status bar / xrefs — without rebuilding xrefs on every pixel of the drag.
+            if (_dragging) { _dragging = false; ReleaseMouseCapture(); _owner.NotifySelection(); }
         }
 
         // Select the right-clicked byte so the context menu's Rename/Comment/Bookmark act on it.

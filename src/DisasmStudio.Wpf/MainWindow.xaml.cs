@@ -160,6 +160,11 @@ public partial class MainWindow : Window
         Hex.RenameRequested += OnRename;
         Hex.CommentRequested += OnSetComment;
         Hex.BookmarkToggleRequested += OnToggleBookmark;
+        Hex.SelectionChanged += OnHexFocused;                 // click / drag / keyboard → status + xrefs
+        Hex.NavigateRequested += va => _nav.Navigate(va);     // double-click → jump every view
+        Hex.FindRequested += HexFind;                         // right-click → Find… (mirrors Ctrl+F)
+        Hex.FindNextRequested += () => HexFindAgain(prev: false);
+        Hex.FindPreviousRequested += () => HexFindAgain(prev: true);
         Graph.BlockSelected += va => _nav.Navigate(va);
         Graph.NavigateRequested += va => _nav.Navigate(va);   // double-click / Enter on a call → follow to the callee
         Graph.RenameRequested += OnRename;
@@ -350,7 +355,13 @@ public partial class MainWindow : Window
             case Key.F11 when shift: OnStepOut(sender, e); e.Handled = true; break;
             case Key.F9 when ctrl: OnRunToReturn(sender, e); e.Handled = true; break;
             case Key.F1: HelpDialog.ShowShortcuts(this); e.Handled = true; break;
-            case Key.F when ctrl: SideTabs.SelectedItem = FindTab; FindInsnBox.Focus(); e.Handled = true; break;
+            case Key.F when ctrl:
+                // Context-aware: on the Hex tab, Ctrl+F finds bytes; elsewhere it opens the instruction Find tab.
+                if (CenterTabs.SelectedIndex == 2 && _image is not null) HexFind();
+                else { SideTabs.SelectedItem = FindTab; FindInsnBox.Focus(); }
+                e.Handled = true; break;
+            case Key.F3 when CenterTabs.SelectedIndex == 2 && _image is not null:
+                HexFindAgain(prev: shift); e.Handled = true; break;   // Shift+F3 = previous
         }
     }
 
@@ -2518,7 +2529,7 @@ public partial class MainWindow : Window
         if (_result is null || _image is null) return;
 
         Linear.GoToVa(va);          // raises SelectionChanged → xrefs/status update
-        Hex.GoTo(va);
+        HexGoTo(va);                // scroll to AND highlight the whole instruction's bytes
         // Reflect a navigation in an already-open graph without recentring: SetFunction frames a new function,
         // and a same-function nav (e.g. a graph block-click echoing back) only re-highlights, so the view
         // doesn't lurch under the cursor.
@@ -2557,6 +2568,60 @@ public partial class MainWindow : Window
     {
         OnAddressFocused(va);
         Linear.GoToVa(va, focus: false);
+    }
+
+    // Selecting a byte in the hex view focuses that address (status + xrefs) and moves the (hidden) linear
+    // caret there too, so switching back to Linear/Graph/Decompiler lands on the matching instruction. Quiet:
+    // Linear.GoToVa doesn't steal focus and doesn't re-navigate, and Hex.GoTo doesn't raise SelectionChanged,
+    // so this never loops. (Mirrors OnDecompilerFocused.)
+    private void OnHexFocused(ulong va)
+    {
+        OnAddressFocused(va);
+        Linear.GoToVa(va, focus: false);
+    }
+
+    // Point the hex view at `va`, highlighting the whole instruction (all its opcode bytes), not just the first.
+    // The instruction's length is the gap to the next listing line; data lines and non-boundary VAs get one byte.
+    private void HexGoTo(ulong va)
+    {
+        int len = 1;
+        if (_result is not null)
+        {
+            var idx = _result.Linear;
+            long line = idx.IndexOf(va);
+            if (idx.VaAt(line) == va && !idx.IsDataAt(line))
+            {
+                long rawLen = line + 1 < idx.Count ? (long)(idx.VaAt(line + 1) - va) : 1;
+                len = (int)Math.Clamp(rawLen, 1, 16);   // x86/x64 max instruction length is 15 bytes
+            }
+        }
+        Hex.GoTo(va, select: true, length: len);
+    }
+
+    // ---- hex byte search (Ctrl+F on the Hex tab; F3 / Shift+F3 to repeat) ----
+    private void HexFind()
+    {
+        if (_image is null) return;
+        if (Dialogs.AskSearchPattern(this) is not { } q) return;
+        ShowFindResult(Hex.Search(q.Pattern, q.Mask, forward: true), q.Display);
+    }
+
+    private void HexFindAgain(bool prev)
+    {
+        if (_image is null) return;
+        ShowFindResult(Hex.SearchAgain(forward: !prev), null);
+    }
+
+    private void ShowFindResult(HexView.FindResult result, string? query)
+    {
+        string what = query ?? "pattern";
+        StatusText.Text = result switch
+        {
+            HexView.FindResult.Found => $"Found {what}",
+            HexView.FindResult.FoundWrapped => $"Found {what} (wrapped)",
+            HexView.FindResult.NotFound => query is null ? "No more matches" : $"Not found: {what}",
+            _ => StatusText.Text,
+        };
     }
 
     private void ShowXrefs(ulong va)
@@ -2620,6 +2685,7 @@ public partial class MainWindow : Window
         ulong va = Linear.CaretVa != 0 ? Linear.CaretVa : _nav.Current ?? 0;
         if (va == 0) return;
         if (CenterTabs.SelectedIndex == 1) OpenGraph(va, center: true);
+        else if (CenterTabs.SelectedIndex == 2) HexGoTo(va);   // land on the current caret, whole instruction highlighted
         else if (CenterTabs.SelectedIndex == 3) { OpenDecompiler(va); if (_dbg is { IsStopped: true }) Decompiler.SetCurrentIp(_dbg.CurrentIp); }
     }
 

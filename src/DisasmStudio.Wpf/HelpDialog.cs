@@ -65,7 +65,10 @@ internal static class HelpDialog
             ("PageUp / PageDown", "Scroll a screen"),
             ("0-9, A-F", "Type to edit the byte at the caret"),
             ("Ctrl+C", "Copy the selection as hex"),
-            ("Right-click", "Copy as hex / text"),
+            ("Right-click", "Copy as hex / text · Find… / next / previous · rename / comment / bookmark"),
+            ("Click / double-click", "Focus the byte (status + xrefs) / navigate every view to it"),
+            ("Ctrl+F", "Find bytes — hex (with ?? wildcards), ASCII, or UTF-16 text"),
+            ("F3 / Shift+F3", "Find next / previous match"),
         ]),
         ("Graph", [
             ("Ctrl + Wheel", "Zoom in / out"),
