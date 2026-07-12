@@ -165,6 +165,7 @@ public partial class MainWindow : Window
         Hex.FindRequested += HexFind;                         // right-click → Find… (mirrors Ctrl+F)
         Hex.FindNextRequested += () => HexFindAgain(prev: false);
         Hex.FindPreviousRequested += () => HexFindAgain(prev: true);
+        Hex.MemoryBreakpointRequested += OnMemoryBreakpointRequested;   // right-click → data breakpoint on selection
         Graph.BlockSelected += va => _nav.Navigate(va);
         Graph.NavigateRequested += va => _nav.Navigate(va);   // double-click / Enter on a call → follow to the callee
         Graph.RenameRequested += OnRename;
@@ -226,6 +227,7 @@ public partial class MainWindow : Window
         Linear.CaptureFunctionRequested += CaptureFunctionAt;
         Linear.StatusRequested += msg => StatusText.Text = msg;
         Debug.NavigateRequested += va => _nav.Navigate(va);
+        Debug.MemoryBreakpointRequested += OnMemoryBreakpointRequested;   // Memory tab right-click → data breakpoint
         PreviewKeyDown += OnWindowPreviewKeyDown;
         PreviewMouseDown += OnWindowMouseDown;
     }
@@ -489,6 +491,20 @@ public partial class MainWindow : Window
     // way the static set is kept in sync, so breakpoints survive across Run / Restart and stay shown after exit.
     private void OnBreakpointToggle(ulong va)
     {
+        // A software memory (range) breakpoint isn't a single-VA int3 — remove it through its own engine path
+        // (the Delete key / gutter toggle both route here). Keyed by static VA like the rest of the set.
+        ulong memSva = va - LiveSlide;
+        if (_pendingBreakpoints.TryGetValue(memSva, out var memDef) && memDef.Memory)
+        {
+            _pendingBreakpoints.Remove(memSva);
+            if (_dbgViewLive && _dbg is { } dm) dm.Engine.RemoveMemoryBreakpoint(va);
+            Linear.Refresh();
+            Graph.Refresh();
+            Decompiler.Refresh();
+            Debug.Refresh();
+            RefreshBreakpointList();
+            return;
+        }
         if (_dbgViewLive && _dbg is { } d)
         {
             d.ToggleBreakpoint(va);                       // va is a live, rebased VA (plain software bp)
@@ -527,6 +543,27 @@ public partial class MainWindow : Window
         RefreshBreakpointList();
     }
 
+    /// <summary>Set a software memory (data) breakpoint over the highlighted byte range in a hex view — break on
+    /// read / write / either. Records it in the pre-run set (keyed by static VA, so it survives Run/Restart for a
+    /// module address) and, if a session is live, arms it on the process now via page protection.</summary>
+    private void OnMemoryBreakpointRequested((ulong Lo, ulong Hi, MemAccess Access) w)
+    {
+        ulong start = w.Lo, len = w.Hi - w.Lo + 1;
+        ulong sva = start - LiveSlide;
+        var def = _pendingBreakpoints.TryGetValue(sva, out var existing) ? existing : new BpDef();
+        def.Memory = true; def.Hardware = false; def.MemAccess = w.Access; def.MemLength = (int)len;
+        _pendingBreakpoints[sva] = def;
+        if (_dbgViewLive && _dbg is { } d)
+            d.Engine.SetMemoryBreakpoint(start, len, w.Access);
+        Linear.Refresh();
+        Graph.Refresh();
+        Decompiler.Refresh();
+        Debug.Refresh();
+        RefreshBreakpointList();
+        StatusText.Text = $"Memory breakpoint ({w.Access}) at {start:X}..{w.Hi:X}  ({len} bytes)"
+            + (_dbgViewLive ? "" : " — will arm on run");
+    }
+
     /// <summary>Edit the condition / hit-count / enabled state of the breakpoint at <paramref name="va"/>
     /// (right-click → Edit breakpoint…, or the side list's Edit menu). No-op if there is no breakpoint there.</summary>
     private void OnEditBreakpointRequest(ulong va)
@@ -554,6 +591,11 @@ public partial class MainWindow : Window
         foreach (var (sva, def) in _pendingBreakpoints)
         {
             ulong va = sva + slide;
+            if (def.Memory)   // software memory (range) breakpoint — page protection, no int3 / condition
+            {
+                _dbg.Engine.SetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
+                continue;
+            }
             if (def.Hardware) _dbg.Engine.SetHardwareBreakpoint(va, def.Kind, def.Size);
             else _dbg.Engine.SetBreakpoint(va);
             _dbg.Engine.ConfigureBreakpoint(va, def.Condition, def.HitMode, def.HitTarget, def.Enabled);
@@ -1719,7 +1761,12 @@ public partial class MainWindow : Window
         if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp, center: false);   // graph follows RIP too (SetCurrentIp centres it)
         if (CenterTabs.SelectedIndex == 3) { OpenDecompiler(_dbg.CurrentIp); Decompiler.SetCurrentIp(_dbg.CurrentIp); }   // decompiler follows RIP: reframe + amber IP line
         string? name = _result?.NameFor(_dbg.CurrentIp);
-        string extra = _dbg.LastReason == StopReason.Exception ? $" (code 0x{_dbg.LastExceptionCode:X8})" : "";
+        string extra = _dbg.LastReason switch
+        {
+            StopReason.Exception => $" (code 0x{_dbg.LastExceptionCode:X8})",
+            StopReason.MemoryBreakpoint => $" ({(_dbg.Engine.LastMemoryHitAccess == 1 ? "write" : "read")} {_dbg.Engine.LastMemoryHitVa:X})",
+            _ => "",
+        };
         StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
     }
 

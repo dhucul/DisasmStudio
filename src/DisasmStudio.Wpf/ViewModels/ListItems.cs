@@ -72,6 +72,9 @@ public sealed class BpDef
     public bool Hardware;
     public HwKind Kind;            // when Hardware
     public int Size = 1;           // 1/2/4/8 when Hardware (1 for Execute)
+    public bool Memory;            // software memory (data) breakpoint on a byte range
+    public int MemLength = 1;      // range length in bytes (when Memory)
+    public MemAccess MemAccess;    // read / write / read-write (when Memory)
     public bool Enabled = true;
     public string? Condition;      // raw expression text, null = unconditional
     public HitCountMode HitMode = HitCountMode.None;
@@ -83,6 +86,7 @@ public sealed class BpDef
     {
         var parts = new List<string>();
         if (Hardware) parts.Add($"hw {Kind}{(Kind == HwKind.Execute ? "" : "/" + Size)}");
+        if (Memory) parts.Add($"mem {MemAccess} · {MemLength} B");
         if (!string.IsNullOrEmpty(Condition)) parts.Add($"if ({Condition})");
         parts.Add(HitMode switch
         {

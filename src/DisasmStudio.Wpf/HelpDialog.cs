@@ -69,6 +69,7 @@ internal static class HelpDialog
             ("Click / double-click", "Focus the byte (status + xrefs) / navigate every view to it"),
             ("Ctrl+F", "Find bytes — hex (with ?? wildcards), ASCII, or UTF-16 text"),
             ("F3 / Shift+F3", "Find next / previous match"),
+            ("Right-click → Memory breakpoint", "While debugging: software data breakpoint on the selected bytes — break on read / write / read-write (any length; via page protection)"),
         ]),
         ("Graph", [
             ("Ctrl + Wheel", "Zoom in / out"),

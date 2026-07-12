@@ -34,6 +34,9 @@ public sealed class DebugPanel : Grid
     private readonly List<ulong> _moduleVas = [];
 
     public event Action<ulong>? NavigateRequested;
+    /// <summary>Forwarded from the Memory hex view: set a software data breakpoint over the selected byte range
+    /// (read / write / read-write). The host arms it and tracks it in the breakpoint set.</summary>
+    public event Action<(ulong Lo, ulong Hi, MemAccess Access)>? MemoryBreakpointRequested;
 
     private sealed class RegRow { public string Name { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; }
     private sealed class StackRow { public string Addr { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; public ulong Slot; public ulong ValueRaw; }
@@ -88,6 +91,7 @@ public sealed class DebugPanel : Grid
 
         var memPanel = new DockPanel();
         _dump = new HexView();   // editable hex view over the whole live address space
+        _dump.MemoryBreakpointRequested += w => MemoryBreakpointRequested?.Invoke(w);   // right-click → data breakpoint on selection
         _dumpAddrBox = new TextBox { FontFamily = Mono, Margin = new Thickness(4), ToolTip = "Address or expression to follow, e.g. 401000, eax, eax+4, [esp+8] (Enter; numbers are hex); type hex over a byte to edit memory" };
         _dumpAddrBox.KeyDown += (_, e) => { if (e.Key == Key.Enter) { _dumpAddr = ParseAddr(_dumpAddrBox.Text); _dump.GoTo(_dumpAddr, select: true); } };
         DockPanel.SetDock(_dumpAddrBox, Dock.Top);
@@ -225,6 +229,11 @@ public sealed class DebugPanel : Grid
             if (!string.IsNullOrEmpty(bp.Condition)) extra += $"  if({bp.Condition})";
             if (bp.HitMode != HitCountMode.None) extra += $"  {bp.HitMode}:{bp.HitTarget}";
             _bps.Items.Add($"{bp.Address.ToString("X" + w)}  {kind}{extra}  {_session.LiveResult?.NameFor(bp.Address) ?? ""}");
+        }
+        foreach (var m in _session.Engine.MemoryBreakpoints)
+        {
+            _bpVas.Add(m.Start);
+            _bps.Items.Add($"{m.Start.ToString("X" + w)}  mem {m.Access}/{m.Length}B  {_session.LiveResult?.NameFor(m.Start) ?? ""}");
         }
 
         // threads

@@ -133,7 +133,9 @@ public sealed class DebugSession
             LiveDecoder = new LiveDisassembler(Engine);
         }
         Registers = Engine.GetRegisters();
-        CurrentIp = Registers?.Ip ?? s.Address;
+        // A memory-breakpoint stop reports the accessing instruction in s.Address; the thread's real IP has
+        // already stepped one instruction past the access, so prefer the reported address for the caret/status.
+        CurrentIp = s.Reason == StopReason.MemoryBreakpoint ? s.Address : Registers?.Ip ?? s.Address;
         LastReason = s.Reason;
         LastExceptionCode = s.ExceptionCode;
         IsStopped = true;

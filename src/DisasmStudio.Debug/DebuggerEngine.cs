@@ -313,6 +313,7 @@ public sealed partial class DebuggerEngine
             case Native.EXIT_PROCESS_DEBUG_EVENT:
                 if (_hostingDll && !_targetLoaded)
                     Output?.Invoke("Target DLL was never loaded by the host (wrong-bitness rundll32, bad path, or the host didn't load it).");
+                MemCleanup();   // drop memory-breakpoint page state so a Restart starts clean
                 ProcessExiting?.Invoke((int)ev.ExitProcess.dwExitCode);
                 _ended = true;
                 Exited?.Invoke((int)ev.ExitProcess.dwExitCode);
@@ -456,6 +457,22 @@ public sealed partial class DebuggerEngine
             // so it is safe to consult first on every single-step event.
             bool smcStep = SmcHandleWriteStep(ev.dwThreadId, out _);
 
+            // Software memory-breakpoint trap-step: the faulting access has now completed, so re-protect its
+            // page and, if it was a real hit, stop at the accessing instruction. Like the SMC guard-step this is
+            // armed with a bare trap flag (no StepState), so it must be consulted before the internal-step /
+            // !stepping handling below — otherwise a hit is dropped and the page left unprotected. The Count
+            // guard keeps the hot trace loop lock-free when no memory-bp step is pending (_memStep is only ever
+            // touched on this debug-loop thread, so the read is safe).
+            if (_memStep.Count > 0 && MemHandleStep(ev.dwThreadId, out var memStep))
+            {
+                if (memStep.Stop)
+                {
+                    Stopped?.Invoke(new StopInfo(StopReason.MemoryBreakpoint, ev.dwThreadId, memStep.InstrAddr, code));
+                    return true;
+                }
+                return false;   // an unrelated access on a watched page — re-protected, keep running
+            }
+
             // A step armed only to run one instruction off an internal anti-debug hook, then re-arm it.
             if (_internalStep.Remove(ev.dwThreadId, out ulong isAddr))
             {
@@ -516,6 +533,19 @@ public sealed partial class DebuggerEngine
         if (code == Native.EXCEPTION_ACCESS_VIOLATION && er.Info0 == 1 && SmcTrackingEnabled)
         {
             if (SmcHandleWriteFault(ev.dwThreadId, er.Info1, ref cont))
+                return false;
+        }
+
+        // Software memory breakpoint: a read (Info0==0), write (Info0==1), or instruction fetch (Info0==8) landed
+        // on a page we protected for a user memory breakpoint. Let the access complete via a trap-step, then
+        // re-protect and (if it hit a watched range with a matching access kind) stop. An execute fetch never
+        // matches a read/write watch, so it's passed through — this keeps code on a no-access watched page running
+        // (slowly) instead of faulting to the generic AV path as a spurious crash. Returns false for any page
+        // that isn't ours, so a genuine AV falls through. Checked before the generic AV reporting and before the
+        // NX/OEP execute check (which keys off _guarded, a different page set), so neither interferes.
+        if (code == Native.EXCEPTION_ACCESS_VIOLATION && er.Info0 is 0 or 1 or 8 && HasMemoryBreakpoints)
+        {
+            if (MemHandleFault(ev.dwThreadId, er.Info1, (int)er.Info0, er.ExceptionAddress, ref cont))
                 return false;
         }
 
@@ -748,6 +778,7 @@ public sealed partial class DebuggerEngine
     private void RestoreAllInstrumentation()
     {
         SmcCleanup();
+        MemCleanup();   // restore memory-breakpoint page protections
         lock (_lock)
         {
             foreach (var bp in _swBps.Values) if (bp.Armed) WriteCode(bp.Address, [bp.Original]);
@@ -1277,7 +1308,19 @@ public sealed partial class DebuggerEngine
     {
         if (_proc == IntPtr.Zero || count <= 0) return [];
         var buf = new byte[count];
-        Native.ReadProcessMemory(_proc, addr, buf, (nuint)count, out var read);
+        nuint read;
+        // A read-mode memory breakpoint marks its page PAGE_NOACCESS, which would make our own ReadProcessMemory
+        // (the memory dump / disassembly) fail too. While stopped, briefly restore any such page overlapping the
+        // read, then re-protect. No-op unless a read/read-write memory breakpoint is active.
+        if (_memPages.Count == 0)
+            Native.ReadProcessMemory(_proc, addr, buf, (nuint)count, out read);
+        else
+            lock (_lock)
+            {
+                var opened = OpenMemPagesForRead(addr, count);
+                Native.ReadProcessMemory(_proc, addr, buf, (nuint)count, out read);
+                if (opened is not null) ReprotectMemPages(opened);
+            }
         if ((int)read != count) Array.Resize(ref buf, (int)read);
         MaskBreakpoints(addr, buf);
         return buf;

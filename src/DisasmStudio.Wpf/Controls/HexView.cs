@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Debug;
 using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf.Controls;
@@ -57,6 +58,9 @@ public sealed class HexView : Grid
     public event Action? FindNextRequested;
     /// <summary>Raised (right-click → Find previous) to repeat the last search backward.</summary>
     public event Action? FindPreviousRequested;
+    /// <summary>Raised (right-click → Memory breakpoint) to set a software data breakpoint on the selected byte
+    /// range, breaking on read / write / either per the <see cref="MemAccess"/>.</summary>
+    public event Action<(ulong Lo, ulong Hi, MemAccess Access)>? MemoryBreakpointRequested;
 
     // Nested Surface is a separate class and can't raise the owner's events directly (C# event-access rule),
     // so route double-click / drag-end notifications through these.
@@ -108,14 +112,28 @@ public sealed class HexView : Grid
         findNext.Click += (_, _) => FindNextRequested?.Invoke();
         var findPrev = new MenuItem { Header = "Find previous", InputGestureText = "Shift+F3" };
         findPrev.Click += (_, _) => FindPreviousRequested?.Invoke();
+        // Software memory (data) breakpoint over the selection — break on read / write / either (while debugging).
+        // Flat items: the dark MenuItem template has no sub-menu popup, so nested items would never render.
+        var memRead = new MenuItem { Header = "Break on read (memory bp)" };
+        memRead.Click += (_, _) => { if (Selection is { } s) MemoryBreakpointRequested?.Invoke((s.Lo, s.Hi, MemAccess.Read)); };
+        var memWrite = new MenuItem { Header = "Break on write (memory bp)" };
+        memWrite.Click += (_, _) => { if (Selection is { } s) MemoryBreakpointRequested?.Invoke((s.Lo, s.Hi, MemAccess.Write)); };
+        var memRw = new MenuItem { Header = "Break on read/write (memory bp)" };
+        memRw.Click += (_, _) => { if (Selection is { } s) MemoryBreakpointRequested?.Invoke((s.Lo, s.Hi, MemAccess.ReadWrite)); };
         var menu = new ContextMenu();
-        menu.Opened += (_, _) => rename.IsEnabled = comment.IsEnabled = bookmark.IsEnabled = SelectedVa != 0;
+        menu.Opened += (_, _) =>
+            rename.IsEnabled = comment.IsEnabled = bookmark.IsEnabled =
+            memRead.IsEnabled = memWrite.IsEnabled = memRw.IsEnabled = SelectedVa != 0;
         menu.Items.Add(copyHex);
         menu.Items.Add(copyText);
         menu.Items.Add(new Separator());
         menu.Items.Add(find);
         menu.Items.Add(findNext);
         menu.Items.Add(findPrev);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(memRead);
+        menu.Items.Add(memWrite);
+        menu.Items.Add(memRw);
         menu.Items.Add(new Separator());
         menu.Items.Add(rename);
         menu.Items.Add(comment);
@@ -377,6 +395,18 @@ public sealed class HexView : Grid
     private (ulong Lo, ulong Hi) SelRange() =>
         _selAnchor <= _selCaret ? (_selAnchor, _selCaret) : (_selCaret, _selAnchor);
 
+    /// <summary>The current inclusive byte selection [Lo, Hi], or null when nothing is selected.</summary>
+    public (ulong Lo, ulong Hi)? Selection => _hasSelection ? SelRange() : null;
+
+    /// <summary>True if <paramref name="addr"/> falls within the current selection (used so a right-click inside
+    /// a multi-byte selection doesn't collapse it).</summary>
+    private bool SelectionContains(ulong addr)
+    {
+        if (!_hasSelection) return false;
+        var (lo, hi) = SelRange();
+        return addr >= lo && addr <= hi;
+    }
+
     private void CopySelection(bool asText)
     {
         if (_image is null || !_hasSelection) return;
@@ -545,11 +575,14 @@ public sealed class HexView : Grid
             if (_dragging) { _dragging = false; ReleaseMouseCapture(); _owner.NotifySelection(); }
         }
 
-        // Select the right-clicked byte so the context menu's Rename/Comment/Bookmark act on it.
+        // Right-click inside an existing multi-byte selection keeps it (so "memory breakpoint on the selection"
+        // and copy act on the whole highlighted run); right-clicking elsewhere selects just that byte for the
+        // context menu's Rename/Comment/Bookmark.
         protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
         {
             Focus();
-            if (_owner.HitTestByte(e.GetPosition(this), out ulong addr)) _owner.StartSelect(addr, extend: false);
+            if (_owner.HitTestByte(e.GetPosition(this), out ulong addr) && !_owner.SelectionContains(addr))
+                _owner.StartSelect(addr, extend: false);
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
