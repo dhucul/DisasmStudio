@@ -171,12 +171,16 @@ public partial class MainWindow : Window
         Graph.RenameRequested += OnRename;
         Graph.CommentRequested += OnSetComment;
         Graph.BookmarkToggleRequested += OnToggleBookmark;
-        // "Toggle jump" (shared by both views): flips the deciding CPU flags on the current-IP jump while
-        // debugging, else a static what-if; JumpMark tells each view how to colour the jump's line (green/red).
+        // "Toggle jump" (shared by the linear, graph and decompiler panes): flips the deciding CPU flags on the
+        // current-IP jump while debugging, else a static what-if; JumpMark tells each view how to colour the
+        // jump's line (green/red). All three share one handler and one mark set, keyed by VA, so a toggle from
+        // any pane shows in all of them — the decompiler colours the branch/if/while line carrying that Jcc's VA.
         Linear.ToggleJumpRequested += OnToggleJump;
         Graph.ToggleJumpRequested += OnToggleJump;
+        Decompiler.ToggleJumpRequested += OnToggleJump;
         Linear.JumpMark = JumpMarkAt;
         Graph.JumpMark = JumpMarkAt;
+        Decompiler.JumpMark = JumpMarkAt;
         Decompiler.NavigateRequested += va => _nav.Navigate(va);
         Decompiler.SelectionChanged += OnDecompilerFocused;
         Decompiler.RenameRequested += OnRename;
@@ -709,8 +713,8 @@ public partial class MainWindow : Window
         {
             string fn = regs.Is32 ? "eflags" : "rflags";
             _dbg.Engine.SetRegister(fn, JccEval.FlipToInvert(i.ConditionCode, regs[fn]));
-            RecomputeCurrentJump();                                 // recolour from the new real flags
-            Linear.Refresh(); Graph.Refresh(); Debug.Refresh();     // Debug.Refresh so the flags grid updates too
+            RecomputeCurrentJump();                                        // recolour from the new real flags
+            Linear.Refresh(); Graph.Refresh(); Decompiler.Refresh(); Debug.Refresh();   // Debug.Refresh so the flags grid updates too
             StatusText.Text = $"Flipped {JccEval.FlipDescription(i.ConditionCode)} — jump @ {va:X} {(_curJump?.Taken == true ? "will be taken" : "falls through")}";
             return;
         }
@@ -718,7 +722,7 @@ public partial class MainWindow : Window
         ulong sva = va - LiveSlide;
         bool taken = _jumpAssume.TryGetValue(sva, out var cur) ? !cur : true;
         _jumpAssume[sva] = taken;
-        Linear.Refresh(); Graph.Refresh();
+        Linear.Refresh(); Graph.Refresh(); Decompiler.Refresh();
         StatusText.Text = $"Jump {sva:X} assumed {(taken ? "taken (green)" : "not taken (red)")}";
     }
 

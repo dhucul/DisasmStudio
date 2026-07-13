@@ -29,6 +29,8 @@ public sealed class DecompilerView : Grid
     private IInstructionDecoder? _dis;   // for "follow call/branch"; the live decoder while debugging, else file-backed
     private DecompiledFunction? _dc;
     private IReadOnlyList<DecompLine> _lines = [];
+    private Dictionary<ulong, int> _lineByVa = [];   // VA → first shown line at that address, for resolving branch-arrow targets
+    private Dictionary<int, int> _mergeOf = [];      // block-opening line → its matching closing-brace (merge) line, for scope arrows
     private ILLevel _level = ILLevel.PseudoC;
 
     private readonly Dictionary<ulong, DecompiledFunction> _cache = [];
@@ -50,6 +52,14 @@ public sealed class DecompilerView : Grid
     private double _charWidth = 8;
     private int _addrDigits = 8;
 
+    // A toggled conditional-jump line is tinted green (taken) / red (not taken) — translucent so the code stays
+    // readable, mirroring the linear/graph views' green/red branch marks and drawn under the caret/IP bands.
+    private static readonly Brush JumpTakenBand = FrozenDim(SyntaxTheme.EdgeTaken, 0.22);
+    private static readonly Brush JumpNotTakenBand = FrozenDim(Palette.RedBrush, 0.22);
+    // Untoggled branch arrows are drawn faint so a toggled (green/red) one clearly stands out (as in the linear view).
+    private static readonly Brush DimEdgeJump = FrozenDim(SyntaxTheme.EdgeJump, 0.4);
+    private static Brush FrozenDim(Brush b, double opacity) { var c = b.Clone(); c.Opacity = opacity; c.Freeze(); return c; }
+
     public event Action<ulong>? NavigateRequested;
     public event Action<ulong>? SelectionChanged;
     public event Action<ulong>? SaveCRequested;
@@ -61,6 +71,14 @@ public sealed class DecompilerView : Grid
     public event Action<ulong>? BookmarkToggleRequested;
     /// <summary>Emulate the shown function to resolve constants / decrypt data (right-click → Emulate).</summary>
     public event Action<ulong>? EmulateFunctionRequested;
+    /// <summary>Toggle the conditional jump at the caret line's address so it goes the other way — flips the
+    /// deciding CPU flags while stopped on it in the debugger, or a static what-if otherwise; the line recolours
+    /// green ("taken") / red ("not taken") (right-click → Toggle jump, or Space). Shared with the linear + graph
+    /// views (same host handler, keyed by VA), so a toggle from any pane shows in all of them.</summary>
+    public event Action<ulong>? ToggleJumpRequested;
+    /// <summary>Per-jump colour mark supplied by the host: true = green ("taken"), false = red ("not taken"),
+    /// null = untoggled. Tints the branch/if/while line; flipped by the "Toggle jump" action.</summary>
+    public Func<ulong, bool?>? JumpMark { get; set; }
 
     // ---- debugging surface (shared with the linear + graph views; see MainWindow.WireControls) ----
     /// <summary>Toggle a software breakpoint at the line's address (gutter click, F9, right-click).</summary>
@@ -93,6 +111,14 @@ public sealed class DecompilerView : Grid
 
     /// <summary>The address of the current caret line (0 when nothing is selected / it's a synthetic line).</summary>
     private ulong CaretVa => _caret >= 0 && _caret < _lines.Count ? _lines[(int)_caret].Va : 0;
+
+    /// <summary>True when <paramref name="va"/> decodes to a conditional jump — the only kind the "Toggle jump"
+    /// colour mark applies to. Uses the arch-neutral decoder (x86 + ARM), matching the linear/graph views; a
+    /// branch/if/while line carries its deciding Jcc's VA, so this gates the action on those lines.</summary>
+    private bool IsCondJumpAt(ulong va)
+        => va != 0 && _result is not null
+           && NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder).TryDecode(va, out var i)
+           && i.Flow == FlowKind.CondJump;
 
     private static readonly (ILLevel Level, string Label)[] Levels =
     [
@@ -154,6 +180,8 @@ public sealed class DecompilerView : Grid
         // Debug items — same actions as the linear view's, acting on the caret line's address / shown function.
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F9" };
         toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
+        var toggleJump = new MenuItem { Header = "Toggle jump", InputGestureText = "Space" };
+        toggleJump.Click += (_, _) => { if (IsCondJumpAt(CaretVa)) ToggleJumpRequested?.Invoke(CaretVa); };
         var hwBp = new MenuItem { Header = "Hardware breakpoint…" };
         hwBp.Click += (_, _) => { if (CaretVa != 0) HardwareBreakpointRequested?.Invoke(CaretVa); };
         var editBp = new MenuItem { Header = "Edit breakpoint…" };
@@ -172,13 +200,19 @@ public sealed class DecompilerView : Grid
         menu.Items.Add(saveC);
         menu.Items.Add(new Separator());
         menu.Items.Add(toggleBp);
+        menu.Items.Add(toggleJump);
         menu.Items.Add(hwBp);
         menu.Items.Add(editBp);
         menu.Items.Add(runTo);
         menu.Items.Add(runToRet);
         menu.Items.Add(captureFn);
-        // Edit breakpoint only makes sense on a line that already has one (mirrors the linear view).
-        menu.Opened += (_, _) => editBp.IsEnabled = CaretVa != 0 && IsBreakpointAt?.Invoke(CaretVa) == true;
+        // Edit breakpoint only makes sense on a line that already has one; Toggle jump only on a conditional
+        // jump's line (its if/while/branch line). Both mirror the linear view.
+        menu.Opened += (_, _) =>
+        {
+            editBp.IsEnabled = CaretVa != 0 && IsBreakpointAt?.Invoke(CaretVa) == true;
+            toggleJump.IsEnabled = IsCondJumpAt(CaretVa);
+        };
         _surface.ContextMenu = menu;
 
         MeasureFont();
@@ -229,6 +263,8 @@ public sealed class DecompilerView : Grid
         _dc = null;
         _dis = null;          // a new file means a new image; the decoder is rebuilt on next SetFunction
         _lines = [];
+        _lineByVa = [];
+        _mergeOf = [];
         _cache.Clear();
         _shownFn = 0;
         _caret = -1;
@@ -253,6 +289,7 @@ public sealed class DecompilerView : Grid
     {
         _dc = dc;
         _lines = dc.Lines(_level);
+        RebuildLineIndex();
         _top = 0;
         _caret = -1;
         _ipLine = _ipVa != 0 ? BestLineFor(_ipVa) : -1;
@@ -265,6 +302,7 @@ public sealed class DecompilerView : Grid
     {
         _dc = null;
         _lines = [new DecompLine(fn.Va, [new AsmToken($"// decompiling {fn.Name}…", AsmTokenKind.Comment)], 0)];
+        RebuildLineIndex();
         _top = 0;
         _caret = -1;
         ConfigureScroll();
@@ -279,6 +317,7 @@ public sealed class DecompilerView : Grid
         {
             ulong keep = CaretVa;   // the focused instruction — preserve it across the level switch
             _lines = _dc.Lines(_level);
+            RebuildLineIndex();
             _top = 0;
             _caret = -1;
             _ipLine = _ipVa != 0 ? BestLineFor(_ipVa) : -1;
@@ -340,6 +379,32 @@ public sealed class DecompilerView : Grid
         return best;
     }
 
+    /// <summary>Rebuild the VA→line map that branch arrows resolve their targets against. Called whenever the
+    /// shown lines change. The first line at a given VA wins — for a block that's a label line, so an arrow lands
+    /// on the top of the target block rather than a statement partway down it.</summary>
+    private void RebuildLineIndex()
+    {
+        _lineByVa = new Dictionary<ulong, int>(_lines.Count);
+        _mergeOf = [];
+        var open = new Stack<int>();   // line indices of blocks whose closing brace we're still looking for
+        for (int i = 0; i < _lines.Count; i++)
+        {
+            if (_lines[i].Va != 0) _lineByVa.TryAdd(_lines[i].Va, i);
+
+            int opens = 0, closes = 0;
+            foreach (var t in _lines[i].Tokens)
+                if (t.Text == "{") opens++;
+                else if (t.Text == "}") closes++;
+            // Pair each block-opening line with its merge (closing-brace) line. A pure `}` closes the innermost
+            // open block; a `} else {` continuation (one close + one open) leaves that block's slot on the stack so
+            // the header pairs with the construct's FINAL `}`, not the `else`; a pure `{` opens a new block.
+            if (closes > 0 && opens == 0)
+                for (int c = 0; c < closes && open.Count > 0; c++) _mergeOf[open.Pop()] = i;
+            else if (opens > 0 && closes == 0)
+                for (int o = 0; o < opens; o++) open.Push(i);
+        }
+    }
+
     private void UpdateLevelButtons()
     {
         for (int i = 0; i < _levelButtons.Length; i++)
@@ -355,8 +420,9 @@ public sealed class DecompilerView : Grid
     // ---- geometry / scrolling ----
 
     private int VisibleRows => Math.Max(1, (int)(_surface.ActualHeight / _rowHeight));
-    private double BpGutterW => 1.7 * _charWidth;   // clickable breakpoint strip left of the address (VS-style)
-    private double AddrX => BpGutterW + 3;
+    private double BpGutterW => 1.7 * _charWidth;    // clickable breakpoint strip left of the address (VS-style)
+    private double ArrowGutterW => 3.2 * _charWidth; // branch-connector arrow lanes, between the strip and the address
+    private double AddrX => BpGutterW + ArrowGutterW + 3;
     private double ContentX => AddrX + (_addrDigits + 2) * _charWidth;
 
     private void MeasureFont()
@@ -446,6 +512,11 @@ public sealed class DecompilerView : Grid
                 dc.DrawRectangle(SyntaxTheme.CurrentIp, null, band);
             else if (idx == _caret)
                 dc.DrawRectangle(SyntaxTheme.CurrentLine, null, band);
+            // A toggled conditional jump recolours its line green (taken) / red (not taken). Drawn last (over the
+            // caret/IP bands) but translucent, so the mark stays visible on the selected/current line while the
+            // code text — painted just below — stays readable. Mirrors the linear/graph green/red branch marks.
+            if (line.Va != 0 && JumpMark?.Invoke(line.Va) is bool taken)
+                dc.DrawRectangle(taken ? JumpTakenBand : JumpNotTakenBand, null, band);
 
             if (line.Va != 0 && IsBreakpointAt?.Invoke(line.Va) == true)
             {
@@ -461,8 +532,139 @@ public sealed class DecompilerView : Grid
                 x = Draw(dc, tok.Text, x, y, SyntaxTheme.BrushFor(tok.Kind), dpi);
         }
 
+        DrawBranchArrows(dc, rows);
+
         double dx = Math.Round(ContentX - _charWidth) - 0.5;
         dc.DrawLine(new Pen(SyntaxTheme.Separator, 1), new Point(dx, 0), new Point(dx, height));
+    }
+
+    /// <summary>Branch-connector arrows in the lane between the breakpoint strip and the address column — the
+    /// decompiler analogue of the linear view's jump arrows. Each direct jump/branch line links to the shown line
+    /// that carries its target address; a toggled conditional jump is drawn as a bright green (taken) / red (not
+    /// taken) core over a glow, untoggled ones thin and faint. A jump whose target isn't a shown line (e.g. one
+    /// the structurer folded into an <c>if</c>/<c>while</c>) gets no arrow — its green/red line tint still marks it.
+    /// Mirrors <see cref="LinearDisassemblyView"/>'s renderer, minus the folding/label-line bookkeeping.</summary>
+    private void DrawBranchArrows(DrawingContext dc, int rows)
+    {
+        if (_result is null || _lines.Count == 0) return;
+        var dis = NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder);
+
+        double xCode = AddrX - 3;          // arrows meet the code at the left edge of the address column
+        double minX = BpGutterW + 2;       // don't cross into the breakpoint strip
+        const double LaneStep = 4;         // horizontal gap between nested arrow lanes
+        const int Margin = 400;            // rows scanned beyond the view so a connector keeps running to its target while you scroll
+        double bottomY = rows * _rowHeight;
+
+        // 1) Collect every jump whose span crosses the visible window, routed to where control actually goes:
+        //    the branch target when taken/untoggled, the fall-through when toggled to "not taken". Colour: green =
+        //    taken, red = falls through, blue = untoggled. Off-screen endpoints clamp to the view edge.
+        var arrows = new List<(int SrcOff, int TgtOff, Brush Brush, bool Marked)>();
+        long scanLo = Math.Max(0, _top - Margin);
+        long scanHi = Math.Min(_lines.Count, _top + rows + Margin);
+        for (long i = scanLo; i < scanHi; i++)
+        {
+            ulong va = _lines[(int)i].Va;
+            if (va == 0) continue;
+            if (!dis.TryDecode(va, out var insn) || insn.DirectTarget is not ulong branchTarget) continue;
+            if (insn.Flow is not (FlowKind.Jump or FlowKind.CondJump)) continue;   // arrows for jumps, not calls
+
+            bool? mark = insn.Flow == FlowKind.CondJump ? JumpMark?.Invoke(va) : null;
+            Brush brush = mark switch
+            {
+                true => SyntaxTheme.EdgeTaken,      // green: taken
+                false => Palette.RedBrush,          // red: falls through
+                _ => SyntaxTheme.EdgeJump,          // blue: untoggled
+            };
+            // A structured if/while header (it opens a block) links to its merge point — the matching closing brace
+            // — showing the block's extent where control rejoins, but only once you toggle it: an untoggled block
+            // stays tint-only (its faint scope line would just be noise in nested code). A plain goto / if-goto
+            // links to the shown line carrying its target address (the not-taken case reroutes to the fall-through).
+            int tgtLine;
+            if (_mergeOf.TryGetValue((int)i, out int mrg))
+            {
+                if (mark is null) continue;   // scope arrow only for a toggled if/while
+                tgtLine = mrg;
+            }
+            else
+            {
+                ulong target = mark == false ? va + (ulong)insn.Length : branchTarget;
+                if (!_lineByVa.TryGetValue(target, out tgtLine)) continue;   // target isn't a shown line (structured away)
+            }
+            int srcOff = (int)(i - _top);
+            long relTgt = tgtLine - _top;
+            int tgtOff = relTgt < 0 ? -1 : relTgt >= rows ? rows : (int)relTgt;
+            if (Math.Max(srcOff, tgtOff) < 0 || Math.Min(srcOff, tgtOff) >= rows) continue;   // span misses the view
+            arrows.Add((srcOff, tgtOff, brush, mark is not null));
+        }
+
+        // 2) Give each arrow a lane so nested/overlapping jumps don't draw on top of each other (greedy interval
+        //    colouring; shorter spans take the inner lanes nearest the code).
+        var order = new List<int>();
+        for (int k = 0; k < arrows.Count; k++) order.Add(k);
+        order.Sort((x, y) => Math.Abs(arrows[x].TgtOff - arrows[x].SrcOff) - Math.Abs(arrows[y].TgtOff - arrows[y].SrcOff));
+        var lanes = new List<List<(int Lo, int Hi)>>();
+        var laneOf = new int[arrows.Count];
+        foreach (int k in order)
+        {
+            int aLo = Math.Max(0, Math.Min(arrows[k].SrcOff, arrows[k].TgtOff));
+            int aHi = Math.Min(rows, Math.Max(arrows[k].SrcOff, arrows[k].TgtOff));
+            int lane = 0;
+            for (; lane < lanes.Count; lane++)
+            {
+                bool clash = false;
+                foreach (var iv in lanes[lane]) if (aLo <= iv.Hi && iv.Lo <= aHi) { clash = true; break; }
+                if (!clash) break;
+            }
+            if (lane == lanes.Count) lanes.Add(new List<(int, int)>());
+            lanes[lane].Add((aLo, aHi));
+            laneOf[k] = lane;
+        }
+
+        // 3) Draw. Each endpoint connects to the code (on-screen) or runs to the view edge (off-screen, with an
+        //    ↑/↓ head); an on-screen target gets a → head. A toggled jump is a bright core over a translucent glow.
+        void DrawPath(Pen pen, int srcOff, int tgtOff, double laneX)
+        {
+            double srcY;
+            if (srcOff < 0) srcY = 0;
+            else if (srcOff >= rows) srcY = bottomY;
+            else { srcY = srcOff * _rowHeight + _rowHeight / 2; dc.DrawLine(pen, new Point(xCode, srcY), new Point(laneX, srcY)); }
+
+            double tgtY;
+            if (tgtOff < 0)          // target above → up-head at the top edge
+            {
+                tgtY = 0;
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX - 3, tgtY + 5));
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX + 3, tgtY + 5));
+            }
+            else if (tgtOff >= rows) // target below → down-head at the bottom edge
+            {
+                tgtY = bottomY;
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX - 3, tgtY - 5));
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(laneX + 3, tgtY - 5));
+            }
+            else                     // target on-screen → elbow into the code with a right-pointing head
+            {
+                tgtY = tgtOff * _rowHeight + _rowHeight / 2;
+                dc.DrawLine(pen, new Point(laneX, tgtY), new Point(xCode, tgtY));
+                dc.DrawLine(pen, new Point(xCode, tgtY), new Point(xCode - 4, tgtY - 3));
+                dc.DrawLine(pen, new Point(xCode, tgtY), new Point(xCode - 4, tgtY + 3));
+            }
+
+            dc.DrawLine(pen, new Point(laneX, srcY), new Point(laneX, tgtY));   // vertical lane spine
+        }
+
+        for (int k = 0; k < arrows.Count; k++)
+        {
+            var a = arrows[k];
+            double laneX = Math.Max(minX, xCode - LaneStep * (laneOf[k] + 1));
+            if (a.Marked)
+            {
+                var glow = a.Brush.Clone(); glow.Opacity = 0.3; glow.Freeze();   // luminous halo under the core
+                DrawPath(new Pen(glow, 5) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round }, a.SrcOff, a.TgtOff, laneX);
+                DrawPath(new Pen(a.Brush, 2.3), a.SrcOff, a.TgtOff, laneX);      // bright full-colour core
+            }
+            else DrawPath(new Pen(DimEdgeJump, 0.6), a.SrcOff, a.TgtOff, laneX);   // untoggled: thin + faint
+        }
     }
 
     private double Draw(DrawingContext dc, string text, double x, double y, Brush brush, double dpi)
@@ -527,6 +729,8 @@ public sealed class DecompilerView : Grid
                     if (_owner.CaretVa != 0) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
                 case Key.F2 or Key.F9:
                     if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
+                case Key.Space:
+                    if (_owner.IsCondJumpAt(_owner.CaretVa)) _owner.ToggleJumpRequested?.Invoke(_owner.CaretVa); break;
                 default: return;
             }
             e.Handled = true;

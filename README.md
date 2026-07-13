@@ -67,8 +67,11 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   **Pseudo-C** renders that as C with a best-effort signature, local declarations and call sites.
   Built lazily on a background thread and cached per function; instructions outside the lifted x86/x64
   subset degrade to a faithful `__asm(...)` line. Click any line to sync the other panes; double-click
-  a call to follow the callee. Best-effort by design — the IL tiers are the most reliable, structured
-  C the most ambitious.
+  a call to follow the callee. Every tab also draws **branch-connector arrows** (each jump linked to the
+  line carrying its target; a toggled `if`/`while` linked to its merge point) and supports **Toggle jump**
+  (Space / right-click) to flip a conditional branch — green = taken, red = not-taken — sharing one mark
+  set with the linear and graph views. Best-effort by design — the IL tiers are the most reliable,
+  structured C the most ambitious.
 - **Jump-table (switch) recovery:** indirect `jmp`s that dispatch through a jump table are resolved
   statically — recovering the table base (`lea`/displacement), the case count (`cmp` bound), and the
   entries from the binary's data. Handles absolute-pointer tables (`jmp [base+idx*8]`, x64/x86) and
