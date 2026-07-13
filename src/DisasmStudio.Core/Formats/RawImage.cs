@@ -106,6 +106,7 @@ public sealed class RawImage : IBinaryImage, IDisposable
     public bool IsPatchedAt(int offset) => _f.IsPatched(offset);
     public bool IsDirty => _f.IsDirty;
     public int PatchCount => _f.PatchCount;
+    public IReadOnlyDictionary<int, byte> Patches => _f.Patches;
     public bool Undo() => _f.Undo();
     public bool CanUndo => _f.CanUndo;
     public void SavePatchedAs(string path) => _f.SaveAs(path);

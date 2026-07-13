@@ -1,6 +1,8 @@
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.Wpf.ViewModels;
 
 namespace DisasmStudio.Wpf;
 
@@ -12,7 +14,7 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 public sealed record ProjectFile
 {
-    public int Version { get; init; } = 6;
+    public int Version { get; init; } = 7;
     public string BinaryPath { get; init; } = "";
     public string Format { get; init; } = "";   // "PE" / "ELF" / "Raw"
     public ulong RawBaseVa { get; init; }        // raw blobs only
@@ -25,11 +27,30 @@ public sealed record ProjectFile
     public bool LoadHeader { get; init; }                // v2: PE header folded into the listing
     public Markup? Markup { get; init; }                 // v5: user renames / comments / bookmarks; v6: + user-defined function starts (null on older files)
 
-    private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
+    // v7: live-session state, so reopening a project resumes where you left off. All keyed in STATIC (unslid)
+    // VA space — the same space the project's re-analysis produces — except Patches, which are keyed by file
+    // offset (stable for the same binary and re-applied directly). All null on older files / when unused.
+    public Dictionary<ulong, BpDef>? Breakpoints { get; init; }   // static VA → breakpoint definition (sw/hw/mem + condition/hit-count)
+    public List<ulong>? Trace { get; init; }                      // executed-instruction trace (coverage), static VAs
+    public List<PatchRun>? Patches { get; init; }                 // byte edits, coalesced into contiguous file-offset runs
+    public Dictionary<ulong, bool>? JumpAssumptions { get; init; } // static "toggle jump" what-ifs: VA → assumed-taken
+
+    // Fields (BpDef uses public fields) + enums-as-strings so BpDef's HwKind/MemAccess/HitCountMode round-trip
+    // robustly; byte[] in PatchRun serialises as base64.
+    private static readonly JsonSerializerOptions Opts = new()
+    {
+        WriteIndented = true,
+        IncludeFields = true,
+        Converters = { new JsonStringEnumConverter() },
+    };
 
     public void Save(string path) => File.WriteAllText(path, JsonSerializer.Serialize(this, Opts));
 
     public static ProjectFile Load(string path) =>
-        JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path))
+        JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path), Opts)
         ?? throw new InvalidDataException("Not a valid DisasmStudio project file.");
 }
+
+/// <summary>A contiguous run of patched bytes at file <paramref name="Offset"/> — how a project stores byte edits,
+/// re-applied verbatim via <see cref="DisasmStudio.Core.Formats.IBinaryImage.Patch"/> on reload.</summary>
+public sealed record PatchRun(int Offset, byte[] Bytes);

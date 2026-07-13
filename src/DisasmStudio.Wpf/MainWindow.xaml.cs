@@ -2111,9 +2111,40 @@ public partial class MainWindow : Window
             IncludedDataSections = proj.LoadedSections is { Count: > 0 } ls ? new HashSet<string>(ls) : new HashSet<string>(),
             IncludeHeader = proj.LoadHeader,
         };
-        await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab);
+        // Re-apply saved byte edits to the pristine image BEFORE analysis, so the disassembly decodes the patched
+        // bytes and "Save patched binary…" / IsDirty light up. Keyed by file offset — stable for the same binary.
+        if (proj.Patches is { Count: > 0 })
+            foreach (var run in proj.Patches) image.Patch(run.Offset, run.Bytes);
+        var outcome = await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab);
+        // The fresh analysis wiped the cross-run breakpoint / trace / jump-toggle sets (they belonged to the old
+        // file); re-arm them from the project now that the new result exists.
+        if (outcome == AnalyzeOutcome.Applied) RestoreSessionState(proj);
         RefreshBookmarkList();
         Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(image.FilePath)})";
+    }
+
+    /// <summary>Re-arm the live-session state a v7 project carries — breakpoints, the execution trace, and the
+    /// static "toggle jump" what-ifs — after the fresh analysis (which cleared them). Byte patches were already
+    /// re-applied to the image before analysis. All keyed in static VA space, matching the re-analysis.</summary>
+    private void RestoreSessionState(ProjectFile proj)
+    {
+        _pendingBreakpoints.Clear();
+        if (proj.Breakpoints is { Count: > 0 })
+            foreach (var (va, def) in proj.Breakpoints) _pendingBreakpoints[va] = def;
+
+        _coveredInstrs.Clear();
+        if (proj.Trace is { Count: > 0 })
+            foreach (var va in proj.Trace) _coveredInstrs.Add(va);
+
+        _jumpAssume.Clear();
+        if (proj.JumpAssumptions is { Count: > 0 })
+            foreach (var (va, taken) in proj.JumpAssumptions) _jumpAssume[va] = taken;
+
+        RefreshBreakpointList();
+        ClearCoverageBtn.IsEnabled = _coveredInstrs.Count > 0;
+        UpdatePatchButtons();
+        // Repaint so the restored breakpoint dots, coverage tint and jump marks show across all code views.
+        Linear.Refresh(); Graph.Refresh(); Decompiler.Refresh();
     }
 
     private void OnSaveProject(object sender, RoutedEventArgs e)
@@ -2150,6 +2181,11 @@ public partial class MainWindow : Window
             LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
             LoadHeader = _loadOptions.IncludeHeader,
             Markup = _markup.IsEmpty ? null : _markup,
+            // v7 live-session state (all null when empty so the file stays minimal / round-trips with older readers).
+            Breakpoints = _pendingBreakpoints.Count > 0 ? new Dictionary<ulong, BpDef>(_pendingBreakpoints) : null,
+            Trace = _coveredInstrs.Count > 0 ? _coveredInstrs.ToList() : null,
+            Patches = CoalescePatches(_image.Patches),
+            JumpAssumptions = _jumpAssume.Count > 0 ? new Dictionary<ulong, bool>(_jumpAssume) : null,
         };
         try { proj.Save(path); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
@@ -2157,6 +2193,27 @@ public partial class MainWindow : Window
         _projectPath = path;
         Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(_image.FilePath)})";
         StatusText.Text = $"Saved project to {path}";
+    }
+
+    /// <summary>Group the image's byte edits (file offset → value) into contiguous runs for compact project
+    /// storage, so N adjacent edited bytes become one base64 blob rather than N entries. Null when clean.</summary>
+    private static List<PatchRun>? CoalescePatches(IReadOnlyDictionary<int, byte> patches)
+    {
+        if (patches.Count == 0) return null;
+        var offsets = patches.Keys.ToArray();
+        Array.Sort(offsets);
+        var runs = new List<PatchRun>();
+        int start = offsets[0];
+        var run = new List<byte> { patches[start] };
+        for (int i = 1; i < offsets.Length; i++)
+        {
+            if (offsets[i] == offsets[i - 1] + 1) { run.Add(patches[offsets[i]]); continue; }
+            runs.Add(new PatchRun(start, run.ToArray()));
+            start = offsets[i];
+            run = [patches[start]];
+        }
+        runs.Add(new PatchRun(start, run.ToArray()));
+        return runs;
     }
 
     // ---- export to .asm / .c ----
@@ -2687,15 +2744,25 @@ public partial class MainWindow : Window
         // Rebuild only when the function changes (object identity differs across the static↔live swap too).
         bool changed = !ReferenceEquals(fn, _graphFn);
         bool firstFrame = _graphFn is null;   // nothing shown yet → fit-to-view once for a sensible default frame
+        // Two very different callers funnel through here while a session is live: the debugger following its own
+        // IP on a step/stop (va == CurrentIp), and the *user* following a call/branch to some other instruction
+        // (va != CurrentIp). Only the IP-follow reframes on the current instruction (resetting the zoom when it
+        // crosses into a new function); a user-follow must behave exactly like it does when NOT debugging — keep
+        // the current zoom and snap the followed target to the centre — instead of yanking back to the IP.
+        bool followingIp = _dbg is not null && va == _dbg.CurrentIp;
         // Fit-to-view only on the very first function shown (while debugging, the IP-follow below frames it). Once
         // a graph is up and the user has a zoom they like, following a call to another function KEEPS that zoom and
         // just snaps the target to the middle (below) — the view no longer resizes to each function's size.
         if (changed) { Graph.SetFunction(_result, fn, _dbg?.LiveDecoder, autoFit: firstFrame && _dbg is null); _graphFn = fn; }
-        if (_dbg is not null) Graph.SetCurrentIp(_dbg.CurrentIp, resetZoom: changed);
-        // Mirror the linear caret and centre the navigation target. On a function change (that wasn't the initial
-        // fit) centre the target at the preserved zoom; on a same-function nav centre only when explicitly asked,
-        // so a graph block-click echoing back doesn't lurch the view under the cursor.
-        Graph.SetSelected(va, center: changed ? (!firstFrame && _dbg is null) : center);
+        // Keep the IP marker current, but only let it reframe the view when we're actually following the IP
+        // (a step/stop). On a user-follow it refreshes the marker without recentring, so the target centring below
+        // wins and the user's zoom survives.
+        if (_dbg is not null) Graph.SetCurrentIp(_dbg.CurrentIp, resetZoom: followingIp && changed, center: followingIp);
+        // Mirror the caret and centre the navigation target. On a function change (that wasn't the non-debug
+        // initial fit) centre the target at the preserved zoom — in a live session too; on a same-function nav
+        // centre only when explicitly asked, so a graph block-click echoing back doesn't lurch the view. The
+        // IP-follow already framed its own instruction, so don't double-centre on it.
+        Graph.SetSelected(va, center: followingIp ? false : (changed ? !(firstFrame && _dbg is null) : center));
     }
 
     /// <summary>Open the CFG graph for <paramref name="va"/> and switch to the Graph tab. The guard stops the

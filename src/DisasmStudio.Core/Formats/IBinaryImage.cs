@@ -91,6 +91,10 @@ public interface IBinaryImage
     bool IsPatchedAt(int offset);
     bool IsDirty { get; }
     int PatchCount { get; }
+    /// <summary>The current in-memory byte edits as (file offset → new value), so a project can persist them and
+    /// re-apply via <see cref="Patch(int, ReadOnlySpan{byte})"/> on reload. Empty when clean. File-backed images
+    /// (PE/ELF/raw) report their edits; images with no edit map (PE-memory, process snapshots) report none.</summary>
+    IReadOnlyDictionary<int, byte> Patches { get; }
     /// <summary>Undo the most recent patch; false if nothing to undo.</summary>
     bool Undo();
     bool CanUndo { get; }

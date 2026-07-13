@@ -204,6 +204,7 @@ public sealed class ProcessSnapshotImage : IBinaryImage
     public bool IsPatchedAt(int offset) => false;
     public bool IsDirty => _dirty;
     public int PatchCount => _patchCount;
+    public IReadOnlyDictionary<int, byte> Patches => System.Collections.Immutable.ImmutableDictionary<int, byte>.Empty;
     public bool Undo() => false;
     public bool CanUndo => false;
     public void SavePatchedAs(string path) => File.WriteAllBytes(path, _backing);

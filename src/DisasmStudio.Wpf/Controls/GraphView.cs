@@ -223,14 +223,16 @@ public sealed class GraphView : FrameworkElement
         InvalidateVisual();
     }
 
-    /// <summary>Follow the debuggee's current instruction: highlight and centre its block.
-    /// <paramref name="resetZoom"/> (set when moving to a different function) restores a readable zoom;
-    /// while stepping inside a function it stays false so the user's manual zoom is preserved.</summary>
-    public void SetCurrentIp(ulong va, bool resetZoom = false)
+    /// <summary>Follow the debuggee's current instruction: highlight (and, when <paramref name="center"/>, centre)
+    /// its block. <paramref name="resetZoom"/> (set when moving to a different function) restores a readable zoom;
+    /// while stepping inside a function it stays false so the user's manual zoom is preserved. Pass
+    /// <paramref name="center"/> = false to refresh only the IP marker without reframing the view — used when the
+    /// user follows a call to another function mid-session, so the graph centres the *followed target* (via
+    /// <see cref="SetSelected"/>) at the current zoom rather than snapping back to the IP.</summary>
+    public void SetCurrentIp(ulong va, bool resetZoom = false, bool center = true)
     {
         _ipVa = va;
-        _pend = Pend.Focus; _pendVa = va; _pendResetZoom = resetZoom;
-        ApplyPending();
+        if (center) { _pend = Pend.Focus; _pendVa = va; _pendResetZoom = resetZoom; ApplyPending(); }
         InvalidateVisual();
     }
 

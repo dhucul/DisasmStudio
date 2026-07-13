@@ -37,6 +37,7 @@ public sealed class FullMemoryImage(DebuggerEngine eng) : IBinaryImage
     public bool IsPatchedAt(int offset) => false;
     public bool IsDirty => false;
     public int PatchCount => 0;
+    public IReadOnlyDictionary<int, byte> Patches => System.Collections.Immutable.ImmutableDictionary<int, byte>.Empty;
     public bool Undo() => false;
     public bool CanUndo => false;
     public void SavePatchedAs(string path) { }

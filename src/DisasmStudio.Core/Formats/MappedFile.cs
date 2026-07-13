@@ -95,6 +95,9 @@ public sealed class MappedFile : IDisposable
     public int PatchCount => _patches.Count;
     public bool IsPatched(int offset) => _patches.ContainsKey(offset);
 
+    /// <summary>The live edit map (file offset → new value) — a read-only view, for persisting into a project.</summary>
+    public IReadOnlyDictionary<int, byte> Patches => _patches;
+
     /// <summary>Overlay <paramref name="bytes"/> at <paramref name="offset"/> (in-memory; persisted by <see cref="SaveAs"/>).
     /// Recorded as one undo step.</summary>
     public void Patch(int offset, ReadOnlySpan<byte> bytes)
