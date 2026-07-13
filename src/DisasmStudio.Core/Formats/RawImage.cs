@@ -147,6 +147,12 @@ public static class BinaryLoader
         if (n >= 2 && head[0] == (byte)'M' && head[1] == (byte)'Z') return BinaryFormat.Pe;
         if (n >= 4 && head[0] == 0x7F && head[1] == (byte)'E' && head[2] == (byte)'L' && head[3] == (byte)'F')
             return BinaryFormat.Elf;
+        // Mach-O: thin magic is little-endian (CE/CF FA ED FE); fat magic is big-endian (CA FE BA BE/BF) and
+        // collides with Java .class — validate the fat header (sane slice count, in-bounds slices) to disambiguate.
+        if (n >= 4 && head[0] is 0xCE or 0xCF && head[1] == 0xFA && head[2] == 0xED && head[3] == 0xFE)
+            return BinaryFormat.MachO;
+        if (n >= 4 && head[0] == 0xCA && head[1] == 0xFE && head[2] == 0xBA && head[3] is 0xBE or 0xBF)
+            return MachOFat.TryList(path, out _) ? BinaryFormat.MachO : BinaryFormat.Unknown;
         return BinaryFormat.Unknown;
     }
 
@@ -156,6 +162,7 @@ public static class BinaryLoader
     {
         BinaryFormat.Pe => PeImage.Load(path),
         BinaryFormat.Elf => ElfImage.Load(path),
+        BinaryFormat.MachO => MachOImage.Load(path),
         BinaryFormat.Snapshot => ProcessSnapshotImage.Load(path),
         _ => throw new BinaryFormatException("Unrecognised format — open as raw instead."),
     };

@@ -386,6 +386,17 @@
                             </StackPanel>
                         </Grid>
                     </TabItem>
+                    <!-- Obj-C: Objective-C classes/methods recovered from a Mach-O's __objc_* metadata. -->
+                    <TabItem Header="Obj-C" x:Name="ObjCTab" Visibility="Collapsed">
+                        <TreeView x:Name="ObjCTree" MouseDoubleClick="OnObjCActivate"
+                                  FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                            <TreeView.ItemTemplate>
+                                <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                    <TextBlock Text="{Binding Display}" Foreground="{StaticResource TextPrimary}" />
+                                </HierarchicalDataTemplate>
+                            </TreeView.ItemTemplate>
+                        </TreeView>
+                    </TabItem>
                     <TabItem Header="Search">
                         <DockPanel>
                             <StackPanel DockPanel.Dock="Top" Margin="8,6,8,4">

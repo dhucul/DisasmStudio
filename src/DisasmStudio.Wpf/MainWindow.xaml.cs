@@ -2044,7 +2044,7 @@ public partial class MainWindow : Window
         var dlg = new OpenFileDialog
         {
             Title = "Open binary or source",
-            Filter = "Binaries|*.exe;*.dll;*.sys;*.so;*.elf;*.o;*.bin;*.dat|" +
+            Filter = "Binaries|*.exe;*.dll;*.sys;*.so;*.elf;*.o;*.dylib;*.bin;*.dat|" +
                      "Source / text|*.cs;*.il;*.c;*.cpp;*.h;*.hpp;*.java;*.vb;*.txt;*.json;*.xml|All files|*.*",
         };
         if (dlg.ShowDialog(this) != true) return;
@@ -2390,6 +2390,13 @@ public partial class MainWindow : Window
             {
                 image = mem;
             }
+            else if (fmt == BinaryFormat.MachO && MachOFat.TryList(path, out var slices) && slices.Count > 1)
+            {
+                // A fat/universal Mach-O — let the user pick which architecture slice to open.
+                var pick = Dialogs.AskMachOSlice(this, slices);
+                if (pick is null) return;   // cancelled
+                image = MachOImage.Load(path, pick.Value.Offset);
+            }
             else image = BinaryLoader.Load(path);
         }
         catch (Exception ex)
@@ -2496,6 +2503,7 @@ public partial class MainWindow : Window
             Linear.SetResult(result);
             Hex.SetImage(image);
             if (fresh) ProbeManaged(image);   // light up the C#/.NET tabs when this PE is a managed assembly
+            if (fresh) ProbeObjC(image);      // light up the Obj-C tab when this Mach-O carries Objective-C metadata
             SavePatchedBtn.IsEnabled = image.IsDirty;
             UndoBtn.IsEnabled = _changeStack.Count > 0;   // unified stack: also stays live for a pending create-function edit
             _funcStarts = result.Functions.Select(f => f.Va).ToArray();
@@ -2626,6 +2634,10 @@ public partial class MainWindow : Window
         NetInfo.Text = "";
         NetSaveBtn.IsEnabled = false;
         NetExtractAllBtn.IsEnabled = false;
+
+        // Objective-C (Mach-O) view: hide the tab until the next probe re-shows it.
+        ObjCTab.Visibility = Visibility.Collapsed;
+        ObjCTree.ItemsSource = null;
     }
 
     // ---- navigation ----
@@ -3339,6 +3351,28 @@ public partial class MainWindow : Window
                 StatusText.Text = $".NET assembly: {asm.Metadata.Name} — showing decompiled C# (native disasm is only the .NET loader stub).";
             });
         });
+    }
+
+    // ---- Objective-C (Mach-O) path ----
+
+    /// <summary>If the freshly-analyzed Mach-O carries Objective-C metadata, populate and reveal the Obj-C tab
+    /// (a class → method tree; double-click a method to jump to its IMP in the listing).</summary>
+    private void ProbeObjC(IBinaryImage image)
+    {
+        if (image is not MachOImage { ObjC: { Classes.Count: > 0 } objc })
+        {
+            ObjCTab.Visibility = Visibility.Collapsed;
+            ObjCTree.ItemsSource = null;
+            return;
+        }
+        ObjCTree.ItemsSource = objc.Classes.OrderBy(c => c.Name).Select(c => new ObjCClassVm(c)).ToList();
+        ObjCTab.Visibility = Visibility.Visible;
+        StatusText.Text = $"Objective-C: {objc.Classes.Count} class(es), {objc.MethodSymbols.Count} method(s) — see the Obj-C tab.";
+    }
+
+    private void OnObjCActivate(object sender, MouseButtonEventArgs e)
+    {
+        if (ObjCTree.SelectedItem is ObjCMethodVm m) { CenterTabs.SelectedIndex = 0; _nav.Navigate(m.Va); }
     }
 
     private void PopulateManagedTabs(ManagedAssembly asm)

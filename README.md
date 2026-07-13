@@ -1,15 +1,21 @@
 # DisasmStudio
 
-A Binary Ninja–style disassembler for Windows — soft, dark, high-DPI WPF. Loads PE / ELF / raw
-binaries, disassembles x86/x64 (via [Iced](https://github.com/icedland/iced)) and ARM / Thumb /
+A Binary Ninja–style disassembler for Windows — soft, dark, high-DPI WPF. Loads PE / ELF / Mach-O /
+raw binaries, disassembles x86/x64 (via [Iced](https://github.com/icedland/iced)) and ARM / Thumb /
 AArch64 (via [Capstone](https://www.capstone-engine.org/)), and presents a linear listing, a
 per-function control-flow graph, and a hex view, with the usual reverse-engineering side panels and
 fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large files.
 
 ## Features
 
-- **Formats:** PE (`.exe`/`.dll`), ELF (32/64-bit, x86/x64), and raw/flat blobs (shellcode, dumps)
-  at a chosen base address — all behind one `IBinaryImage` abstraction.
+- **Formats:** PE (`.exe`/`.dll`), ELF (32/64-bit, x86/x64 **and ARM/AArch64**, with PLT/GOT dynamic
+  imports and a program-header fallback for stripped binaries), **Mach-O** (`.dylib`/executables, thin
+  and fat/universal — x86_64 through the full Iced pipeline, arm64 through Capstone), and raw/flat blobs
+  (shellcode, dumps) at a chosen base address — all behind one `IBinaryImage` abstraction.
+- **Objective-C:** a Mach-O's `__objc_*` metadata is parsed into an **Obj-C** side tab (classes → instance
+  and class methods, double-click to jump to the IMP), and every method's `-[Class sel]` / `+[Class sel]`
+  name is attached at its IMP so it labels the disassembly. Handles classic, relative/"small" method lists
+  and modern arm64(e) `LC_DYLD_CHAINED_FIXUPS` pointer rebasing.
 - **Firmware images:** opening a headerless blob sniffs it for x86 firmware layouts and, crucially,
   finds the **entry point** (which is almost never offset 0). A BIOS / UEFI SPI-flash image is
   recognised by its **reset vector** — execution begins 16 bytes below the top of the image

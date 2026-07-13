@@ -122,6 +122,26 @@ internal static class Dialogs
         return (baseVa, bitness, entryVa, arch);
     }
 
+    /// <summary>Ask which architecture slice of a fat/universal Mach-O to open. Defaults to the x86_64 slice
+    /// (full decompiler support), else arm64, else the first. Returns the chosen slice, or null if cancelled.</summary>
+    public static MachOSlice? AskMachOSlice(Window owner, IReadOnlyList<MachOSlice> slices)
+    {
+        var combo = new ComboBox { Margin = new Thickness(0, 0, 0, 10), FontFamily = new FontFamily("Cascadia Mono, Consolas") };
+        foreach (var s in slices)
+            combo.Items.Add($"{s.ArchName,-8}  @ 0x{s.Offset:X}   {s.Size / 1024:N0} KB");
+
+        int Prefer(string name) { for (int i = 0; i < slices.Count; i++) if (slices[i].ArchName == name) return i; return -1; }
+        int def = Prefer("x64"); if (def < 0) def = Prefer("arm64"); if (def < 0) def = 0;
+        combo.SelectedIndex = def;
+
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label("This is a fat/universal Mach-O — choose an architecture slice to open:"));
+        panel.Children.Add(combo);
+
+        bool ok = ShowModal(owner, "Open Mach-O slice", panel, combo, 400);
+        return ok && combo.SelectedIndex >= 0 ? slices[combo.SelectedIndex] : null;
+    }
+
     /// <summary>Show every section in the image and let the user fold optional ones into the listing as data.
     /// Executable sections are listed checked + disabled ("always shown"); non-code sections with file bytes
     /// (and the PE header) are toggleable; a section with no file data is shown disabled. The list scrolls, so

@@ -194,6 +194,35 @@ public sealed class ResourceNodeVm
     public string Display => IsLeaf && _n.Data is { } d ? $"{_n.Name}  ({d.Size:N0} bytes)" : _n.Name;
 }
 
+/// <summary>Node in the Obj-C browser: a class whose children are its methods (instance then class).</summary>
+public sealed class ObjCClassVm
+{
+    public ObjCClassVm(ObjCClass c)
+    {
+        Va = c.Va;
+        Display = c.SuperName is { Length: > 0 } s ? $"{c.Name} : {s}" : c.Name;
+        Children = c.InstanceMethods.Concat(c.ClassMethods).Select(m => new ObjCMethodVm(m, c.Name)).ToList();
+    }
+
+    public ulong Va { get; }
+    public string Display { get; }
+    public IReadOnlyList<ObjCMethodVm> Children { get; }
+}
+
+/// <summary>Leaf node in the Obj-C browser: one method, navigable to its IMP.</summary>
+public sealed class ObjCMethodVm
+{
+    public ObjCMethodVm(ObjCMethod m, string className)
+    {
+        Va = m.Imp;
+        Display = $"{(m.IsClassMethod ? '+' : '-')}[{className} {m.Selector}]   {m.Imp:X}";
+    }
+
+    public ulong Va { get; }
+    public string Display { get; }
+    public IReadOnlyList<ObjCMethodVm> Children => [];
+}
+
 /// <summary>Row in the Sections list. <see cref="Loaded"/> tracks whether the section/header is folded
 /// into the linear listing as data; executable sections are always loaded and can't be toggled.</summary>
 public sealed class SectionItem(Section s, bool loaded, bool isHeader = false)

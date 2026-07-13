@@ -1,7 +1,7 @@
 namespace DisasmStudio.Core.Formats;
 
 /// <summary>Which container format a file is.</summary>
-public enum BinaryFormat { Unknown, Pe, Elf, Raw, Snapshot }
+public enum BinaryFormat { Unknown, Pe, Elf, Raw, Snapshot, MachO }
 
 /// <summary>The instruction set an image's bytes are decoded as. x86/x64 go through Iced; the ARM family
 /// (32-bit ARM, Thumb/Thumb-2, and AArch64) goes through Capstone; Intel 8051/MCS-51 (8-bit MCU firmware,

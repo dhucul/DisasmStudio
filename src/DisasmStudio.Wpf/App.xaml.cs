@@ -47,6 +47,15 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for the Mach-O loader + Objective-C metadata parser: load a thin/fat Mach-O, dump its
+        // sections/symbols/Obj-C classes, analyse, and assert sections/symbols/functions were produced — no UI.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-objc")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = e.Args.Length > 1 ? ObjCSmoke.Run(e.Args[1]) : 2;
+            Shutdown(rc);
+            return;
+        }
         // Hidden self-test for the managed source-level debugger: drive the real ManagedDebugClient against a
         // .NET assembly (locate host → launch → entry breakpoint → hit → exit), print to the terminal, exit.
         if (e.Args.Length > 0 && e.Args[0] == "--smoke-mdbg")
