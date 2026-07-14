@@ -134,6 +134,9 @@ public partial class MainWindow : Window
         // Allow "DisasmStudio <file>" (CLI / Open-with) to load a target on startup.
         Loaded += async (_, _) =>
         {
+            // Build after the ElementName-bound chip Tags have resolved (not yet in the ctor).
+            BuildSideAccordionMap();
+            SyncAccordionToSelection();
             var args = Environment.GetCommandLineArgs();
             if (args.Length > 1 && File.Exists(args[1])) await LoadFile(args[1]);
         };
@@ -1007,6 +1010,91 @@ public partial class MainWindow : Window
         if (e.Source is not TabControl tc) return;
         if (tc.SelectedItem is TabItem { Header: "Strings" }) RefreshLiveStrings();
         else if (tc.SelectedItem is TabItem { Header: "Call Graph" }) EnsureCallGraph();
+        SyncAccordionToSelection();
+    }
+
+    // ---- Right-side accordion navigator ----
+    // The side panels live in a header-less TabControl (SideTabs); navigation is driven by chip
+    // RadioButtons grouped under collapsible Expander groups. Each TabItem maps to its (group, chip)
+    // so we can drive selection either way. _syncingAccordion breaks the chip<->tab feedback loop.
+    private readonly Dictionary<TabItem, (Expander Group, RadioButton Chip)> _sidePanels = new();
+    private bool _syncingAccordion;
+
+    private void BuildSideAccordionMap()
+    {
+        foreach (var group in new[] { NavGroup, SymGroup, DataGroup, MarksGroup, FormatGroup })
+            foreach (var chip in FindChips(group))
+                if (chip.Tag is TabItem tab)
+                    _sidePanels[tab] = (group, chip);
+    }
+
+    private static IEnumerable<RadioButton> FindChips(Expander group)
+    {
+        if (group.Content is Panel p)
+            foreach (var child in p.Children)
+                if (child is RadioButton rb) yield return rb;
+    }
+
+    /// <summary>A chip was clicked: show its panel. The reverse sync (checking the chip, expanding its
+    /// group) is handled by SyncAccordionToSelection when the tab selection changes.</summary>
+    private void OnSidePanelChip(object sender, RoutedEventArgs e)
+    {
+        if (_syncingAccordion) return;
+        if (sender is RadioButton { Tag: TabItem tab }) SideTabs.SelectedItem = tab;
+    }
+
+    /// <summary>Reflect the currently-selected side tab into the accordion: check its chip and expand
+    /// its group (collapsing the others), so programmatic jumps (Xrefs, Find, Call Graph…) stay in sync.</summary>
+    private void SyncAccordionToSelection()
+    {
+        if (_syncingAccordion) return;
+        if (SideTabs.SelectedItem is not TabItem tab || !_sidePanels.TryGetValue(tab, out var map)) return;
+        _syncingAccordion = true;
+        try
+        {
+            map.Chip.IsChecked = true;
+            ExpandOnly(map.Group);
+        }
+        finally { _syncingAccordion = false; }
+    }
+
+    /// <summary>Accordion rule: expanding a group collapses the others and selects one of its panels
+    /// (unless the active panel already belongs to it), so exactly one group is open at a time.</summary>
+    private void OnGroupExpanded(object sender, RoutedEventArgs e)
+    {
+        // NavGroup's IsExpanded="True" fires this during XAML load, before the other group fields are
+        // assigned — the map is built later (in Loaded, once chip Tag bindings resolve), so an empty
+        // map means "not ready yet".
+        if (_syncingAccordion || _sidePanels.Count == 0 || sender is not Expander group) return;
+        ExpandOnly(group);
+        // If the active panel is already in this group, keep it; otherwise activate the group's first
+        // visible chip so the content matches the newly-opened group.
+        if (SideTabs.SelectedItem is TabItem sel && _sidePanels.TryGetValue(sel, out var m) && ReferenceEquals(m.Group, group))
+            return;
+        foreach (var chip in FindChips(group))
+            if (chip.Visibility == Visibility.Visible && chip.Tag is TabItem tab)
+            {
+                SideTabs.SelectedItem = tab;   // fires OnSideTabChanged → SyncAccordionToSelection checks the chip
+                break;
+            }
+    }
+
+    private void ExpandOnly(Expander open)
+    {
+        foreach (var group in new[] { NavGroup, SymGroup, DataGroup, MarksGroup, FormatGroup })
+            group.IsExpanded = ReferenceEquals(group, open);
+    }
+
+    /// <summary>Show/hide the contextual FORMAT chips (.NET, Obj-C) to mirror their TabItem visibility,
+    /// and hide the whole FORMAT group when neither applies. Called wherever DotNetTab/ObjCTab
+    /// visibility changes (file load, managed probe, Mach-O Obj-C probe).</summary>
+    private void RefreshFormatChips()
+    {
+        DotNetChip.Visibility = DotNetTab.Visibility;
+        ObjCChip.Visibility = ObjCTab.Visibility;
+        bool any = DotNetTab.Visibility == Visibility.Visible || ObjCTab.Visibility == Visibility.Visible;
+        FormatGroup.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+        if (!any && FormatGroup.IsExpanded) NavGroup.IsExpanded = true;   // don't leave an empty group open
     }
 
     private bool CallGraphTabVisible => SideTabs.SelectedItem is TabItem { Header: "Call Graph" };
@@ -2638,6 +2726,7 @@ public partial class MainWindow : Window
         // Objective-C (Mach-O) view: hide the tab until the next probe re-shows it.
         ObjCTab.Visibility = Visibility.Collapsed;
         ObjCTree.ItemsSource = null;
+        RefreshFormatChips();
     }
 
     // ---- navigation ----
@@ -3324,6 +3413,7 @@ public partial class MainWindow : Window
         Managed.ShowLoading("// loading .NET decompiler…");
         ManagedTab.Visibility = Visibility.Visible;
         DotNetTab.Visibility = Visibility.Visible;
+        RefreshFormatChips();
         CenterTabs.SelectedItem = ManagedTab;
         StatusText.Text = ".NET assembly — loading decompiler…";
 
@@ -3341,6 +3431,7 @@ public partial class MainWindow : Window
                     Managed.Clear();
                     ManagedTab.Visibility = Visibility.Collapsed;
                     DotNetTab.Visibility = Visibility.Collapsed;
+                    RefreshFormatChips();
                     CenterTabs.SelectedIndex = 0;
                     StatusText.Text = ".NET assembly detected, but the decompiler could not load it — showing the native view.";
                     return;
@@ -3363,10 +3454,12 @@ public partial class MainWindow : Window
         {
             ObjCTab.Visibility = Visibility.Collapsed;
             ObjCTree.ItemsSource = null;
+            RefreshFormatChips();
             return;
         }
         ObjCTree.ItemsSource = objc.Classes.OrderBy(c => c.Name).Select(c => new ObjCClassVm(c)).ToList();
         ObjCTab.Visibility = Visibility.Visible;
+        RefreshFormatChips();
         StatusText.Text = $"Objective-C: {objc.Classes.Count} class(es), {objc.MethodSymbols.Count} method(s) — see the Obj-C tab.";
     }
 

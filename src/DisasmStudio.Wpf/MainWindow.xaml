@@ -159,12 +159,67 @@
 
             <GridSplitter Grid.Column="3" Width="5" HorizontalAlignment="Stretch" />
 
-            <!-- Right: xrefs / strings / imports / sections -->
+            <!-- Right: accordion navigator over a header-less TabControl.
+                 The panels grouped into collapsible categories (NAVIGATE / SYMBOLS / DATA / MARKS /
+                 FORMAT); the chips drive SideTabs.SelectedItem, and OnSideTabChanged syncs back. -->
             <Border Grid.Column="4" Background="{StaticResource Surface}"
                     BorderBrush="{StaticResource Outline}" BorderThickness="1,0,0,0">
-                <TabControl x:Name="SideTabs" Background="{StaticResource Surface}"
-                            SelectionChanged="OnSideTabChanged">
-                    <TabItem Header="Xrefs">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1"
+                            Padding="0,2,0,4">
+                        <StackPanel x:Name="SideAccordion">
+                            <Expander x:Name="NavGroup" Header="NAVIGATE" IsExpanded="True" Expanded="OnGroupExpanded">
+                                <WrapPanel>
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Xrefs"
+                                                 Tag="{Binding ElementName=XrefsTab}" Click="OnSidePanelChip" IsChecked="True" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Search"
+                                                 Tag="{Binding ElementName=SearchTab}" Click="OnSidePanelChip" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Find"
+                                                 Tag="{Binding ElementName=FindTab}" Click="OnSidePanelChip" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Call Graph"
+                                                 Tag="{Binding ElementName=CallGraphTab}" Click="OnSidePanelChip" />
+                                </WrapPanel>
+                            </Expander>
+                            <Expander x:Name="SymGroup" Header="SYMBOLS" Expanded="OnGroupExpanded">
+                                <WrapPanel>
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Imports"
+                                                 Tag="{Binding ElementName=ImportsTab}" Click="OnSidePanelChip" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Exports"
+                                                 Tag="{Binding ElementName=ExportsTab}" Click="OnSidePanelChip" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Strings"
+                                                 Tag="{Binding ElementName=StringsTab}" Click="OnSidePanelChip" />
+                                </WrapPanel>
+                            </Expander>
+                            <Expander x:Name="DataGroup" Header="DATA" Expanded="OnGroupExpanded">
+                                <WrapPanel>
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Sections"
+                                                 Tag="{Binding ElementName=SectionsTab}" Click="OnSidePanelChip" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Resources"
+                                                 Tag="{Binding ElementName=ResourcesTab}" Click="OnSidePanelChip" />
+                                </WrapPanel>
+                            </Expander>
+                            <Expander x:Name="MarksGroup" Header="MARKS" Expanded="OnGroupExpanded">
+                                <WrapPanel>
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Breakpoints"
+                                                 Tag="{Binding ElementName=BreakpointsTab}" Click="OnSidePanelChip" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Bookmarks"
+                                                 Tag="{Binding ElementName=BookmarksTab}" Click="OnSidePanelChip" />
+                                </WrapPanel>
+                            </Expander>
+                            <Expander x:Name="FormatGroup" Header="FORMAT" Expanded="OnGroupExpanded" Visibility="Collapsed">
+                                <WrapPanel>
+                                    <RadioButton x:Name="DotNetChip" Style="{StaticResource PanelChip}" GroupName="SidePanel" Content=".NET"
+                                                 Tag="{Binding ElementName=DotNetTab}" Click="OnSidePanelChip" Visibility="Collapsed" />
+                                    <RadioButton x:Name="ObjCChip" Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Obj-C"
+                                                 Tag="{Binding ElementName=ObjCTab}" Click="OnSidePanelChip" Visibility="Collapsed" />
+                                </WrapPanel>
+                            </Expander>
+                        </StackPanel>
+                    </Border>
+                    <TabControl x:Name="SideTabs" Style="{StaticResource HeaderlessTabControl}"
+                                Background="{StaticResource Surface}"
+                                SelectionChanged="OnSideTabChanged">
+                    <TabItem x:Name="XrefsTab" Header="Xrefs">
                         <DockPanel>
                             <TextBlock x:Name="XrefHeader" DockPanel.Dock="Top" Margin="10,8"
                                        Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas"
@@ -182,7 +237,7 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
-                    <TabItem Header="Strings">
+                    <TabItem x:Name="StringsTab" Header="Strings">
                         <DockPanel>
                             <DockPanel DockPanel.Dock="Top" Margin="8,6,8,2">
                                 <Button x:Name="StringRefreshBtn" DockPanel.Dock="Right" Content="⟳ Refresh"
@@ -208,7 +263,7 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
-                    <TabItem Header="Imports">
+                    <TabItem x:Name="ImportsTab" Header="Imports">
                         <ListBox x:Name="ImportList" MouseDoubleClick="OnImportActivate"
                                  FontFamily="Cascadia Mono, Consolas" FontSize="12">
                             <ListBox.ItemTemplate>
@@ -222,7 +277,7 @@
                             </ListBox.ItemTemplate>
                         </ListBox>
                     </TabItem>
-                    <TabItem Header="Exports">
+                    <TabItem x:Name="ExportsTab" Header="Exports">
                         <DockPanel>
                             <TextBox x:Name="ExportFilter" DockPanel.Dock="Top" Margin="8,8,8,6" TextChanged="OnExportFilter" />
                             <ListBox x:Name="ExportList" MouseDoubleClick="OnExportActivate"
@@ -239,7 +294,7 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
-                    <TabItem Header="Breakpoints">
+                    <TabItem x:Name="BreakpointsTab" Header="Breakpoints">
                         <DockPanel>
                             <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
                                        Foreground="{StaticResource TextMuted}" FontSize="11"
@@ -266,7 +321,7 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
-                    <TabItem Header="Bookmarks">
+                    <TabItem x:Name="BookmarksTab" Header="Bookmarks">
                         <DockPanel>
                             <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
                                        Foreground="{StaticResource TextMuted}" FontSize="11"
@@ -292,10 +347,10 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
-                    <TabItem Header="Call Graph">
+                    <TabItem x:Name="CallGraphTab" Header="Call Graph">
                         <ctl:CallGraphView x:Name="CallGraphPanel" />
                     </TabItem>
-                    <TabItem Header="Sections">
+                    <TabItem x:Name="SectionsTab" Header="Sections">
                         <DockPanel>
                             <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
                                        Foreground="{StaticResource TextMuted}" FontSize="11"
@@ -324,7 +379,7 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
-                    <TabItem Header="Resources">
+                    <TabItem x:Name="ResourcesTab" Header="Resources">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="2*" MinHeight="80" />
@@ -397,7 +452,7 @@
                             </TreeView.ItemTemplate>
                         </TreeView>
                     </TabItem>
-                    <TabItem Header="Search">
+                    <TabItem x:Name="SearchTab" Header="Search">
                         <DockPanel>
                             <StackPanel DockPanel.Dock="Top" Margin="8,6,8,4">
                                 <TextBlock Text="Search functions · strings · imports · exports"
@@ -483,7 +538,8 @@
                             </ListBox>
                         </DockPanel>
                     </TabItem>
-                </TabControl>
+                    </TabControl>
+                </DockPanel>
             </Border>
         </Grid>
     </DockPanel>
