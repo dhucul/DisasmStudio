@@ -169,6 +169,13 @@ public partial class MainWindow : Window
         Hex.FindNextRequested += () => HexFindAgain(prev: false);
         Hex.FindPreviousRequested += () => HexFindAgain(prev: true);
         Hex.MemoryBreakpointRequested += OnMemoryBreakpointRequested;   // right-click → data breakpoint on selection
+        // Memory Map strip: click a block → select its table row and navigate every view (gaps don't navigate).
+        MemMapStrip.RegionActivated += i =>
+        {
+            MemMapGrid.SelectedIndex = i;                      // fires OnMemMapGridSelected → syncs the strip highlight
+            if (MemMapGrid.SelectedItem is not null) MemMapGrid.ScrollIntoView(MemMapGrid.SelectedItem);
+            if (MemMapGrid.SelectedItem is MemoryMapItem m && !m.IsGap) _nav.Navigate(m.Va);
+        };
         Graph.BlockSelected += va => _nav.Navigate(va);
         Graph.NavigateRequested += va => _nav.Navigate(va);   // double-click / Enter on a call → follow to the callee
         Graph.RenameRequested += OnRename;
@@ -2672,6 +2679,10 @@ public partial class MainWindow : Window
             new SectionItem(s, _loadOptions.IncludedDataSections.Contains(s.Name))));
         SectionList.ItemsSource = sectionRows;
 
+        var mmRows = BuildMemoryMap(result.Image);
+        MemMapGrid.ItemsSource = mmRows;
+        MemMapStrip.SetRegions(mmRows);
+
         ResTree.ItemsSource = result.Image.Resources is { Roots.Count: > 0 } res
             ? res.Roots.Select(r => new ResourceNodeVm(r, r.Id)).ToList()
             : null;
@@ -2683,6 +2694,30 @@ public partial class MainWindow : Window
         RefreshBookmarkList();
     }
 
+    /// <summary>Build the Memory Map rows for the loaded image: the header (if any) + every section, sorted by
+    /// VA, with a synthetic <c>&lt;gap&gt;</c> row inserted for each stretch of unmapped address space between
+    /// mapped regions. Format-agnostic — it consumes only the unified <see cref="Section"/> list.</summary>
+    private static List<MemoryMapItem> BuildMemoryMap(IBinaryImage img)
+    {
+        var regions = new List<(Section Sec, bool Header)>();
+        if (img.HeaderRegion is { } hdr) regions.Add((hdr, true));
+        foreach (var s in img.Sections) regions.Add((s, false));
+        regions.Sort((a, b) => a.Sec.StartVa.CompareTo(b.Sec.StartVa));
+
+        var rows = new List<MemoryMapItem>();
+        ulong cursor = 0;
+        bool first = true;
+        foreach (var (sec, isHeader) in regions)
+        {
+            if (!first && sec.StartVa > cursor)
+                rows.Add(new MemoryMapItem(cursor, sec.StartVa));   // unmapped gap before this region
+            rows.Add(new MemoryMapItem(sec, isHeader));
+            cursor = first ? sec.EndVa : Math.Max(cursor, sec.EndVa);   // Max guards overlapping/contained sections
+            first = false;
+        }
+        return rows;
+    }
+
     private void ClearLists()
     {
         FuncList.ItemsSource = null;
@@ -2691,6 +2726,8 @@ public partial class MainWindow : Window
         ExportList.ItemsSource = null;
         ImportList.ItemsSource = null;
         SectionList.ItemsSource = null;
+        MemMapGrid.ItemsSource = null;
+        MemMapStrip.SetRegions([]);
         ResTree.ItemsSource = null;
         ResPreviewHost.Content = null;
         ResSaveBtn.IsEnabled = false;
@@ -3296,6 +3333,18 @@ public partial class MainWindow : Window
         // Plain navigation: a non-folded data section lands in the hex view (it isn't in the listing).
         // Right-click → "Jump + fold into listing" (or the toolbar "Sections ▾") to fold it into linear.
         if (SectionList.SelectedItem is SectionItem se) _nav.Navigate(se.Va);
+    }
+
+    /// <summary>Memory Map table double-click → navigate every view to the region start (gaps don't navigate).</summary>
+    private void OnMemMapActivate(object sender, MouseButtonEventArgs e)
+    {
+        if (MemMapGrid.SelectedItem is MemoryMapItem m && !m.IsGap) _nav.Navigate(m.Va);
+    }
+
+    /// <summary>Memory Map table selection → highlight the matching block in the strip.</summary>
+    private void OnMemMapGridSelected(object sender, SelectionChangedEventArgs e)
+    {
+        MemMapStrip.SelectedIndex = MemMapGrid.SelectedIndex;
     }
 
     /// <summary>Select the section row under the cursor so the right-click menu acts on it.</summary>

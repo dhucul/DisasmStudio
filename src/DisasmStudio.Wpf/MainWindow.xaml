@@ -192,6 +192,8 @@
                             </Expander>
                             <Expander x:Name="DataGroup" Header="DATA" Expanded="OnGroupExpanded">
                                 <WrapPanel>
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Memory Map"
+                                                 Tag="{Binding ElementName=MemoryMapTab}" Click="OnSidePanelChip" />
                                     <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Sections"
                                                  Tag="{Binding ElementName=SectionsTab}" Click="OnSidePanelChip" />
                                     <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Resources"
@@ -235,6 +237,35 @@
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
                             </ListBox>
+                        </DockPanel>
+                    </TabItem>
+                    <TabItem x:Name="MemoryMapTab" Header="Memory Map">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextMuted}" FontSize="11"
+                                       Text="Address-space layout. The strip is proportional (low address at top). Click a block or double-click a row to jump. Green = executable · peach = writable · blue = read-only · grey = header · dim = gap." />
+                            <ctl:MemoryMapStrip x:Name="MemMapStrip" DockPanel.Dock="Left" Width="56" Margin="8,2,4,8" />
+                            <DataGrid x:Name="MemMapGrid" SelectionChanged="OnMemMapGridSelected" MouseDoubleClick="OnMemMapActivate"
+                                      Margin="0,2,0,0"
+                                      CanUserAddRows="False" CanUserReorderColumns="False" CanUserResizeRows="False"
+                                      CanUserSortColumns="False">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Name"  Binding="{Binding Name}"    Width="Auto" MinWidth="72"
+                                                        ElementStyle="{StaticResource GridCellText}" />
+                                    <DataGridTextColumn Header="Start" Binding="{Binding Start}"   Width="Auto" MinWidth="80"
+                                                        ElementStyle="{StaticResource GridCellAccent}" />
+                                    <DataGridTextColumn Header="End"   Binding="{Binding End}"     Width="Auto" MinWidth="80"
+                                                        ElementStyle="{StaticResource GridCellMuted}" />
+                                    <DataGridTextColumn Header="Off"   Binding="{Binding FileOff}" Width="Auto" MinWidth="56"
+                                                        ElementStyle="{StaticResource GridCellMuted}" />
+                                    <DataGridTextColumn Header="VSize" Binding="{Binding VSize}"   Width="Auto" MinWidth="56"
+                                                        ElementStyle="{StaticResource GridCellMuted}" />
+                                    <DataGridTextColumn Header="RSize" Binding="{Binding RSize}"   Width="Auto" MinWidth="56"
+                                                        ElementStyle="{StaticResource GridCellMuted}" />
+                                    <DataGridTextColumn Header="Perms" Binding="{Binding Perms}"   Width="Auto" MinWidth="44"
+                                                        ElementStyle="{StaticResource GridCellText}" />
+                                </DataGrid.Columns>
+                            </DataGrid>
                         </DockPanel>
                     </TabItem>
                     <TabItem x:Name="StringsTab" Header="Strings">

@@ -242,3 +242,55 @@ public sealed class SectionItem(Section s, bool loaded, bool isHeader = false)
     /// <summary>Whether this section/header is currently folded into the listing.</summary>
     public bool Loaded { get; set; } = loaded || s.IsExecutable;
 }
+
+/// <summary>Permission/colour class of a <see cref="MemoryMapItem"/>, driving the Memory Map strip's block colour.</summary>
+public enum MemKind { Header, Code, ReadOnly, Writable, Gap }
+
+/// <summary>Row in the Memory Map: a real section (or the synthetic PE-header region), or a synthetic
+/// <c>&lt;gap&gt;</c> of unmapped address space between two mapped regions. <see cref="Va"/> is the region
+/// start — a double-click navigates there; gaps don't navigate. Sizes/offset are pre-formatted hex strings
+/// ("-" where not applicable) for direct binding; <see cref="SizeBytes"/> feeds the strip's proportional layout.</summary>
+public sealed class MemoryMapItem
+{
+    public ulong Va { get; }
+    public ulong EndVa { get; }
+    public ulong SizeBytes => EndVa - Va;
+    public bool IsGap { get; }
+    public MemKind Kind { get; }
+    public string Name { get; }
+    public string Start => Va.ToString("X");
+    public string End => EndVa.ToString("X");
+    public string Size => SizeBytes.ToString("X");
+    public string VSize { get; }
+    public string RSize { get; }
+    public string FileOff { get; }
+    public string Perms { get; }
+
+    /// <summary>A real section, or the synthetic PE-header region when <paramref name="isHeader"/> is set.</summary>
+    public MemoryMapItem(Section s, bool isHeader)
+    {
+        Va = s.StartVa;
+        EndVa = s.EndVa;
+        Name = s.Name;
+        VSize = s.VirtualSize.ToString("X");
+        RSize = s.FileSize.ToString("X");
+        FileOff = s.FileOffset.ToString("X");
+        Perms = $"{(s.IsReadable ? "R" : "-")}{(s.IsWritable ? "W" : "-")}{(s.IsExecutable ? "X" : "-")}";
+        Kind = isHeader ? MemKind.Header
+             : s.IsExecutable ? MemKind.Code
+             : s.IsWritable ? MemKind.Writable
+             : MemKind.ReadOnly;
+    }
+
+    /// <summary>A gap [<paramref name="start"/>, <paramref name="end"/>) of unmapped address space.</summary>
+    public MemoryMapItem(ulong start, ulong end)
+    {
+        Va = start;
+        EndVa = end;
+        IsGap = true;
+        Kind = MemKind.Gap;
+        Name = "<gap>";
+        VSize = RSize = FileOff = "-";
+        Perms = "";
+    }
+}
