@@ -26,7 +26,7 @@ internal static class HelpDialog
             ("Ctrl+F9", "Continue until the current function returns (stop on its ret)"),
             ("F2", "Toggle breakpoint on the caret instruction"),
             ("Click the gutter", "Toggle a breakpoint on that instruction (the left margin)"),
-            ("Breakpoints panel", "Lists breakpoints; double-click to jump, Delete to remove"),
+            ("Breakpoints panel", "Lists your breakpoints; double-click to jump, tick/untick a row to enable/disable it (kept, not armed), right-click to enable-disable · edit · remove (Delete removes)"),
             ("◴ Trace / Clear trace", "Instruction trace from where you're stopped: single-steps the loaded module on Continue and tints each executed instruction (system DLLs run at full speed); click ◴ Trace again to stop (no pause needed)"),
             ("Ctrl+Z", "Undo the last edit (patch or created function)"),
             ("(toolbar)", "Pause · Stop · Restart · Attach… · Exceptions…"),

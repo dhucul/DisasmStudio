@@ -6,8 +6,9 @@
     One-command installer build. Run it whenever you want a fresh setup .exe after changing the app or
     bumping the version in DisasmStudio.iss / DisasmStudio.Wpf.csproj.
 
-        1. dotnet publish  src\DisasmStudio.Wpf  -c Release -r win-x64 --self-contained  (no .NET prereq)
-        2. ISCC.exe        installer\DisasmStudio.iss
+        1. dotnet publish  src\DisasmStudio.Wpf  -c Release -r win-x64 --self-contained  -o installer\payload
+           (self-contained, no .NET prereq; published OUT of bin\ so it never clutters the dev-run Release folder)
+        2. ISCC.exe        installer\DisasmStudio.iss   (packages installer\payload)
         3. Prints the produced installer\Output\DisasmStudio-Setup-<version>.exe
 
     ISCC.exe (Inno Setup 6) is located automatically; pass -Iscc to point at a non-standard install.
@@ -37,6 +38,9 @@ $ErrorActionPreference = 'Stop'
 $repo    = Split-Path -Parent $PSScriptRoot
 $issFile = Join-Path $PSScriptRoot 'DisasmStudio.iss'
 $wpfProj = Join-Path $repo 'src\DisasmStudio.Wpf'
+# The self-contained payload publishes here (out of the way), NOT into bin\Release\net10.0-windows\win-x64\ — so
+# it never clutters the Release folder next to the framework-dependent dev-run exe. Matches DisasmStudio.iss.
+$payload = Join-Path $repo 'installer\payload'
 
 if (-not (Test-Path $issFile)) { throw "Cannot find $issFile" }
 
@@ -59,13 +63,17 @@ if ($SkipPublish) {
         & dotnet publish $hostProj -c Release -r $rid --self-contained true -p:PublishTrimmed=false
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish (host $rid) failed (exit $LASTEXITCODE)." }
     }
-    Write-Host "`n[2/3] Publishing self-contained Release app (win-x64)..." -ForegroundColor Cyan
-    & dotnet publish $wpfProj -c Release -r win-x64 --self-contained true `
+    Write-Host "`n[2/3] Publishing self-contained Release app (win-x64) -> installer\payload ..." -ForegroundColor Cyan
+    if (Test-Path $payload) { Remove-Item $payload -Recurse -Force }
+    & dotnet publish $wpfProj -c Release -r win-x64 --self-contained true -o $payload `
         -p:PublishSingleFile=false -p:DebugType=none
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)." }
+    # `dotnet publish -r win-x64` still emits the framework RID build under bin\Release\...\win-x64\ as a
+    # byproduct; drop it so bin\Release\net10.0-windows\ holds ONLY the dev-run (framework-dependent) exe.
+    Remove-Item (Join-Path $wpfProj 'bin\Release\net10.0-windows\win-x64') -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$publishDir = Join-Path $wpfProj 'bin\Release\net10.0-windows\win-x64\publish'
+$publishDir = $payload
 $exe        = Join-Path $publishDir 'DisasmStudio.exe'
 if (-not (Test-Path $exe)) {
     throw "Publish output not found at $exe. Run without -SkipPublish to build it first."

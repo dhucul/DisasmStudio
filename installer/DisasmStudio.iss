@@ -2,15 +2,17 @@
 ; Packages the self-contained Release publish (no .NET runtime prerequisite).
 ;
 ; Build the payload first, then compile this script:
-;   dotnet publish src\DisasmStudio.Wpf -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:DebugType=none
+;   dotnet publish src\DisasmStudio.Wpf -c Release -r win-x64 --self-contained true -o installer\payload -p:PublishSingleFile=false -p:DebugType=none
 ;   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" installer\DisasmStudio.iss
 ; Output: installer\Output\DisasmStudio-Setup-<version>.exe
+; (installer\build-installer.ps1 does both. The payload lives in installer\payload — NOT in bin\ — so it never
+;  clutters bin\Release\net10.0-windows\ next to the framework-dependent dev-run exe.)
 
 #define MyAppName "DisasmStudio"
-#define MyAppVersion "2.32.0"
+#define MyAppVersion "2.33.0"
 #define MyAppPublisher "David Hucul"
 #define MyAppExeName "DisasmStudio.exe"
-#define PublishDir "..\src\DisasmStudio.Wpf\bin\Release\net10.0-windows\win-x64\publish"
+#define PublishDir "payload"
 #define IconFile "..\src\DisasmStudio.Wpf\DisasmStudio.ico"
 
 [Setup]

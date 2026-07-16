@@ -23,14 +23,13 @@ public sealed class DebugPanel : Grid
 
     private readonly DataGrid _regs;
     private readonly DataGrid _stack;
-    private readonly ListBox _calls, _bps, _threads, _modules, _capture;
+    private readonly ListBox _calls, _threads, _modules, _capture;
     private readonly TreeView _callGraph;
     private readonly TabControl _tabs;
     private readonly HexView _dump;
     private readonly TextBox _dumpAddrBox;
     private bool _dumpInit;
     private readonly List<ulong> _callVas = [];
-    private readonly List<ulong> _bpVas = [];
     private readonly List<ulong> _moduleVas = [];
 
     public event Action<ulong>? NavigateRequested;
@@ -82,7 +81,6 @@ public sealed class DebugPanel : Grid
         var tabs = new TabControl { Background = (Brush)Application.Current.Resources["Surface"] };
         _tabs = tabs;
         _calls = MonoList(); _calls.MouseDoubleClick += (_, _) => NavTo(_callVas, _calls.SelectedIndex);
-        _bps = MonoList(); _bps.MouseDoubleClick += (_, _) => NavTo(_bpVas, _bps.SelectedIndex);
         _threads = MonoList(); _threads.MouseDoubleClick += OnThreadActivate;
         _modules = MonoList(); _modules.MouseDoubleClick += (_, _) => NavTo(_moduleVas, _modules.SelectedIndex);
         _capture = MonoList(); _capture.MouseDoubleClick += (_, _) => { if (_capture.SelectedItem is CaptureItem ci && ci.Va != 0) NavigateRequested?.Invoke(ci.Va); };
@@ -100,7 +98,6 @@ public sealed class DebugPanel : Grid
 
         tabs.Items.Add(new TabItem { Header = "Memory", Content = memPanel });
         tabs.Items.Add(new TabItem { Header = "Call Stack", Content = _calls });
-        tabs.Items.Add(new TabItem { Header = "Breakpoints", Content = _bps });
         tabs.Items.Add(new TabItem { Header = "Threads", Content = _threads });
         tabs.Items.Add(new TabItem { Header = "Modules", Content = _modules });
         tabs.Items.Add(new TabItem { Header = "Capture", Content = _capture });
@@ -216,24 +213,6 @@ public sealed class DebugPanel : Grid
         {
             _callVas.Add(f);
             _calls.Items.Add($"{f.ToString("X" + w)}  {_session.LiveResult?.NameFor(f) ?? deref?.Describe(f) ?? ""}");
-        }
-
-        // breakpoints
-        _bps.Items.Clear(); _bpVas.Clear();
-        foreach (var bp in _session.Engine.BreakpointList)
-        {
-            _bpVas.Add(bp.Address);
-            string kind = bp.Hardware ? $"hw {bp.Kind}{(bp.Kind == HwKind.Execute ? "" : "/" + bp.Size)}" : "software";
-            string extra = "";
-            if (!bp.Enabled) extra += "  (disabled)";
-            if (!string.IsNullOrEmpty(bp.Condition)) extra += $"  if({bp.Condition})";
-            if (bp.HitMode != HitCountMode.None) extra += $"  {bp.HitMode}:{bp.HitTarget}";
-            _bps.Items.Add($"{bp.Address.ToString("X" + w)}  {kind}{extra}  {_session.LiveResult?.NameFor(bp.Address) ?? ""}");
-        }
-        foreach (var m in _session.Engine.MemoryBreakpoints)
-        {
-            _bpVas.Add(m.Start);
-            _bps.Items.Add($"{m.Start.ToString("X" + w)}  mem {m.Access}/{m.Length}B  {_session.LiveResult?.NameFor(m.Start) ?? ""}");
         }
 
         // threads

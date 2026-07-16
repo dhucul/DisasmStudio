@@ -57,11 +57,14 @@ public sealed class ExportItem(NamedSymbol s)
 /// <summary>Row in the Breakpoints list. <see cref="Va"/> is a static VA before/between runs and a live
 /// (rebased) VA during a session — the same address space the listing is showing, so a double-click navigates
 /// straight to it. <see cref="Label"/> is the resolved symbol (and, for hardware breakpoints, the kind).</summary>
-public sealed class BreakpointItem(ulong va, string label)
+public sealed class BreakpointItem(ulong va, string label, bool enabled)
 {
     public ulong Va => va;
     public string Address => va.ToString("X");
     public string Label => label;
+
+    /// <summary>Whether the breakpoint is armed. Bound to the list's tick-box (untick = disabled, kept but not armed).</summary>
+    public bool Enabled => enabled;
 }
 
 /// <summary>The user's definition of a breakpoint, held in the pre-run / cross-run set keyed by static VA.

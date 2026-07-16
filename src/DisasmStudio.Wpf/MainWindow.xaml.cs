@@ -607,7 +607,7 @@ public partial class MainWindow : Window
             ulong va = sva + slide;
             if (def.Memory)   // software memory (range) breakpoint — page protection, no int3 / condition
             {
-                _dbg.Engine.SetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
+                if (def.Enabled) _dbg.Engine.SetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
                 continue;
             }
             if (def.Hardware) _dbg.Engine.SetHardwareBreakpoint(va, def.Kind, def.Size);
@@ -637,7 +637,7 @@ public partial class MainWindow : Window
                 string label = extra.Length == 0 ? name
                     : name.Length == 0 ? extra
                     : $"{name}   {extra}";
-                return new BreakpointItem(va, label);
+                return new BreakpointItem(va, label, kv.Value.Enabled);
             })
             .ToList();
     }
@@ -1132,6 +1132,51 @@ public partial class MainWindow : Window
     private void OnBreakpointRemove(object sender, RoutedEventArgs e) { if (BreakpointList.SelectedItem is BreakpointItem b) OnBreakpointToggle(b.Va); }
     private void OnBreakpointEditMenu(object sender, RoutedEventArgs e) { if (BreakpointList.SelectedItem is BreakpointItem b) OnEditBreakpointRequest(b.Va); }
     private void OnBreakpointListKey(object sender, KeyEventArgs e) { if (e.Key == Key.Delete && BreakpointList.SelectedItem is BreakpointItem b) { OnBreakpointToggle(b.Va); e.Handled = true; } }
+
+    /// <summary>Tick-box in the Breakpoints list → enable / disable the breakpoint (kept in the set, not armed when
+    /// off).</summary>
+    private void OnBreakpointEnabledToggle(object sender, RoutedEventArgs e)
+    {
+        if (sender is CheckBox cb && cb.DataContext is BreakpointItem b) SetBreakpointEnabled(b.Va, cb.IsChecked == true);
+    }
+
+    /// <summary>Context-menu "Enable / disable" → flip the selected breakpoint's enabled state.</summary>
+    private void OnBreakpointToggleEnabledMenu(object sender, RoutedEventArgs e)
+    {
+        if (BreakpointList.SelectedItem is BreakpointItem b) ToggleBreakpointEnabled(b.Va);
+    }
+
+    /// <summary>Flip the enabled state of the breakpoint at <paramref name="va"/> — from the Breakpoints list's
+    /// context-menu "Enable / disable".</summary>
+    private void ToggleBreakpointEnabled(ulong va)
+    {
+        if (_pendingBreakpoints.TryGetValue(va - LiveSlide, out var def)) SetBreakpointEnabled(va, !def.Enabled);
+    }
+
+    /// <summary>Enable / disable the breakpoint at <paramref name="va"/> (a live VA while debugging, else static)
+    /// without removing it: flips <see cref="BpDef.Enabled"/> so it persists / re-arms next run, and applies the
+    /// change to the live engine now — memory (range) bps arm/disarm via page protection, int3 / hardware bps via
+    /// <c>ConfigureBreakpoint</c> (ArmAddr / DisarmAddr / Dr reprogram).</summary>
+    private void SetBreakpointEnabled(ulong va, bool enabled)
+    {
+        ulong sva = va - LiveSlide;
+        if (!_pendingBreakpoints.TryGetValue(sva, out var def)) return;
+        def.Enabled = enabled;
+        if (_dbgViewLive && _dbg is { } d)
+        {
+            if (def.Memory)
+            {
+                if (enabled) d.Engine.SetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
+                else d.Engine.RemoveMemoryBreakpoint(va);
+            }
+            else d.Engine.ConfigureBreakpoint(va, def.Condition, def.HitMode, def.HitTarget, enabled);
+        }
+        Linear.Refresh();
+        Graph.Refresh();
+        Decompiler.Refresh();
+        Debug.Refresh();
+        RefreshBreakpointList();
+    }
 
     private void BeginDebug(Action<DebugSession> start)
     {
