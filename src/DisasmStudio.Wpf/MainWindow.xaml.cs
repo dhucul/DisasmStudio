@@ -1863,7 +1863,7 @@ public partial class MainWindow : Window
         string extra = _dbg.LastReason switch
         {
             StopReason.Exception => $" (code 0x{_dbg.LastExceptionCode:X8})",
-            StopReason.MemoryBreakpoint => $" ({(_dbg.Engine.LastMemoryHitAccess == 1 ? "write" : "read")} {_dbg.Engine.LastMemoryHitVa:X})",
+            StopReason.MemoryBreakpoint => $" ({(_dbg.Engine.LastMemoryHitAccess switch { 1 => "write", 8 => "execute", _ => "read" })} {_dbg.Engine.LastMemoryHitVa:X})",
             _ => "",
         };
         StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
@@ -3345,6 +3345,68 @@ public partial class MainWindow : Window
     private void OnMemMapGridSelected(object sender, SelectionChangedEventArgs e)
     {
         MemMapStrip.SelectedIndex = MemMapGrid.SelectedIndex;
+    }
+
+    /// <summary>Select the Memory Map row under the cursor so the right-click menu acts on it.</summary>
+    private void OnMemMapRightClick(object sender, MouseButtonEventArgs e)
+    {
+        var dep = e.OriginalSource as DependencyObject;
+        while (dep is not null and not DataGridRow) dep = System.Windows.Media.VisualTreeHelper.GetParent(dep);
+        if (dep is DataGridRow row) row.IsSelected = true;
+    }
+
+    /// <summary>Disable the section actions when the selected row is a &lt;gap&gt; (or nothing is selected).</summary>
+    private void OnMemMapMenuOpening(object sender, RoutedEventArgs e)
+    {
+        bool ok = MemMapGrid.SelectedItem is MemoryMapItem { IsGap: false };
+        if (sender is ContextMenu cm)
+            foreach (var it in cm.Items)
+                if (it is MenuItem mi) mi.IsEnabled = ok;
+    }
+
+    /// <summary>Dump the selected section's bytes to a file — the on-disk raw bytes when static, or the live
+    /// process-memory bytes during a debug session (whichever image the views are showing). Patches are overlaid.</summary>
+    private void OnDumpSection(object sender, RoutedEventArgs e)
+    {
+        if (MemMapGrid.SelectedItem is not MemoryMapItem m || m.IsGap) return;
+        var img = _result?.Image ?? _image;
+        if (img is null) return;
+        // The row carries only a VA — re-find the section; the HEADER row isn't in Sections, so fall back to it.
+        var sec = img.SectionAt(m.Va) ?? (img.HeaderRegion is { } h && h.StartVa == m.Va ? h : null);
+        if (sec is null) { StatusText.Text = $"No section at {m.Va:X}"; return; }
+        int count = sec.FileSize > 0 ? sec.FileSize : (int)Math.Min(sec.VirtualSize, (ulong)int.MaxValue);
+        if (count <= 0) { StatusText.Text = $"{sec.Name}: nothing to dump (no bytes)"; return; }
+        var bytes = img.ReadBytesAtVa(sec.StartVa, count);
+        var baseName = Path.GetFileNameWithoutExtension(_image?.FilePath ?? "image");
+        var dlg = new SaveFileDialog
+        {
+            Title = "Dump section",
+            FileName = $"{baseName}_{SanitizeSectionName(sec.Name)}.bin",
+            Filter = "Binary|*.bin|All files|*.*",
+        };
+        if (dlg.ShowDialog(this) != true) return;
+        try { File.WriteAllBytes(dlg.FileName, bytes); StatusText.Text = $"Dumped {sec.Name} ({bytes.Length} bytes) to {dlg.FileName}"; }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Dump failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    /// <summary>Set a software memory breakpoint over the whole selected section. Reuses the pending/live
+    /// mem-bp flow — the row's Va/EndVa are already in the displayed (static-or-live) space it expects.</summary>
+    private void SetSectionMemBp(MemAccess access)
+    {
+        if (MemMapGrid.SelectedItem is not MemoryMapItem m || m.IsGap || m.SizeBytes == 0) return;
+        OnMemoryBreakpointRequested((m.Va, m.EndVa - 1, access));
+    }
+
+    private void OnSectionBreakRead(object sender, RoutedEventArgs e) => SetSectionMemBp(MemAccess.Read);
+    private void OnSectionBreakWrite(object sender, RoutedEventArgs e) => SetSectionMemBp(MemAccess.Write);
+    private void OnSectionBreakAccess(object sender, RoutedEventArgs e) => SetSectionMemBp(MemAccess.ReadWrite);
+    private void OnSectionBreakExecute(object sender, RoutedEventArgs e) => SetSectionMemBp(MemAccess.Execute);
+
+    /// <summary>A filename-safe form of a section name for the dump's suggested filename (e.g. ".text" → "text").</summary>
+    private static string SanitizeSectionName(string name)
+    {
+        var cleaned = new string(name.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray()).TrimStart('.');
+        return cleaned.Length > 0 ? cleaned : "section";
     }
 
     /// <summary>Select the section row under the cursor so the right-click menu acts on it.</summary>

@@ -75,6 +75,17 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+
+        // Hidden self-test for the whole-section EXECUTE software memory breakpoint (Memory Map → "Break on
+        // execute"): launch a target, arm an execute mem-bp on the entry page, continue, and assert the fetch
+        // faults through as StopReason.MemoryBreakpoint with access = execute (8). Prints to the terminal, exits.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-secbp")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = Diagnostics.SectionBpSmoke.Run(e.Args.Length > 1 ? e.Args[1] : null);
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }

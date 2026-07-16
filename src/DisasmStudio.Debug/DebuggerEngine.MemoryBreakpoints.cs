@@ -7,8 +7,9 @@ namespace DisasmStudio.Debug;
 /// with page protection (the technique x64dbg calls a "memory breakpoint", and a generalization of the SMC
 /// write-protect path in the SelfModifying partial). The pages covering each watched range are protected:
 /// a <see cref="MemAccess.Write"/> breakpoint strips PAGE_WRITE (only writes fault; reads/execution still
-/// work), while <see cref="MemAccess.Read"/>/<see cref="MemAccess.ReadWrite"/> use PAGE_NOACCESS (any access
-/// faults). On a fault we read the access type and faulting address from the exception record: if the access
+/// work), <see cref="MemAccess.Read"/>/<see cref="MemAccess.ReadWrite"/> use PAGE_NOACCESS (any access faults),
+/// and <see cref="MemAccess.Execute"/> strips only the execute bit (only instruction fetches fault; reads/writes
+/// still work). On a fault we read the access type and faulting address from the exception record: if the access
 /// lands in a watched range with a matching kind we let it complete (single-step) then stop; otherwise we
 /// transparently pass the access through and re-protect — so unrelated accesses to the same 4&#160;KiB page never
 /// surface. Unlike a hardware watchpoint (4 slots, 1/2/4/8 aligned bytes) this covers any length.
@@ -39,7 +40,7 @@ public sealed partial class DebuggerEngine
 
     /// <summary>Data address of the most recent memory-breakpoint hit (for the UI status line).</summary>
     public ulong LastMemoryHitVa { get; private set; }
-    /// <summary>Access type of the most recent memory-breakpoint hit: 0 = read, 1 = write.</summary>
+    /// <summary>Access type of the most recent memory-breakpoint hit: 0 = read, 1 = write, 8 = execute.</summary>
     public int LastMemoryHitAccess { get; private set; }
 
     /// <summary>True if any software memory breakpoint is set.</summary>
@@ -97,15 +98,16 @@ public sealed partial class DebuggerEngine
     private void ApplyPageProtection(ulong page)
     {
         ulong pageEnd = page + 0x1000;
-        bool needRead = false, needWrite = false;
+        bool needRead = false, needWrite = false, needExec = false;
         foreach (var b in _memBps)
         {
             if (b.End <= page || b.Start >= pageEnd) continue;   // this bp doesn't overlap the page
             if (b.Access is MemAccess.Read or MemAccess.ReadWrite) needRead = true;
             if (b.Access is MemAccess.Write or MemAccess.ReadWrite) needWrite = true;
+            if (b.Access is MemAccess.Execute) needExec = true;
         }
 
-        if (!needRead && !needWrite)
+        if (!needRead && !needWrite && !needExec)
         {
             if (_memPages.Remove(page, out var gone))     // no bp needs this page — restore its original protection
                 Native.VirtualProtectEx(_proc, page, (nuint)0x1000, gone.OriginalProtect, out _);
@@ -121,8 +123,17 @@ public sealed partial class DebuggerEngine
             _memPages[page] = mp;
         }
 
-        // Read detection needs NO_ACCESS (no protection faults on read alone); write-only strips the write bit.
-        uint target = needRead ? Native.PAGE_NOACCESS : StripWrite(mp.OriginalProtect);
+        // Read detection needs NO_ACCESS (no protection faults on read alone); write detection strips the write
+        // bit; execute detection strips only the execute bit (keeps read/write so data accesses don't fault and
+        // int3 planting still works). NO_ACCESS already faults instruction fetches, so it subsumes an execute
+        // watch — hence strip write/execute only when read isn't already forcing NO_ACCESS.
+        uint target;
+        if (needRead) target = Native.PAGE_NOACCESS;
+        else
+        {
+            target = needWrite ? StripWrite(mp.OriginalProtect) : mp.OriginalProtect;
+            if (needExec) target = StripExecute(target);
+        }
         mp.AppliedProtect = target;
         Native.VirtualProtectEx(_proc, page, (nuint)0x1000, target, out _);
     }
@@ -175,6 +186,7 @@ public sealed partial class DebuggerEngine
     {
         MemAccess.Read => accessType == 0,
         MemAccess.Write => accessType == 1,
+        MemAccess.Execute => accessType == 8,   // instruction fetch
         _ => accessType is 0 or 1,   // ReadWrite
     };
 

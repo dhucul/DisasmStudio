@@ -6,8 +6,9 @@ public enum StopReason { EntryPoint, Attached, Breakpoint, Step, Watchpoint, Pau
 /// <summary>Kind of a hardware breakpoint / watchpoint.</summary>
 public enum HwKind { Execute, Write, ReadWrite }
 
-/// <summary>Access kind of a software memory (data) breakpoint on a byte range.</summary>
-public enum MemAccess { Read, Write, ReadWrite }
+/// <summary>Access kind of a software memory (data) breakpoint on a byte range. Execute breaks on an
+/// instruction fetch anywhere in the range (page marked non-executable, keeping read/write).</summary>
+public enum MemAccess { Read, Write, ReadWrite, Execute }
 
 /// <summary>How a breakpoint's hit count gates the stop (None = the count is ignored).</summary>
 public enum HitCountMode { None, Equals, AtLeast, Multiple }

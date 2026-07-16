@@ -246,9 +246,20 @@
                                        Text="Address-space layout. The strip is proportional (low address at top). Click a block or double-click a row to jump. Green = executable · peach = writable · blue = read-only · grey = header · dim = gap." />
                             <ctl:MemoryMapStrip x:Name="MemMapStrip" DockPanel.Dock="Left" Width="56" Margin="8,2,4,8" />
                             <DataGrid x:Name="MemMapGrid" SelectionChanged="OnMemMapGridSelected" MouseDoubleClick="OnMemMapActivate"
+                                      PreviewMouseRightButtonDown="OnMemMapRightClick"
                                       Margin="0,2,0,0"
                                       CanUserAddRows="False" CanUserReorderColumns="False" CanUserResizeRows="False"
                                       CanUserSortColumns="False">
+                                <DataGrid.ContextMenu>
+                                    <ContextMenu Opened="OnMemMapMenuOpening">
+                                        <MenuItem Header="Dump section to file…" Click="OnDumpSection" />
+                                        <Separator />
+                                        <MenuItem Header="Break on read (section)" Click="OnSectionBreakRead" />
+                                        <MenuItem Header="Break on write (section)" Click="OnSectionBreakWrite" />
+                                        <MenuItem Header="Break on read/write (section)" Click="OnSectionBreakAccess" />
+                                        <MenuItem Header="Break on execute (section)" Click="OnSectionBreakExecute" />
+                                    </ContextMenu>
+                                </DataGrid.ContextMenu>
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Name"  Binding="{Binding Name}"    Width="Auto" MinWidth="72"
                                                         ElementStyle="{StaticResource GridCellText}" />
