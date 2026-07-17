@@ -12,6 +12,12 @@ public enum OepMethod
     EspTrick,
     /// <summary>Guard every non-stub section; break when execution first enters one.</summary>
     SectionGuard,
+    /// <summary>Like <see cref="SectionGuard"/>, but arms a whole-section <b>execute memory breakpoint</b>
+    /// (<see cref="MemAccess.Execute"/>) on each non-stub section — the same engine path the Memory Map's
+    /// "Break on execute (section)" uses — and breaks (<see cref="StopReason.MemoryBreakpoint"/>) the first time
+    /// code runs in one. Functionally a twin of the section guard, but it reuses the re-armable memory-breakpoint
+    /// machinery (which single-steps the faulting fetch through, so the stop lands one instruction into the OEP).</summary>
+    SectionExecBp,
     /// <summary>Break at a user-supplied OEP address.</summary>
     Manual,
     /// <summary>No OEP trace at all: run the target freely (no single-step, no hardware watchpoint, no
@@ -33,7 +39,7 @@ public enum OepMethod
 /// </summary>
 public sealed class OepFinder
 {
-    private enum Phase { Init, StepPushad, WaitPopad, WaitGuard, WaitManual, Done }
+    private enum Phase { Init, StepPushad, WaitPopad, WaitGuard, WaitMemBp, WaitManual, Done }
 
     private readonly OepMethod _requested;
     private ulong? _manualOep;
@@ -42,6 +48,7 @@ public sealed class OepFinder
     private Phase _phase = Phase.Init;
     private ulong _entrySp, _espWatch;
     private ulong _entrySectionLo;
+    private readonly List<ulong> _execBpStarts = [];   // section execute mem-bp starts armed by SectionExecBp
 
     public string Log => _log.ToString();
     public OepMethod ActiveMethod { get; private set; }
@@ -87,6 +94,13 @@ public sealed class OepFinder
             _phase = Phase.StepPushad;
             _log.Append("ESP-trick: single-stepping the stub's first instruction.\n");
             eng.StepInto();
+            return null;
+        }
+
+        if (_requested == OepMethod.SectionExecBp)
+        {
+            ActiveMethod = OepMethod.SectionExecBp;
+            StartSectionExecBp(eng);
             return null;
         }
 
@@ -141,6 +155,19 @@ public sealed class OepFinder
                 eng.Go();
                 return null;
             }
+            case Phase.WaitMemBp:
+            {
+                if (stop.Reason == StopReason.MemoryBreakpoint)
+                {
+                    _phase = Phase.Done;
+                    foreach (ulong s in _execBpStarts) eng.RemoveMemoryBreakpoint(s);
+                    _execBpStarts.Clear();
+                    _log.Append($"OEP candidate (section execute-bp) at {stop.Address:X}.\n");
+                    return stop.Address;
+                }
+                eng.Go();
+                return null;
+            }
             case Phase.WaitManual:
             {
                 if (stop.Reason == StopReason.Breakpoint && _manualOep is { } m && stop.Address == m)
@@ -176,6 +203,30 @@ public sealed class OepFinder
         }
         else _log.Append("Section guard: could not parse the image headers.\n");
         _phase = Phase.WaitGuard;
+        eng.Go();
+    }
+
+    /// <summary>Arm a whole-section <see cref="MemAccess.Execute"/> memory breakpoint on every non-stub section
+    /// (the same engine path as the Memory Map's "Break on execute (section)"), then run. Execution into any of
+    /// them faults on the instruction fetch and surfaces a <see cref="StopReason.MemoryBreakpoint"/> — the OEP.</summary>
+    private void StartSectionExecBp(DebuggerEngine eng)
+    {
+        _execBpStarts.Clear();
+        var hdr = eng.ReadMemory(eng.ImageBase, 0x1000);
+        if (PeView.TryParse(hdr, out var view))
+        {
+            foreach (var s in view.Sections)
+            {
+                ulong lo = eng.ImageBase + s.VirtualAddress;
+                ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
+                if (size == 0 || lo == _entrySectionLo) continue;   // never break on the stub's own section
+                eng.SetMemoryBreakpoint(lo, size, MemAccess.Execute);
+                _execBpStarts.Add(lo);
+            }
+            _log.Append($"Section execute-bp: armed execute memory breakpoints on {_execBpStarts.Count} non-stub section(s).\n");
+        }
+        else _log.Append("Section execute-bp: could not parse the image headers.\n");
+        _phase = Phase.WaitMemBp;
         eng.Go();
     }
 

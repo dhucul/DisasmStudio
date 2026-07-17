@@ -373,28 +373,19 @@ public sealed class UnpackSession
         bool confirmed = OepValidator.LooksLikeOep(_eng.ReadMemory(oepVa, 32), _eng.Is32);
         Report(confirmed ? "OEP prologue looks valid." : "OEP prologue not recognised (dumping anyway).");
 
-        var image = _eng.DumpImage(_eng.ImageBase, out uint sizeOfImage);
-        if (image.Length == 0 || !PeView.TryParse(image, out var view)) { Fail("Failed to dump or parse the image."); return; }
-        Report($"Dumped image: {sizeOfImage:X} bytes from base {_eng.ImageBase:X}.");
+        // Dump the frozen image + rebuild the IAT via the shared live-PE pipeline (LivePeDump) — the same code
+        // the Memory Map's manual "Dump image as PE" command runs.
+        var dump = LivePeDump.Build(_eng, oepVa, _opt.StaticImageBase);
+        foreach (var line in dump.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Report(line);
+        if (!dump.Ok) { Fail("Failed to dump or parse the image."); return; }
 
-        MemReader mem = (va, count) => _eng.ReadMemory(va, count);
-        var resolver = new ModuleExportResolver(_eng.Modules, mem);
-        Report($"Indexed {resolver.ModuleCount} module(s), {resolver.ExportCount} export(s).");
-
-        uint oepRva = (uint)(oepVa - _eng.ImageBase);
-        var iat = ImportRebuilder.Rebuild(mem, resolver, view, _eng.ImageBase, oepVa);
-        foreach (var line in iat.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Report(line);
-
-        var outBytes = PeBuilder.Build(image, view, oepRva, iat.Ok ? iat : null, _eng.ImageBase, _opt.StaticImageBase, out var buildLog);
-        foreach (var line in buildLog.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Report(line);
-
-        try { File.WriteAllBytes(_opt.OutputPath, outBytes); }
+        try { File.WriteAllBytes(_opt.OutputPath, dump.Bytes); }
         catch (Exception ex) { Fail("Failed to write output file: " + ex.Message); return; }
         Report($"Wrote {_opt.OutputPath}.");
 
         _done = true;
         var result = new UnpackResult(true, oepVa, _finder.ActiveMethod, confirmed,
-            iat.Resolved, iat.Unresolved, _opt.OutputPath, null, _log.ToString());
+            dump.ImportsResolved, dump.ImportsUnresolved, _opt.OutputPath, null, _log.ToString());
         try { _eng.Stop(); } catch { }
         _tcs.TrySetResult(result);
     }

@@ -253,6 +253,7 @@
                                 <DataGrid.ContextMenu>
                                     <ContextMenu Opened="OnMemMapMenuOpening">
                                         <MenuItem Header="Dump section to file…" Click="OnDumpSection" />
+                                        <MenuItem x:Name="DumpImagePeMenuItem" Header="Dump image as PE (rebuild imports)…" Click="OnDumpImageAsPe" />
                                         <Separator />
                                         <MenuItem Header="Break on read (section)" Click="OnSectionBreakRead" />
                                         <MenuItem Header="Break on write (section)" Click="OnSectionBreakWrite" />

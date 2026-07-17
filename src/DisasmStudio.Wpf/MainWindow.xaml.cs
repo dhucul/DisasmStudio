@@ -3400,13 +3400,16 @@ public partial class MainWindow : Window
         if (dep is DataGridRow row) row.IsSelected = true;
     }
 
-    /// <summary>Disable the section actions when the selected row is a &lt;gap&gt; (or nothing is selected).</summary>
+    /// <summary>Disable the section actions when the selected row is a &lt;gap&gt; (or nothing is selected). The
+    /// whole-image "Dump image as PE" item is independent of the selection — it needs only a stopped live session.</summary>
     private void OnMemMapMenuOpening(object sender, RoutedEventArgs e)
     {
         bool ok = MemMapGrid.SelectedItem is MemoryMapItem { IsGap: false };
+        bool liveStopped = _dbgViewLive && _dbg is { IsStopped: true };
         if (sender is ContextMenu cm)
             foreach (var it in cm.Items)
-                if (it is MenuItem mi) mi.IsEnabled = ok;
+                if (it is MenuItem mi)
+                    mi.IsEnabled = ReferenceEquals(mi, DumpImagePeMenuItem) ? liveStopped : ok;
     }
 
     /// <summary>Dump the selected section's bytes to a file — the on-disk raw bytes when static, or the live
@@ -3432,6 +3435,65 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog(this) != true) return;
         try { File.WriteAllBytes(dlg.FileName, bytes); StatusText.Text = $"Dumped {sec.Name} ({bytes.Length} bytes) to {dlg.FileName}"; }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Dump failed", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    /// <summary>Dump the running image to a clean, re-openable PE using the same dump → IAT-rebuild → PeBuilder
+    /// pipeline the generic unpacker uses (<see cref="DisasmStudio.Debug.Unpacking.LivePeDump"/>), driven from the
+    /// Memory Map. Only during a stopped live session: the current instruction pointer — typically where a section
+    /// execute breakpoint just broke — is baked as the OEP. This is the manual unpacking workflow: arm "Break on
+    /// execute (section)" on the packed section, let it break when the unpacked code first runs, then dump here.</summary>
+    private void OnDumpImageAsPe(object sender, RoutedEventArgs e)
+    {
+        if (!_dbgViewLive || _dbg is not { IsStopped: true } d)
+        {
+            StatusText.Text = "Dump image as PE needs a live debug session that is stopped (run or attach, then break).";
+            return;
+        }
+        var eng = d.Engine;
+        // OEP = the current instruction pointer (where an execute breakpoint / manual break landed).
+        ulong oep = eng.GetRegisters()?.Ip ?? eng.EntryPoint;
+        ulong preferredBase = _image?.ImageBase ?? eng.ImageBase;
+        var baseName = Path.GetFileNameWithoutExtension(_image?.FilePath ?? "image");
+        var dlg = new SaveFileDialog
+        {
+            Title = "Dump image as PE",
+            FileName = $"{baseName}_dumped.exe",
+            Filter = "Executable|*.exe|All files|*.*",
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        StatusText.Text = $"Dumping live image at OEP {oep:X} and rebuilding imports…";
+        DisasmStudio.Debug.Unpacking.LivePeDump.Result res;
+        try { res = DisasmStudio.Debug.Unpacking.LivePeDump.Build(eng, oep, preferredBase); }
+        catch (Exception ex)
+        {
+            StatusText.Text = "Dump as PE failed.";
+            MessageBox.Show(this, ex.Message, "Dump image as PE", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        if (!res.Ok || res.Bytes.Length == 0)
+        {
+            StatusText.Text = "Dump as PE failed — could not dump/parse the live image.";
+            MessageBox.Show(this, "Could not dump or parse the live image.\n\n" + res.Log,
+                "Dump image as PE", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try { File.WriteAllBytes(dlg.FileName, res.Bytes); }
+        catch (Exception ex)
+        {
+            StatusText.Text = "Dump as PE failed.";
+            MessageBox.Show(this, ex.Message, "Dump image as PE", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        StatusText.Text = $"Dumped image as PE (OEP {res.Oep:X}; imports {res.ImportsResolved} resolved, {res.ImportsUnresolved} unresolved) → {dlg.FileName}";
+        MessageBox.Show(this,
+            $"Wrote {Path.GetFileName(dlg.FileName)}.\n\nOEP {res.Oep:X} · {res.ImportsResolved} imports resolved, " +
+            $"{res.ImportsUnresolved} unresolved · {res.SizeOfImage:X} bytes of image.\n\n" +
+            "Open it when you're done debugging (opening a file ends the live view).",
+            "Dump image as PE", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     /// <summary>Set a software memory breakpoint over the whole selected section. Reuses the pending/live

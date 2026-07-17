@@ -98,6 +98,7 @@ internal sealed class UnpackerDialog : Window
         _strategy.Items.Add("Manual OEP");
         _strategy.Items.Add("Run free — no trace (VM protectors); dump on settle/fault");
         _strategy.Items.Add("Trace VM loop/handlers (single-step diagnostic)");
+        _strategy.Items.Add("Section execute breakpoint — memory-map engine (alt. to section guard)");
         _strategy.Items.Add("Static — auto-detect (UPX / VMProtect; no run, no debugger)");
         _staticIndex = _strategy.Items.Count - 1;
         // Pre-select the dynamic strategy the detected packer class responds best to (the async static probe
@@ -241,6 +242,7 @@ internal sealed class UnpackerDialog : Window
             3 => OepMethod.Manual,
             4 => OepMethod.RunFree,
             5 => OepMethod.TraceVm,
+            6 => OepMethod.SectionExecBp,
             _ => OepMethod.Auto,
         };
         if (method == OepMethod.Manual)
