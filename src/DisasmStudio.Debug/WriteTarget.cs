@@ -5,9 +5,10 @@ namespace DisasmStudio.Debug;
 /// <summary>
 /// Resolves the effective address an instruction <b>writes to</b> in memory, from a register snapshot — used by
 /// the debugger's "follow writes" feature to scroll the memory views to the location being written while stepping.
-/// Only <b>explicit</b> memory-write operands count (so <c>push</c>/<c>pop</c>/<c>call</c> stack traffic is ignored,
-/// as is any stack-segment access), which keeps the view on real data writes instead of chasing the stack.
-/// Pure and allocation-light — unit-tested by <c>--smoke-followwrite</c>.
+/// Only an <b>explicit</b> written memory operand counts: implicit stack traffic (<c>push</c>/<c>pop</c>/<c>call</c>)
+/// has no explicit memory operand and so is ignored, keeping the view on real data writes rather than chasing the
+/// stack — while genuine writes to locals through <c>[rbp±d]</c>/<c>[rsp+d]</c> (which use the SS segment) are still
+/// followed. Pure and allocation-light — unit-tested by <c>--smoke-followwrite</c>.
 /// </summary>
 public static class WriteTarget
 {
@@ -20,25 +21,24 @@ public static class WriteTarget
         ea = 0;
         size = 1;
 
-        // Must have an explicit memory operand — this excludes implicit stack pushes/pops/calls.
-        bool hasMem = false;
-        for (int i = 0; i < insn.OpCount; i++)
-            if (insn.GetOpKind(i) == OpKind.Memory) { hasMem = true; break; }
-        if (!hasMem) return false;
-
         var iif = _iif ??= new InstructionInfoFactory();
         var info = iif.GetInfo(in insn);
-        foreach (var m in info.GetUsedMemory())
+
+        // Follow only an EXPLICIT memory operand that is written. Checking the operand's own access (not the
+        // segment) means push/pop/call — which have no explicit memory operand — are naturally excluded, while a
+        // store to a local through [rbp-8]/[rsp+x] (SS segment) is still followed. `push [mem]` (an explicit
+        // memory READ) resolves to nothing; `pop [mem]` (an explicit memory WRITE) is followed, both correctly.
+        for (int i = 0; i < insn.OpCount; i++)
         {
-            if (m.Segment == Register.SS) continue;   // never chase the stack
-            if (m.Access is OpAccess.Write or OpAccess.ReadWrite or OpAccess.CondWrite or OpAccess.ReadCondWrite)
+            if (insn.GetOpKind(i) != OpKind.Memory) continue;
+            if (info.GetOpAccess(i) is OpAccess.Write or OpAccess.ReadWrite or OpAccess.CondWrite or OpAccess.ReadCondWrite)
             {
                 ea = insn.IsIPRelativeMemoryOperand
                     ? insn.IPRelativeMemoryAddress
                     : insn.MemoryDisplacement64
                       + RegVal(insn.MemoryBase, regs)
                       + RegVal(insn.MemoryIndex, regs) * (ulong)insn.MemoryIndexScale;
-                size = m.MemorySize.GetInfo().Size;
+                size = insn.MemorySize.GetInfo().Size;
                 return true;
             }
         }

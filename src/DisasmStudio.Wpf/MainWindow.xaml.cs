@@ -1932,8 +1932,10 @@ public partial class MainWindow : Window
         // Follow-writes: scroll both memory views so the address the current instruction writes to is at the top.
         // Done BEFORE the two Refresh/RefreshWithChangeHighlight calls so their change baselines capture the
         // followed region — the written bytes then wash red on the next step.
+        // Decode at the real RIP (fregs.Ip), not CurrentIp — on a memory-breakpoint stop CurrentIp is the faulting
+        // data address, not the instruction pointer; for steps/breakpoints the two are identical.
         if (FollowWritesToggle.IsChecked == true && _dbg.LiveDecoder is { } fdec && _dbg.Registers is { } fregs
-            && fdec.TryDecodeAt(_dbg.CurrentIp, out var finsn)
+            && fdec.TryDecodeAt(fregs.Ip, out var finsn)
             && WriteTarget.TryResolve(finsn, fregs, out ulong wea, out int wsize))
         {
             Hex.GoTo(wea, select: true, length: wsize, atTop: true);   // main Hex tab
