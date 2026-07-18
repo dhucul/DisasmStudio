@@ -1929,7 +1929,8 @@ public partial class MainWindow : Window
         Linear.SetCurrentIp(_dbg.CurrentIp);
         RecomputeCurrentJump();   // colour the current conditional jump from the live flags (auto, before any toggle)
         Linear.Refresh();
-        Debug.Refresh();
+        Debug.Refresh(highlightChanges: true);
+        Hex.RefreshWithChangeHighlight();   // re-read the Hex tab on every stop (no longer stale) and wash changed bytes
         RefreshBreakpointList();   // now showing live (rebased) breakpoints; reflects the pre-run set just armed
         if (_coverageEnabled)
         {

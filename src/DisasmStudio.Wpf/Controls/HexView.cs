@@ -27,6 +27,13 @@ public sealed class HexView : Grid
     private ulong _topAddress;
     private const int BytesPerRow = 16;
 
+    // ---- "changed since last step" tracking (debugger). A snapshot of the visible region captured at the
+    // previous stop, diffed by VA against the current bytes on each step so the changed cells wash red. ----
+    private byte[]? _prevSnapshot;
+    private ulong _prevSnapBase;
+    private int _prevSnapLen;
+    private readonly HashSet<ulong> _changedVas = new();
+
     private readonly Typeface _typeface =
         new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 13.0;
@@ -81,6 +88,7 @@ public sealed class HexView : Grid
     private static readonly Brush DimBrush = Palette.Surface2Brush;      // unreadable/zero bytes
     private static readonly Brush SelBrush = Palette.SelOverlayBrush;    // lavender @ 0x66 alpha
     private static readonly Brush PatchBrush = Palette.PeachBrush;       // edited byte
+    private static readonly Brush ChangedBrush = Palette.ChangedByteBrush; // byte changed since the last step (debugger)
 
     public HexView()
     {
@@ -148,11 +156,60 @@ public sealed class HexView : Grid
         _image = image;
         _topAddress = image?.MinVa ?? 0;
         _hasSelection = false;
+        _prevSnapshot = null;           // a new image (or session teardown) starts change-tracking fresh
+        _changedVas.Clear();
         ConfigureScroll();
         _surface.InvalidateVisual();
     }
 
     public void InvalidateView() => _surface.InvalidateVisual();
+
+    /// <summary>Re-read the visible region from the (live) image, diff it by VA against the snapshot taken
+    /// at the previous call, record which VAs changed, then repaint — so bytes changed since the last
+    /// debugger stop are washed red. The first call after <see cref="SetImage"/> only captures a baseline
+    /// (nothing is highlighted). Diffing by VA keeps the result correct even if the view was scrolled between
+    /// stops: overlapping VAs still compare, and bytes scrolled newly into view simply have no baseline.
+    /// Pass <paramref name="highlight"/> = false to advance the baseline without flagging changes — used for
+    /// the refresh that follows a user's own memory edit, so the edit does not flash as an execution change.</summary>
+    public void RefreshWithChangeHighlight(bool highlight = true)
+    {
+        if (_image is null) { _surface.InvalidateVisual(); return; }
+
+        ulong baseVa = _topAddress;
+        int len = (VisibleRows + 1) * BytesPerRow;
+        var cur = new byte[len];
+        int read = _image.ReadVa(baseVa, cur);   // may be short over unmapped tail
+
+        if (highlight)
+            DiffChangedVas(_prevSnapshot, _prevSnapBase, _prevSnapLen, cur, baseVa, read, _changedVas);
+        else
+            _changedVas.Clear();
+
+        _prevSnapshot = cur; _prevSnapBase = baseVa; _prevSnapLen = read;
+        _surface.InvalidateVisual();
+    }
+
+    /// <summary>Fill <paramref name="into"/> with the VAs whose byte differs between the previous snapshot
+    /// (<paramref name="prevLen"/> bytes starting at <paramref name="prevBase"/>) and the current buffer
+    /// (<paramref name="read"/> bytes starting at <paramref name="baseVa"/>). Comparison is keyed by VA, so a
+    /// scroll between the two captures never produces a false hit — only overlapping VAs are compared, and
+    /// bytes with no counterpart in the previous snapshot are skipped. A null previous snapshot yields none.</summary>
+    internal static void DiffChangedVas(byte[]? prev, ulong prevBase, int prevLen,
+                                        byte[] cur, ulong baseVa, int read, HashSet<ulong> into)
+    {
+        into.Clear();
+        if (prev is null) return;
+        long delta = (long)baseVa - (long)prevBase;   // index in the old snapshot of this region's first byte
+        for (int i = 0; i < read; i++)
+        {
+            long pi = delta + i;
+            if (pi >= 0 && pi < prevLen && prev[pi] != cur[i])
+                into.Add(baseVa + (ulong)i);
+        }
+    }
+
+    /// <summary>Test hook: the VAs flagged as changed by the last <see cref="RefreshWithChangeHighlight"/>.</summary>
+    internal IReadOnlyCollection<ulong> ChangedVasForTest => _changedVas;
 
     public void GoTo(ulong address, bool select = false, int length = 1)
     {
@@ -463,6 +520,17 @@ public sealed class HexView : Grid
                 int cEnd = selHi < addr + BytesPerRow - 1 ? (int)(selHi - addr) : BytesPerRow - 1;
                 DrawSelection(dc, hexX, asciiX, y, cStart, cEnd);
             }
+
+            // Wash bytes that changed since the last step (debugger), before the text so it stays legible.
+            if (_changedVas.Count > 0)
+                for (int c = 0; c < BytesPerRow; c++)
+                    if (_changedVas.Contains(addr + (ulong)c))
+                    {
+                        dc.DrawRectangle(ChangedBrush, null,
+                            new Rect(hexX + HexCharOffset(c) * _charWidth, y, 2 * _charWidth, _rowHeight));
+                        dc.DrawRectangle(ChangedBrush, null,
+                            new Rect(asciiX + c * _charWidth, y, _charWidth, _rowHeight));
+                    }
 
             Draw(dc, addr.ToString("X" + addrDigits) + "  ", 4, y, AddrBrush, dpi);
 

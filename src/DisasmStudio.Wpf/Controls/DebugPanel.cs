@@ -32,13 +32,19 @@ public sealed class DebugPanel : Grid
     private readonly List<ulong> _callVas = [];
     private readonly List<ulong> _moduleVas = [];
 
+    // "Changed since last step" tracking: the register/flag and stack values at the previous stop, diffed on
+    // each stop so cells the executed instruction modified wash red. Stack is keyed by slot VA (diff survives an
+    // ESP move); both are advanced on every refresh — including edit refreshes — so a user's own edit never flashes.
+    private readonly Dictionary<string, string> _prevRegs = new();
+    private Dictionary<ulong, ulong> _prevStack = new();
+
     public event Action<ulong>? NavigateRequested;
     /// <summary>Forwarded from the Memory hex view: set a software data breakpoint over the selected byte range
     /// (read / write / read-write). The host arms it and tracks it in the breakpoint set.</summary>
     public event Action<(ulong Lo, ulong Hi, MemAccess Access)>? MemoryBreakpointRequested;
 
-    private sealed class RegRow { public string Name { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; }
-    private sealed class StackRow { public string Addr { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; public ulong Slot; public ulong ValueRaw; }
+    private sealed class RegRow { public string Name { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; public bool Changed { get; set; } }
+    private sealed class StackRow { public string Addr { get; set; } = ""; public string Value { get; set; } = ""; public string Deref { get; set; } = ""; public ulong Slot; public ulong ValueRaw; public bool Changed { get; set; } }
     private sealed class CaptureItem { public ulong Va; public string Text = ""; public override string ToString() => Text; }
 
     // EFLAGS bits shown as individual, editable (0/1) rows after the registers.
@@ -61,7 +67,7 @@ public sealed class DebugPanel : Grid
             IsReadOnly = false,   // the global DataGrid style is read-only; registers/flags are editable
         };
         _regs.Columns.Add(new DataGridTextColumn { Header = "Reg", Binding = new System.Windows.Data.Binding("Name"), IsReadOnly = true, Width = 56 });
-        _regs.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new System.Windows.Data.Binding("Value"), Width = 130 });
+        _regs.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new System.Windows.Data.Binding("Value"), Width = 130, CellStyle = ChangedCellStyle() });
         _regs.Columns.Add(new DataGridTextColumn { Header = "→", Binding = new System.Windows.Data.Binding("Deref"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         _regs.CellEditEnding += OnRegEdit;
         Add(0, "Registers", _regs);
@@ -72,7 +78,7 @@ public sealed class DebugPanel : Grid
             HeadersVisibility = DataGridHeadersVisibility.Column, FontFamily = Mono, FontSize = 12, IsReadOnly = false,
         };
         _stack.Columns.Add(new DataGridTextColumn { Header = "Addr", Binding = new System.Windows.Data.Binding("Addr"), IsReadOnly = true, Width = 116 });
-        _stack.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new System.Windows.Data.Binding("Value"), Width = 130 });
+        _stack.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new System.Windows.Data.Binding("Value"), Width = 130, CellStyle = ChangedCellStyle() });
         _stack.Columns.Add(new DataGridTextColumn { Header = "→", Binding = new System.Windows.Data.Binding("Deref"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         _stack.CellEditEnding += OnStackEdit;
         _stack.MouseDoubleClick += OnStackActivate;
@@ -124,7 +130,19 @@ public sealed class DebugPanel : Grid
 
     private static ListBox MonoList() => new() { FontFamily = Mono, FontSize = 12, Background = (Brush)Application.Current.Resources["Surface"] };
 
-    public void SetSession(DebugSession? session) { _session = session; _viewTid = 0; _dumpAddr = 0; _dumpInit = false; _dump.SetImage(null); ClearCapture(); }
+    /// <summary>A Value-cell style that washes the cell soft-red when its row's <c>Changed</c> flag is set
+    /// (a register / stack slot the last-stepped instruction modified). Based on the themed cell style so the
+    /// normal appearance is preserved.</summary>
+    private static Style ChangedCellStyle()
+    {
+        var style = new Style(typeof(DataGridCell), Application.Current.TryFindResource(typeof(DataGridCell)) as Style);
+        var trig = new DataTrigger { Binding = new System.Windows.Data.Binding("Changed"), Value = true };
+        trig.Setters.Add(new Setter(DataGridCell.BackgroundProperty, Palette.DangerSoftBrush));
+        style.Triggers.Add(trig);
+        return style;
+    }
+
+    public void SetSession(DebugSession? session) { _session = session; _viewTid = 0; _dumpAddr = 0; _dumpInit = false; _dump.SetImage(null); _prevRegs.Clear(); _prevStack = new(); ClearCapture(); }
 
     // ---- FunCap-style capture display ----
 
@@ -176,7 +194,13 @@ public sealed class DebugPanel : Grid
         return item;
     }
 
-    public void Refresh()
+    public void Refresh() => Refresh(false);
+
+    /// <summary>Rebuild the register / stack / memory views from the frozen debuggee. When
+    /// <paramref name="highlightChanges"/> is true (a real debugger stop) values that differ from the previous
+    /// stop are flagged so their cells wash red; the internal edit refreshes pass false, so a user's own edit
+    /// only advances the baseline instead of flashing as an execution change.</summary>
+    public void Refresh(bool highlightChanges)
     {
         if (_session is null || !_session.IsStopped) return;
         // Read fresh (the debuggee is frozen) so register/flag edits are reflected, not the last-stop snapshot.
@@ -188,24 +212,38 @@ public sealed class DebugPanel : Grid
         int w = regs.Is32 ? 8 : 16;
         var rows = new List<RegRow>();
         foreach (var (name, value) in regs.Items)
-            rows.Add(new RegRow { Name = name, Value = value.ToString("X" + (name is "cs" or "ds" or "es" or "fs" or "gs" or "ss" ? "4" : w.ToString())), Deref = deref?.Describe(value) ?? "" });
+        {
+            string vs = value.ToString("X" + (name is "cs" or "ds" or "es" or "fs" or "gs" or "ss" ? "4" : w.ToString()));
+            bool changed = highlightChanges && _prevRegs.TryGetValue(name, out var pv) && pv != vs;
+            rows.Add(new RegRow { Name = name, Value = vs, Deref = deref?.Describe(value) ?? "", Changed = changed });
+            _prevRegs[name] = vs;
+        }
         // individual CPU flags (decoded from rflags/eflags), each editable as 0/1
         ulong fl = regs[regs.Is32 ? "eflags" : "rflags"];
         foreach (var (fname, bit) in Flags)
-            rows.Add(new RegRow { Name = fname, Value = ((fl >> bit) & 1).ToString(), Deref = (((fl >> bit) & 1) != 0) ? "set" : "" });
+        {
+            string vs = ((fl >> bit) & 1).ToString();
+            bool changed = highlightChanges && _prevRegs.TryGetValue(fname, out var pv) && pv != vs;
+            rows.Add(new RegRow { Name = fname, Value = vs, Deref = (((fl >> bit) & 1) != 0) ? "set" : "", Changed = changed });
+            _prevRegs[fname] = vs;
+        }
         _regs.ItemsSource = rows;
 
         // stack (editable: Value commits write to process memory)
         int ptr = regs.Is32 ? 4 : 8;
         var sb = _session.Engine.ReadMemory(regs.Sp, ptr * 24);
         var stackRows = new List<StackRow>();
+        var newStack = new Dictionary<ulong, ulong>();   // rebuilt each stop so it tracks only the visible slots (bounded)
         for (int i = 0; i + ptr <= sb.Length; i += ptr)
         {
             ulong slot = regs.Sp + (ulong)i;
             ulong val = ptr == 8 ? BitConverter.ToUInt64(sb, i) : BitConverter.ToUInt32(sb, i);
-            stackRows.Add(new StackRow { Addr = slot.ToString("X" + w), Value = val.ToString("X" + w), Deref = deref?.Describe(val) ?? "", Slot = slot, ValueRaw = val });
+            bool changed = highlightChanges && _prevStack.TryGetValue(slot, out var pv) && pv != val;
+            stackRows.Add(new StackRow { Addr = slot.ToString("X" + w), Value = val.ToString("X" + w), Deref = deref?.Describe(val) ?? "", Slot = slot, ValueRaw = val, Changed = changed });
+            newStack[slot] = val;
         }
         _stack.ItemsSource = stackRows;
+        _prevStack = newStack;
 
         // call stack
         _calls.Items.Clear(); _callVas.Clear();
@@ -235,9 +273,10 @@ public sealed class DebugPanel : Grid
             _dump.WriteByteAt = (va, b) => _session?.Engine.WriteMemory(va, [b]) ?? false;
             _dumpInit = true;
             if (_dumpAddr == 0) _dumpAddr = regs.Sp;
-            _dump.GoTo(_dumpAddr);
+            _dump.GoTo(_dumpAddr);   // SetImage cleared the change baseline; the call below captures the first one
         }
-        else _dump.InvalidateView();   // re-read after stepping
+        // Re-read after stepping, washing bytes that changed since the last stop (suppressed on an edit refresh).
+        _dump.RefreshWithChangeHighlight(highlight: highlightChanges);
     }
 
     private void OnRegEdit(object? sender, DataGridCellEditEndingEventArgs e)
@@ -259,7 +298,7 @@ public sealed class DebugPanel : Grid
         else if (ulong.TryParse(tb.Text.Replace("0x", "").Trim(), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var val))
             _session.Engine.SetRegister(row.Name, val, _viewTid);
 
-        Dispatcher.BeginInvoke(Refresh);
+        Dispatcher.BeginInvoke(() => Refresh());   // edit refresh: no change-highlight (advances the baseline)
     }
 
     private void OnStackEdit(object? sender, DataGridCellEditEndingEventArgs e)
@@ -271,7 +310,7 @@ public sealed class DebugPanel : Grid
             var bytes = _session.Engine.Is32 ? BitConverter.GetBytes((uint)val) : BitConverter.GetBytes(val);
             _session.Engine.WriteMemory(row.Slot, bytes);
         }
-        Dispatcher.BeginInvoke(Refresh);
+        Dispatcher.BeginInvoke(() => Refresh());   // edit refresh: no change-highlight (advances the baseline)
     }
 
     private void OnStackActivate(object? sender, MouseButtonEventArgs e)

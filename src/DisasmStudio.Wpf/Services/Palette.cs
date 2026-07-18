@@ -107,5 +107,14 @@ public static class Palette
     public static readonly SolidColorBrush SelOverlayBrush =
         Freeze(new SolidColorBrush(Color.FromArgb(0x66, Accent.R, Accent.G, Accent.B)));
 
+    /// <summary>Hex-view "changed since last step" wash — red at ~40% alpha, so it composes
+    /// with the selection / edit washes while debugging.</summary>
+    public static readonly SolidColorBrush ChangedByteBrush =
+        Freeze(new SolidColorBrush(Color.FromArgb(0x66, Red.R, Red.G, Red.B)));
+
+    /// <summary>Solid soft-red tint (Base↔Red) for a "changed since last step" cell in the
+    /// register / stack grids, where a solid fill reads cleaner than a translucent wash.</summary>
+    public static readonly SolidColorBrush DangerSoftBrush = F(DangerSoft);
+
     private static SolidColorBrush Freeze(SolidColorBrush b) { b.Freeze(); return b; }
 }

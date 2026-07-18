@@ -95,6 +95,16 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for the "changed since last step" memory highlight (HexView.DiffChangedVas + the live
+        // control path): assert exact changed-VA sets over in-place/scroll cases, then drive a real HexView over a
+        // RawImage — baseline, mutate a byte, confirm exactly that VA flags and it renders. Prints, exits — no UI.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-memdiff")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = MemDiffSmoke.Run();
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }
