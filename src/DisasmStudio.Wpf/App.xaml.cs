@@ -86,6 +86,15 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for the Entropy tab's math (EntropyData.Build): build the per-block / per-section
+        // entropy profile of a synthetic zero/uniform/constant blob and assert min≈0, max≈8, overall in between.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-entropy")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = EntropySmoke.Run(e.Args.Length > 1 ? e.Args[1] : null);
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }

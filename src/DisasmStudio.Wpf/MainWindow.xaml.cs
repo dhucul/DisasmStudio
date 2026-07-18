@@ -91,6 +91,8 @@ public partial class MainWindow : Window
     private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
     private bool _openingGraph;              // guards OnCenterTabChanged from re-opening the graph at the caret during an explicit "open in graph"
     private CallGraph? _callGraph;           // whole-program static call graph, built lazily on first Call Graph tab view
+    private EntropyData? _entropy;           // per-block + per-section byte entropy, built lazily on first Entropy tab view
+    private int _entropyGen;                 // bumps per file/build so a stale background compute discards its result
 
     // How the current DLL session is hosted, so Restart can relaunch it identically.
     private readonly record struct DllDebugParams(string HostExe, string CommandLine, string? WorkingDir, string DllPath, uint BreakRva, bool BreakIsEntry);
@@ -1017,6 +1019,7 @@ public partial class MainWindow : Window
         if (e.Source is not TabControl tc) return;
         if (tc.SelectedItem is TabItem { Header: "Strings" }) RefreshLiveStrings();
         else if (tc.SelectedItem is TabItem { Header: "Call Graph" }) EnsureCallGraph();
+        else if (tc.SelectedItem is TabItem { Header: "Entropy" }) EnsureEntropy();
         SyncAccordionToSelection();
     }
 
@@ -1115,6 +1118,33 @@ public partial class MainWindow : Window
         _callGraph ??= CallGraph.Build(_result);
         CallGraphPanel.Attach(_result, _callGraph);
         if (CallGraphPanel.Follow && _nav.Current is ulong cur) CallGraphPanel.SetRoot(cur);
+    }
+
+    /// <summary>Compute the file's byte-entropy on first view of the Entropy tab (a whole-file scan, so it's
+    /// built lazily off the UI thread, not on every load) and hand it to the graph + per-section table. Cached
+    /// per file; the generation guard drops a result whose file was swapped out while it was still computing.</summary>
+    private async void EnsureEntropy()
+    {
+        if (_result is null || _entropy is not null) return;
+        var img = _result.Image;
+        int gen = ++_entropyGen;
+        EntropyGraph.SetData(null);
+        EntropySectionGrid.ItemsSource = null;
+        EntropyHeader.Text = "Computing entropy…";
+        try
+        {
+            var data = await Task.Run(() => EntropyData.Build(img));
+            if (gen != _entropyGen) return;   // a different file was loaded while we were computing — discard
+            _entropy = data;
+            EntropyGraph.SetData(data);
+            EntropySectionGrid.ItemsSource = data.Sections;
+            EntropyHeader.Text =
+                $"File entropy: {data.Overall:F2} bits/byte  ·  0–8 across file offset; high (≈8) = compressed / encrypted / packed. Hover the graph for offset + value.";
+        }
+        catch (Exception ex)
+        {
+            if (gen == _entropyGen) EntropyHeader.Text = $"Entropy unavailable: {ex.Message}";
+        }
     }
 
     /// <summary>Root the call graph at the function containing <paramref name="va"/> and switch to its tab.
@@ -2639,6 +2669,7 @@ public partial class MainWindow : Window
             _result = result;
             result.UseMarkup(_markup);   // overlay user renames/comments (and re-apply function-start renames) onto the fresh analysis
             _callGraph = null;           // rebuilt lazily against the new result on the next Call Graph tab view
+            _entropy = null; _entropyGen++;   // recomputed lazily on the next Entropy tab view; bump drops any in-flight compute for the old file
             PopulateLists(result);
             Linear.SetResult(result);
             Hex.SetImage(image);
@@ -2773,6 +2804,10 @@ public partial class MainWindow : Window
         SectionList.ItemsSource = null;
         MemMapGrid.ItemsSource = null;
         MemMapStrip.SetRegions([]);
+        _entropy = null; _entropyGen++;   // bump drops any in-flight background compute
+        EntropyGraph.SetData(null);
+        EntropySectionGrid.ItemsSource = null;
+        EntropyHeader.Text = "";
         ResTree.ItemsSource = null;
         ResPreviewHost.Content = null;
         ResSaveBtn.IsEnabled = false;

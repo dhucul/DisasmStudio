@@ -194,6 +194,8 @@
                                 <WrapPanel>
                                     <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Memory Map"
                                                  Tag="{Binding ElementName=MemoryMapTab}" Click="OnSidePanelChip" />
+                                    <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Entropy"
+                                                 Tag="{Binding ElementName=EntropyTab}" Click="OnSidePanelChip" />
                                     <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Sections"
                                                  Tag="{Binding ElementName=SectionsTab}" Click="OnSidePanelChip" />
                                     <RadioButton Style="{StaticResource PanelChip}" GroupName="SidePanel" Content="Resources"
@@ -278,6 +280,38 @@
                                                         ElementStyle="{StaticResource GridCellText}" />
                                 </DataGrid.Columns>
                             </DataGrid>
+                        </DockPanel>
+                    </TabItem>
+                    <TabItem x:Name="EntropyTab" Header="Entropy">
+                        <DockPanel>
+                            <TextBlock x:Name="EntropyHeader" DockPanel.Dock="Top" Margin="10,8,10,4" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextMuted}" FontSize="11"
+                                       Text="Byte entropy across the file (0–8 bits/byte). High (≈8) = compressed / encrypted / packed. Hover the graph for offset + value." />
+                            <DataGrid x:Name="EntropySectionGrid" DockPanel.Dock="Bottom" MaxHeight="220"
+                                      Margin="0,4,0,0" AutoGenerateColumns="False" HeadersVisibility="Column"
+                                      CanUserAddRows="False" CanUserReorderColumns="False" CanUserResizeRows="False"
+                                      CanUserSortColumns="False">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Section" Binding="{Binding Name}"    Width="Auto" MinWidth="72"
+                                                        ElementStyle="{StaticResource GridCellText}" />
+                                    <DataGridTextColumn Header="Entropy" Binding="{Binding Entropy}" Width="Auto" MinWidth="56"
+                                                        ElementStyle="{StaticResource GridCellAccent}" />
+                                    <DataGridTemplateColumn Header="" Width="*" MinWidth="80">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <ProgressBar Minimum="0" Maximum="1" Value="{Binding Fraction}"
+                                                             Height="9" Margin="4,0" VerticalAlignment="Center"
+                                                             BorderThickness="0"
+                                                             Background="{StaticResource Surface2}"
+                                                             Foreground="{StaticResource Accent}" />
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Header="" Binding="{Binding Flag}" Width="Auto" MinWidth="48"
+                                                        ElementStyle="{StaticResource GridCellMuted}" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <ctl:EntropyView x:Name="EntropyGraph" Margin="8,2,8,6" MinHeight="120" />
                         </DockPanel>
                     </TabItem>
                     <TabItem x:Name="StringsTab" Header="Strings">
