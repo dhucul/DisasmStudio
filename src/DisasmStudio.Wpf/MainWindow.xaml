@@ -299,7 +299,7 @@
                                     <DataGridTemplateColumn Header="" Width="*" MinWidth="80">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <ProgressBar Minimum="0" Maximum="1" Value="{Binding Fraction}"
+                                                <ProgressBar Minimum="0" Maximum="1" Value="{Binding Fraction, Mode=OneWay}"
                                                              Height="9" Margin="4,0" VerticalAlignment="Center"
                                                              BorderThickness="0"
                                                              Background="{StaticResource Surface2}"

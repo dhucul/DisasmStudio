@@ -52,6 +52,9 @@ internal static class EntropySmoke
 
             // Exercise the graph control's OnRender headlessly (we're on WPF's STA thread inside the live App):
             // arrange an EntropyView, render it to a bitmap, and confirm it drew more than a flat background.
+            // NOTE: the section-table DataGrid/ProgressBar binding cannot be exercised here — the read-only-binding
+            // activation only fires under the real app's render/message loop, so that path is verified end-to-end
+            // via UI Automation (open the Entropy tab on a real file) rather than in this headless self-test.
             bool renderOk = RenderProducesGraph(d, Log);
 
             pass = blocksOk && overallOk && sectionsOk && renderOk;
