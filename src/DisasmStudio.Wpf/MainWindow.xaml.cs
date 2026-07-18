@@ -93,6 +93,7 @@ public partial class MainWindow : Window
     private CallGraph? _callGraph;           // whole-program static call graph, built lazily on first Call Graph tab view
     private EntropyData? _entropy;           // per-block + per-section byte entropy, built lazily on first Entropy tab view
     private int _entropyGen;                 // bumps per file/build so a stale background compute discards its result
+    private bool _entropyComputing;          // a Build is in flight for the current gen — skips a redundant re-compute
 
     // How the current DLL session is hosted, so Restart can relaunch it identically.
     private readonly record struct DllDebugParams(string HostExe, string CommandLine, string? WorkingDir, string DllPath, uint BreakRva, bool BreakIsEntry);
@@ -1125,9 +1126,13 @@ public partial class MainWindow : Window
     /// per file; the generation guard drops a result whose file was swapped out while it was still computing.</summary>
     private async void EnsureEntropy()
     {
-        if (_result is null || _entropy is not null) return;
+        // Skip if already computed, or a Build for the current state is already in flight (re-selecting the tab
+        // mid-compute must not start a redundant second Build). Invalidation clears _entropyComputing, so a
+        // genuinely-new file/image is never blocked here.
+        if (_result is null || _entropy is not null || _entropyComputing) return;
         var img = _result.Image;
         int gen = ++_entropyGen;
+        _entropyComputing = true;
         EntropyGraph.SetData(null);
         EntropySectionGrid.ItemsSource = null;
         EntropyHeader.Text = "Computing entropy…";
@@ -1144,6 +1149,12 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             if (gen == _entropyGen) EntropyHeader.Text = $"Entropy unavailable: {ex.Message}";
+        }
+        finally
+        {
+            // Only the current compute clears the flag — a superseded one leaves it set for its successor, which
+            // an invalidation (that bumped the gen) has already reset if no successor started.
+            if (gen == _entropyGen) _entropyComputing = false;
         }
     }
 
@@ -2770,8 +2781,9 @@ public partial class MainWindow : Window
 
         // The result/image just changed (new file, re-analysis after a patch, or a live/static debug swap) — drop
         // any cached entropy so the next Entropy-tab view recomputes; bump the generation to discard an in-flight
-        // background compute for the previous image. Refresh immediately if the Entropy tab is currently open.
-        _entropy = null; _entropyGen++;
+        // background compute for the previous image, and clear the busy flag so this new state isn't blocked.
+        // Refresh immediately if the Entropy tab is currently open.
+        _entropy = null; _entropyGen++; _entropyComputing = false;
         if (SideTabs.SelectedItem is TabItem { Header: "Entropy" }) EnsureEntropy();
     }
 
@@ -2809,7 +2821,7 @@ public partial class MainWindow : Window
         SectionList.ItemsSource = null;
         MemMapGrid.ItemsSource = null;
         MemMapStrip.SetRegions([]);
-        _entropy = null; _entropyGen++;   // bump drops any in-flight background compute
+        _entropy = null; _entropyGen++; _entropyComputing = false;   // bump drops any in-flight background compute
         EntropyGraph.SetData(null);
         EntropySectionGrid.ItemsSource = null;
         EntropyHeader.Text = "";
