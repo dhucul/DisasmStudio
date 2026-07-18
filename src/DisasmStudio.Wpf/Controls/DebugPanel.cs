@@ -194,6 +194,17 @@ public sealed class DebugPanel : Grid
         return item;
     }
 
+    /// <summary>Scroll the Memory dump so <paramref name="va"/> (the address the current instruction writes to)
+    /// sits on the top row, selected across the written width. No-op until the dump is initialized (first stop).
+    /// The change baseline is re-captured by the <see cref="Refresh(bool)"/> that follows in the stop handler,
+    /// so the followed bytes highlight red on the next step.</summary>
+    public void FollowInDump(ulong va, int size)
+    {
+        if (!_dumpInit) return;
+        _dumpAddr = va;
+        _dump.GoTo(va, select: true, length: Math.Max(1, size), atTop: true);
+    }
+
     public void Refresh() => Refresh(false);
 
     /// <summary>Rebuild the register / stack / memory views from the frozen debuggee. When

@@ -211,7 +211,7 @@ public sealed class HexView : Grid
     /// <summary>Test hook: the VAs flagged as changed by the last <see cref="RefreshWithChangeHighlight"/>.</summary>
     internal IReadOnlyCollection<ulong> ChangedVasForTest => _changedVas;
 
-    public void GoTo(ulong address, bool select = false, int length = 1)
+    public void GoTo(ulong address, bool select = false, int length = 1, bool atTop = false)
     {
         if (_image is null) return;
         if (address < _image.MinVa) address = _image.MinVa;
@@ -232,7 +232,8 @@ public sealed class HexView : Grid
         }
 
         ulong aligned = address - (address % BytesPerRow);
-        ulong back = (ulong)(Math.Max(0, VisibleRows / 2) * BytesPerRow);
+        // Normally centre the target; atTop puts it on the first row (used by the debugger's "follow writes").
+        ulong back = atTop ? 0UL : (ulong)(Math.Max(0, VisibleRows / 2) * BytesPerRow);
         _topAddress = aligned > _image.MinVa + back ? aligned - back : _image.MinVa;
 
         SyncScrollValue();

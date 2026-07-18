@@ -1929,6 +1929,16 @@ public partial class MainWindow : Window
         Linear.SetCurrentIp(_dbg.CurrentIp);
         RecomputeCurrentJump();   // colour the current conditional jump from the live flags (auto, before any toggle)
         Linear.Refresh();
+        // Follow-writes: scroll both memory views so the address the current instruction writes to is at the top.
+        // Done BEFORE the two Refresh/RefreshWithChangeHighlight calls so their change baselines capture the
+        // followed region — the written bytes then wash red on the next step.
+        if (FollowWritesToggle.IsChecked == true && _dbg.LiveDecoder is { } fdec && _dbg.Registers is { } fregs
+            && fdec.TryDecodeAt(_dbg.CurrentIp, out var finsn)
+            && WriteTarget.TryResolve(finsn, fregs, out ulong wea, out int wsize))
+        {
+            Hex.GoTo(wea, select: true, length: wsize, atTop: true);   // main Hex tab
+            Debug.FollowInDump(wea, wsize);                            // debug panel Memory dump
+        }
         Debug.Refresh(highlightChanges: true);
         Hex.RefreshWithChangeHighlight();   // re-read the Hex tab on every stop (no longer stale) and wash changed bytes
         RefreshBreakpointList();   // now showing live (rebased) breakpoints; reflects the pre-run set just armed

@@ -105,6 +105,15 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for the "follow writes" resolver (WriteTarget.TryResolve): decode a few x64 stores /
+        // reads / a push and assert the resolved memory-write effective address + width. Prints, exits — no UI.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-followwrite")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = FollowWriteSmoke.Run();
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }
