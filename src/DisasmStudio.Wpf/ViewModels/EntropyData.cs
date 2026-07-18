@@ -65,6 +65,9 @@ public sealed class EntropyData
             sections.Add(new SectionEntropyItem(s.Name, e));
             bounds.Add((s.Name, s.FileOffset, (long)s.FileOffset + s.FileSize));
         }
+        // Graph dividers/labels are laid out left→right, so order them by file offset (section-table order is
+        // usually ascending but not guaranteed). The per-section table keeps natural order via `sections`.
+        bounds.Sort((a, b) => a.Item2.CompareTo(b.Item2));
 
         return new EntropyData
         {

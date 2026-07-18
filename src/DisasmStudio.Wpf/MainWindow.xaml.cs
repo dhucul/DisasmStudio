@@ -2669,8 +2669,7 @@ public partial class MainWindow : Window
             _result = result;
             result.UseMarkup(_markup);   // overlay user renames/comments (and re-apply function-start renames) onto the fresh analysis
             _callGraph = null;           // rebuilt lazily against the new result on the next Call Graph tab view
-            _entropy = null; _entropyGen++;   // recomputed lazily on the next Entropy tab view; bump drops any in-flight compute for the old file
-            PopulateLists(result);
+            PopulateLists(result);       // also invalidates _entropy (recomputed lazily on the next Entropy tab view)
             Linear.SetResult(result);
             Hex.SetImage(image);
             if (fresh) ProbeManaged(image);   // light up the C#/.NET tabs when this PE is a managed assembly
@@ -2768,6 +2767,12 @@ public partial class MainWindow : Window
         ResHeader.Text = result.Image.Resources is { Roots.Count: > 0 } ? "Select a resource" : "No resources";
         RefreshBreakpointList();
         RefreshBookmarkList();
+
+        // The result/image just changed (new file, re-analysis after a patch, or a live/static debug swap) — drop
+        // any cached entropy so the next Entropy-tab view recomputes; bump the generation to discard an in-flight
+        // background compute for the previous image. Refresh immediately if the Entropy tab is currently open.
+        _entropy = null; _entropyGen++;
+        if (SideTabs.SelectedItem is TabItem { Header: "Entropy" }) EnsureEntropy();
     }
 
     /// <summary>Build the Memory Map rows for the loaded image: the header (if any) + every section, sorted by
