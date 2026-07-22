@@ -114,6 +114,15 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // Hidden self-test for editing strings in their existing allocation: ASCII/UTF-16LE encoding,
+        // NUL-padding, scanner refresh, invalid-input rejection, and static patch undo.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-string-edit")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int rc = StringEditSmoke.Run();
+            Shutdown(rc);
+            return;
+        }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }
 }

@@ -29,8 +29,7 @@ public sealed class ProcessSnapshotImage : IBinaryImage
 
     private readonly byte[] _backing;       // the whole .dssnap file; segment bytes live at their data offsets
     private readonly Seg[] _segs;           // sorted by Va
-    private bool _dirty;
-    private int _patchCount;
+    private readonly InPlacePatchMap _edits;
 
     private readonly record struct Seg(ulong Va, int Start, int Size, uint Characteristics, string Name);
 
@@ -57,6 +56,7 @@ public sealed class ProcessSnapshotImage : IBinaryImage
     {
         FilePath = path;
         _backing = backing;
+        _edits = new InPlacePatchMap(_backing);
         Bitness = bitness == 64 ? 64 : 32;
         ImageBase = imageBase;
         EntryVa = entryVa;
@@ -192,21 +192,15 @@ public sealed class ProcessSnapshotImage : IBinaryImage
     }
 
     // ---- patching (in place over the backing; persisted by re-writing the container) ----
-    public void Patch(int offset, ReadOnlySpan<byte> bytes)
-    {
-        if (offset < 0 || offset >= _backing.Length || bytes.Length == 0) return;
-        int n = Math.Min(bytes.Length, _backing.Length - offset);
-        bytes[..n].CopyTo(_backing.AsSpan(offset, n));
-        _dirty = true; _patchCount += n;
-    }
+    public void Patch(int offset, ReadOnlySpan<byte> bytes) => _edits.Patch(offset, bytes);
     public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes) { int o = VaToOffset(va); if (o < 0) return false; Patch(o, bytes); return true; }
-    public void RevertPatch(int offset, int count) { }
-    public bool IsPatchedAt(int offset) => false;
-    public bool IsDirty => _dirty;
-    public int PatchCount => _patchCount;
-    public IReadOnlyDictionary<int, byte> Patches => System.Collections.Immutable.ImmutableDictionary<int, byte>.Empty;
-    public bool Undo() => false;
-    public bool CanUndo => false;
+    public void RevertPatch(int offset, int count) => _edits.RevertPatch(offset, count);
+    public bool IsPatchedAt(int offset) => _edits.IsPatchedAt(offset);
+    public bool IsDirty => _edits.IsDirty;
+    public int PatchCount => _edits.PatchCount;
+    public IReadOnlyDictionary<int, byte> Patches => _edits.Patches;
+    public bool Undo() => _edits.Undo();
+    public bool CanUndo => _edits.CanUndo;
     public void SavePatchedAs(string path) => File.WriteAllBytes(path, _backing);
 
     private static void WriteU32(byte[] b, int o, uint v) => BitConverter.GetBytes(v).CopyTo(b, o);

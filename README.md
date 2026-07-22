@@ -85,7 +85,12 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   `loc_` labels, and the `jmp` is annotated `; switch (N cases)`. True dynamic dispatch (vtables,
   function pointers) is left indirect, as it should be.
 - **Hex view:** on-demand, virtualized over the whole address space; **editable** — type hex over the
-  caret byte (edited bytes highlighted).
+  caret byte (edited bytes highlighted). String/Search results are rescanned from the patched bytes after
+  an edit, so those panels do not retain the original text.
+- **Editable strings:** select an ASCII or UTF-16LE row in **Strings** and press **F2** (or right-click →
+  *Edit string…*) to replace it in place. Equal-length or shorter text is supported; shorter replacements
+  are NUL-padded, participate in Ctrl+Z and *Save Patched As…*, and live-debug rows can be edited in the
+  stopped process as an explicitly memory-only change.
 - **Patching (x86/x64):** right-click an instruction → *Patch…* to assemble a replacement (`nop`,
   `jmp 0x…`, `mov eax, 1`, branches, simple ALU/mov ops — via Iced's encoder) or NOP it out; raw hex
   bytes are also accepted. Patches cover whole instructions and NOP-pad the remainder to stay aligned.

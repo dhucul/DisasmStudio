@@ -539,6 +539,87 @@ internal static class Dialogs
         return result;
     }
 
+    /// <summary>Edit a scanned string in its existing allocation. The field preserves leading/trailing spaces,
+    /// validates continuously against <see cref="StringEditCodec"/>, and returns null when cancelled.</summary>
+    public static string? AskStringEdit(Window owner, ulong va, string initial, int capacityChars, bool wide,
+        bool allowLineBreaks)
+    {
+        string encoding = wide ? "UTF-16LE" : allowLineBreaks ? "ASCII (tabs/line breaks allowed)" : "ASCII";
+        var box = new TextBox
+        {
+            Text = initial,
+            FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+            AcceptsReturn = allowLineBreaks,
+            AcceptsTab = true,
+            MinWidth = 440,
+            MinLines = allowLineBreaks ? 3 : 1,
+            MaxLines = allowLineBreaks ? 8 : 1,
+            TextWrapping = allowLineBreaks ? TextWrapping.Wrap : TextWrapping.NoWrap,
+            VerticalScrollBarVisibility = allowLineBreaks ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden,
+        };
+        var count = new TextBlock
+        {
+            Foreground = Muted,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 5, 0, 0),
+        };
+        var error = new TextBlock
+        {
+            Foreground = Palette.RedBrush,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 5, 0, 0),
+        };
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label($"{va:X}  ·  {encoding}  ·  capacity {capacityChars:N0} characters"));
+        panel.Children.Add(box);
+        panel.Children.Add(count);
+        panel.Children.Add(error);
+
+        var win = new Window
+        {
+            Title = "Edit string",
+            Owner = owner,
+            Width = 500,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            Background = Bg,
+            Foreground = Fg,
+        };
+        string? result = null;
+        var ok = new Button { Content = "Apply", IsDefault = true, MinWidth = 70, Margin = new Thickness(0, 0, 8, 0) };
+        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 70 };
+        void Validate()
+        {
+            bool valid = StringEditCodec.TryEncode(box.Text, capacityChars, wide, allowLineBreaks,
+                out _, out string why);
+            count.Text = $"{box.Text.Length:N0} / {capacityChars:N0}";
+            error.Text = valid ? "" : why;
+            ok.IsEnabled = valid;
+        }
+        box.TextChanged += (_, _) => Validate();
+        ok.Click += (_, _) => { result = box.Text; win.DialogResult = true; };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(16, 0, 16, 16),
+        };
+        buttons.Children.Add(ok);
+        buttons.Children.Add(cancel);
+        var root = new DockPanel();
+        DockPanel.SetDock(buttons, Dock.Bottom);
+        root.Children.Add(buttons);
+        root.Children.Add(panel);
+        win.Content = root;
+
+        box.Loaded += (_, _) => { box.SelectAll(); box.Focus(); };
+        Validate();
+        win.ShowDialog();
+        return result;
+    }
+
     /// <summary>Ask for a single line of text, pre-filled with <paramref name="initial"/> (selected, so typing
     /// replaces it). Used for rename / comment prompts. Returns the entered text (which may be empty — the
     /// caller treats empty as "clear"), or null if cancelled. <paramref name="multiline"/> gives a taller box.</summary>

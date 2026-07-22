@@ -29,16 +29,36 @@ public sealed class AnalysisResult
     }
 
     public required XrefDatabase Xrefs { get; init; }
-    public required IReadOnlyList<FoundString> Strings { get; init; }
+
+    private IReadOnlyList<FoundString> _strings = [];
+    public required IReadOnlyList<FoundString> Strings
+    {
+        get => _strings;
+        init => _strings = value;
+    }
 
     /// <summary>Indirect-jmp VA → recovered switch/jump-table case targets (so the CFG can follow them).</summary>
     public required IReadOnlyDictionary<ulong, ulong[]> JumpTables { get; init; }
 
     /// <summary>String VA → a data slot pointing at it (a pointer-table entry), for resolving strings
     /// reached only through a pointer. Precomputed so a double-click never scans on the UI thread.</summary>
-    public required IReadOnlyDictionary<ulong, ulong> StringPointerSlots { get; init; }
+    private IReadOnlyDictionary<ulong, ulong> _stringPointerSlots = new Dictionary<ulong, ulong>();
+    public required IReadOnlyDictionary<ulong, ulong> StringPointerSlots
+    {
+        get => _stringPointerSlots;
+        init => _stringPointerSlots = value;
+    }
 
     public required IReadOnlyList<string> Warnings { get; init; }
+
+    /// <summary>Replace the byte-derived string snapshot after an in-memory patch and refresh its pointer-table
+    /// lookup in the same UI-thread operation. Cross-references and analysis comments intentionally remain the
+    /// original analysis snapshot; only string browsing/search state is refreshed.</summary>
+    public void ReplaceStrings(IReadOnlyList<FoundString> strings, IReadOnlyDictionary<ulong, ulong> pointerSlots)
+    {
+        _strings = strings;
+        _stringPointerSlots = pointerSlots;
+    }
 
     // ---- names / comments (machine layer + user markup overlay) --------------------------------
 

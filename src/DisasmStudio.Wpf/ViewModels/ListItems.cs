@@ -23,6 +23,8 @@ public sealed class StringItem(FoundString s)
 {
     public ulong Va => s.Va;
     public string Address => s.Va.ToString("X");
+    public bool Wide => s.Wide;
+    public int Length => s.Length;
     public string Kind => s.Wide ? "wide" : "ascii";
     public string Text => s.Text;
 

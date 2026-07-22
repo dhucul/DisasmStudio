@@ -326,7 +326,14 @@
                             </DockPanel>
                             <TextBox x:Name="StringFilter" DockPanel.Dock="Top" Margin="8,2,8,6" TextChanged="OnStringFilter" />
                             <ListBox x:Name="StringList" MouseDoubleClick="OnStringActivate"
+                                     KeyDown="OnStringListKeyDown" PreviewMouseRightButtonDown="OnStringRightClick"
                                      FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                <ListBox.ContextMenu>
+                                    <ContextMenu Opened="OnStringMenuOpening">
+                                        <MenuItem x:Name="EditStringMenuItem" Header="Edit string…" InputGestureText="F2"
+                                                  Click="OnEditString" />
+                                    </ContextMenu>
+                                </ListBox.ContextMenu>
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 
@@ -17,7 +18,9 @@ public sealed class MappedFile : IDisposable
 {
     private readonly MemoryMappedFile _mmf;
     private readonly MemoryMappedViewAccessor _view;
-    private readonly Dictionary<int, byte> _patches = [];   // in-memory edits, overlaid on every read
+    // Reads happen on background analysis/string-scan threads while the UI can add another patch. A concurrent
+    // map keeps those overlay probes/enumerations safe; the undo list itself remains UI-thread-owned.
+    private readonly ConcurrentDictionary<int, byte> _patches = [];   // in-memory edits, overlaid on every read
     private readonly List<Dictionary<int, (bool Had, byte Val)>> _undo = [];   // per-Patch pre-edit state, for undo
     private bool _disposed;
 
@@ -122,14 +125,14 @@ public sealed class MappedFile : IDisposable
         var group = _undo[^1];
         _undo.RemoveAt(_undo.Count - 1);
         foreach (var kv in group)
-            if (kv.Value.Had) _patches[kv.Key] = kv.Value.Val; else _patches.Remove(kv.Key);
+            if (kv.Value.Had) _patches[kv.Key] = kv.Value.Val; else _patches.TryRemove(kv.Key, out _);
         return true;
     }
 
     /// <summary>Drop edits in [offset, offset+count), restoring the original bytes.</summary>
     public void RevertPatch(int offset, int count)
     {
-        for (int i = 0; i < count; i++) _patches.Remove(offset + i);
+        for (int i = 0; i < count; i++) _patches.TryRemove(offset + i, out _);
     }
 
     /// <summary>Write the original file plus all edits to <paramref name="dest"/> (must differ from the open file).</summary>

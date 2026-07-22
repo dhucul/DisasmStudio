@@ -12,13 +12,13 @@ public sealed class PeMemoryImage : IBinaryImage
     private readonly byte[] _bytes;
     private readonly PeView _view;
     private readonly List<Section> _sections;
-    private bool _dirty;
-    private int _patchCount;
+    private readonly InPlacePatchMap _edits;
 
     private PeMemoryImage(string path, byte[] bytes, PeView view, ulong? imageBaseOverride)
     {
         FilePath = path;
         _bytes = bytes;
+        _edits = new InPlacePatchMap(_bytes);
         _view = view;
         ImageBase = imageBaseOverride is { } b && b != 0 ? b : view.ImageBase;
         _sections = BuildSections(bytes, view, ImageBase);
@@ -121,14 +121,7 @@ public sealed class PeMemoryImage : IBinaryImage
 
     public byte ReadByteAtOffset(int offset) => (uint)offset < (uint)_bytes.Length ? _bytes[offset] : (byte)0;
 
-    public void Patch(int offset, ReadOnlySpan<byte> bytes)
-    {
-        if (offset < 0 || offset >= _bytes.Length || bytes.Length == 0) return;
-        int n = Math.Min(bytes.Length, _bytes.Length - offset);
-        bytes[..n].CopyTo(_bytes.AsSpan(offset, n));
-        _dirty = true;
-        _patchCount += n;
-    }
+    public void Patch(int offset, ReadOnlySpan<byte> bytes) => _edits.Patch(offset, bytes);
 
     public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes)
     {
@@ -138,13 +131,13 @@ public sealed class PeMemoryImage : IBinaryImage
         return true;
     }
 
-    public void RevertPatch(int offset, int count) { }
-    public bool IsPatchedAt(int offset) => false;
-    public bool IsDirty => _dirty;
-    public int PatchCount => _patchCount;
-    public IReadOnlyDictionary<int, byte> Patches => System.Collections.Immutable.ImmutableDictionary<int, byte>.Empty;
-    public bool Undo() => false;
-    public bool CanUndo => false;
+    public void RevertPatch(int offset, int count) => _edits.RevertPatch(offset, count);
+    public bool IsPatchedAt(int offset) => _edits.IsPatchedAt(offset);
+    public bool IsDirty => _edits.IsDirty;
+    public int PatchCount => _edits.PatchCount;
+    public IReadOnlyDictionary<int, byte> Patches => _edits.Patches;
+    public bool Undo() => _edits.Undo();
+    public bool CanUndo => _edits.CanUndo;
     public void SavePatchedAs(string path) => File.WriteAllBytes(path, _bytes);
 
     public Section? SectionAt(ulong va)

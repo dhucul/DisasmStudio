@@ -126,10 +126,32 @@ public partial class MainWindow : Window
     private int _liveStringsGen;             // bumped per live-strings scan; a stale background result is dropped
     private volatile bool _liveStringsScanning;   // a live-strings scan is in flight (don't pile up another)
     private bool _liveStringsPending;        // a stop arrived mid-scan; rescan once the in-flight scan finishes (UI thread only)
+    // Static strings are a byte-derived snapshot. Hex/string/patch edits mark it dirty and a short debounce
+    // coalesces nibble-by-nibble typing before a background rescan updates both Strings and unified Search.
+    private readonly DispatcherTimer _stringRefreshTimer;
+    private CancellationTokenSource? _staticStringsCts;
+    private int _staticStringsGen;
+    private bool _staticStringsDirty;
+    private bool _staticStringsScanning;
+    private bool _refreshStaticStringsAfterDebug;
+    private sealed record StaticStringSnapshot(List<FoundString> Strings, Dictionary<ulong, ulong> PointerSlots);
 
     public MainWindow()
     {
         InitializeComponent();
+        _stringRefreshTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(300),
+        };
+        _stringRefreshTimer.Tick += async (_, _) =>
+        {
+            _stringRefreshTimer.Stop();
+            if (_dbgViewLive)
+            {
+                if (_dbg is { IsStopped: true }) RefreshLiveStrings();
+            }
+            else await RefreshStaticStringsAsync();
+        };
         WireControls();
         EnableFileDrop();
         _nav.Navigated += OnNavigated;
@@ -1002,6 +1024,117 @@ public partial class MainWindow : Window
         StringHeader.Text = $"{_strings.Count:N0} strings";
     }
 
+    /// <summary>Mark the static byte-derived string state stale and coalesce rapid edits before rescanning.
+    /// <paramref name="immediate"/> bypasses the debounce for a committed string edit/manual refresh.</summary>
+    private void QueueStringRefresh(bool immediate = false)
+    {
+        if (_dbgViewLive)
+        {
+            _stringRefreshTimer.Stop();
+            if (immediate)
+            {
+                if (_dbg is { IsStopped: true }) RefreshLiveStrings();
+            }
+            else _stringRefreshTimer.Start();
+            return;
+        }
+        if (_result is null) return;
+
+        _staticStringsDirty = true;
+        _staticStringsGen++;
+        _staticStringsCts?.Cancel();
+        _stringRefreshTimer.Stop();
+        if (immediate) _ = RefreshStaticStringsAsync();
+        else _stringRefreshTimer.Start();
+    }
+
+    /// <summary>Cancel any queued scan when analysis/session state is about to replace its image/result.</summary>
+    private void CancelStaticStringRefresh()
+    {
+        _stringRefreshTimer.Stop();
+        _staticStringsCts?.Cancel();
+        _staticStringsCts = null;
+        _staticStringsDirty = false;
+        _staticStringsGen++;
+    }
+
+    /// <summary>Pause a static refresh while the live debugger owns the UI, remembering that the restored
+    /// static result still needs to be rebuilt. This also catches an edit made while a debugger is launching.</summary>
+    private void DeferStaticStringRefreshForDebug()
+    {
+        _refreshStaticStringsAfterDebug |= _staticStringsDirty || _staticStringsScanning;
+        CancelStaticStringRefresh();
+    }
+
+    /// <summary>Rebuild the static string snapshot from the currently patched image without blocking the UI.
+    /// A generation guard drops partial/stale results when another byte edit, file load, or debug session wins.</summary>
+    private async Task RefreshStaticStringsAsync()
+    {
+        if (_dbgViewLive || _result is null || !_staticStringsDirty) return;
+        if (_staticStringsScanning) return;   // the invalidation stays dirty; finally below schedules its successor
+
+        var result = _result;
+        int gen = _staticStringsGen;
+        _staticStringsDirty = false;
+        _staticStringsScanning = true;
+        var cts = new CancellationTokenSource();
+        _staticStringsCts = cts;
+        if (StringsTabVisible) StringHeader.Text = "Scanning strings…";
+        try
+        {
+            var snapshot = await Task.Run(() => ScanStaticStrings(result, cts.Token), cts.Token);
+            if (cts.IsCancellationRequested || gen != _staticStringsGen || !ReferenceEquals(_result, result) || _dbgViewLive) return;
+
+            result.ReplaceStrings(snapshot.Strings, snapshot.PointerSlots);
+            ShowStaticStrings(result);
+            BuildSearchIndex(result);
+            RefreshSearchResults();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            if (ReferenceEquals(_result, result))
+                StringHeader.Text = $"String refresh failed: {ex.Message}";
+        }
+        finally
+        {
+            if (ReferenceEquals(_staticStringsCts, cts)) _staticStringsCts = null;
+            cts.Dispose();
+            _staticStringsScanning = false;
+            if (_staticStringsDirty && !_dbgViewLive)
+            {
+                _stringRefreshTimer.Stop();
+                _stringRefreshTimer.Start();
+            }
+        }
+    }
+
+    /// <summary>Use the current analysis' data-reference gate/code classification so a refresh applies the same
+    /// executable-section filtering rules as the original x86/ARM/8051 analysis, then rebuild pointer slots.</summary>
+    private static StaticStringSnapshot ScanStaticStrings(AnalysisResult result, CancellationToken token)
+    {
+        List<FoundString> strings;
+        if (result.Image.IsNonX86)
+        {
+            var linear = result.Linear;
+            strings = StringScanner.Scan(result.Image, includeExecutable: true, token: token)
+                .Where(s => linear.Count > 0 && linear.IsDataAt(linear.IndexOf(s.Va)))
+                .ToList();
+        }
+        else
+        {
+            var dataTargets = result.Xrefs.AllOfKind(XrefKind.Data).Select(x => x.To).ToHashSet();
+            strings = StringScanner.Scan(result.Image, dataTargets, token: token);
+        }
+        token.ThrowIfCancellationRequested();
+
+        var slots = result.Image.IsNonX86
+            ? new Dictionary<ulong, ulong>()
+            : PointerScanner.BuildStringPointerMap(result.Image, strings.Select(s => s.Va).ToHashSet(), token: token);
+        token.ThrowIfCancellationRequested();
+        return new StaticStringSnapshot(strings, slots);
+    }
+
     /// <summary>Manual Strings-panel refresh (⟳ Refresh button). At a live stop it re-scans the debuggee's
     /// process memory so decrypted/unpacked strings show; while the debuggee is running the scan is skipped
     /// (memory can't be read mid-run); with no live session — including after the debuggee exits — it rebuilds
@@ -1009,7 +1142,7 @@ public partial class MainWindow : Window
     private void OnRefreshStrings(object sender, RoutedEventArgs e)
     {
         if (_dbgViewLive) RefreshLiveStrings();          // no-ops unless stopped (engine frozen)
-        else if (_result is not null) ShowStaticStrings(_result);
+        else if (_result is not null) QueueStringRefresh(immediate: true);
     }
 
     /// <summary>When the user switches to the Strings tab at a stop, refresh it to the current live strings.
@@ -1018,7 +1151,11 @@ public partial class MainWindow : Window
     private void OnSideTabChanged(object sender, SelectionChangedEventArgs e)
     {
         if (e.Source is not TabControl tc) return;
-        if (tc.SelectedItem is TabItem { Header: "Strings" }) RefreshLiveStrings();
+        if (tc.SelectedItem is TabItem { Header: "Strings" })
+        {
+            if (_dbgViewLive) RefreshLiveStrings();
+            else if (_staticStringsDirty) QueueStringRefresh(immediate: true);
+        }
         else if (tc.SelectedItem is TabItem { Header: "Call Graph" }) EnsureCallGraph();
         else if (tc.SelectedItem is TabItem { Header: "Entropy" }) EnsureEntropy();
         SyncAccordionToSelection();
@@ -1221,6 +1358,7 @@ public partial class MainWindow : Window
 
     private void BeginDebug(Action<DebugSession> start)
     {
+        DeferStaticStringRefreshForDebug();
         _savedResult = _result;
         _dbgViewLive = false;
         _dbg = new DebugSession(Dispatcher, _result);   // _result may be null: attach with no file open
@@ -1904,6 +2042,7 @@ public partial class MainWindow : Window
         if (!_dbgViewLive && _dbg.LiveResult is not null)
         {
             // switch the whole UI to the live (rebased) analysis + live decoder on the first stop
+            DeferStaticStringRefreshForDebug();
             _dbgViewLive = true;
             _result = _dbg.LiveResult;
             _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
@@ -2006,9 +2145,15 @@ public partial class MainWindow : Window
             PopulateLists(_result);
             Linear.SetResult(_result);
             Hex.SetImage(_image);
+            if (_refreshStaticStringsAfterDebug)
+            {
+                _refreshStaticStringsAfterDebug = false;
+                QueueStringRefresh(immediate: true);
+            }
         }
         else   // attach-without-file: no prior analysis to return to — reset to the empty state
         {
+            _refreshStaticStringsAfterDebug = false;
             _result = null; _savedResult = null;
             _funcStarts = [];
             ClearLists();
@@ -2089,14 +2234,25 @@ public partial class MainWindow : Window
         ulong end = va + (ulong)final.Length;
         _changeStack.Push(new ByteEdit(va, end, true));
         RepairIndex(va, end);          // local re-decode of just this region — no full re-sweep
+        QueueStringRefresh();
         UpdatePatchButtons();
     }
 
     private void OnHexEdited(ulong va)
     {
+        if (_dbgViewLive)
+        {
+            // LiveProcessImage has no file patch/undo map. Do not create a dead entry that could later undo an
+            // unrelated static-file patch; live edits exist only in the stopped process.
+            Hex.RefreshWithChangeHighlight(highlight: false);
+            QueueStringRefresh();
+            StatusText.Text = $"Edited live memory at {va:X} (memory-only; not saved or undoable).";
+            return;
+        }
         // Hex byte edits stay view-local (no linear re-index — typing must stay snappy on huge files);
         // tracked so undo stays in lock-step with the image's undo stack.
         _changeStack.Push(new ByteEdit(va, va + 1, false));
+        QueueStringRefresh();
         UpdatePatchButtons();
     }
 
@@ -2154,6 +2310,7 @@ public partial class MainWindow : Window
                 _changeStack.Pop();
                 _image.Undo();
                 if (b.IsPatch) RepairIndex(b.Start, b.End); else Hex.InvalidateView();
+                QueueStringRefresh();
                 break;
             case CreateFunctionEdit c:
                 _changeStack.Pop();
@@ -2648,6 +2805,7 @@ public partial class MainWindow : Window
         var prevImage = fresh ? _image : null;
         var prevDone = _analysisDone;
 
+        CancelStaticStringRefresh();
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
@@ -2740,6 +2898,7 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
+        CancelStaticStringRefresh();
         _cts?.Cancel();
         try { _mdbg?.Dispose(); } catch { }   // stop the out-of-process managed-debug host (+ its debuggee) cleanly
         _managed?.Dispose();
@@ -3118,6 +3277,96 @@ public partial class MainWindow : Window
         if (f.Length == 0 || o is not StringItem si) return true;
         return si.Text.Contains(f, StringComparison.OrdinalIgnoreCase);
     }
+
+    private void OnStringRightClick(object sender, MouseButtonEventArgs e)
+    {
+        var dep = e.OriginalSource as DependencyObject;
+        while (dep is not null and not ListBoxItem) dep = VisualTreeHelper.GetParent(dep);
+        if (dep is ListBoxItem row) row.IsSelected = true;
+    }
+
+    private void OnStringMenuOpening(object sender, RoutedEventArgs e) =>
+        EditStringMenuItem.IsEnabled = CanEditSelectedString();
+
+    private void OnStringListKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.F2 || Keyboard.Modifiers != ModifierKeys.None) return;
+        EditSelectedString();
+        e.Handled = true;
+    }
+
+    private void OnEditString(object sender, RoutedEventArgs e) => EditSelectedString();
+
+    private bool CanEditSelectedString()
+    {
+        if (StringList.SelectedItem is not StringItem si) return false;
+        if (_dbgViewLive) return _dbg is { IsStopped: true };
+        return _image is not null && _image.VaToOffset(si.Va) >= 0;
+    }
+
+    /// <summary>Patch the selected row in place. Static edits use one file-overlay transaction (one Ctrl+Z
+    /// step); live rows write only to the stopped process and deliberately do not enter the file undo/save path.</summary>
+    private void EditSelectedString()
+    {
+        if (StringList.SelectedItem is not StringItem si) return;
+        if (!CanEditSelectedString())
+        {
+            StatusText.Text = _dbgViewLive
+                ? "Pause the process before editing a live string."
+                : "That string is not backed by editable file bytes.";
+            return;
+        }
+
+        bool allowLineBreaks = _dbgViewLive && !si.Wide;
+        string? replacement = Dialogs.AskStringEdit(this, si.Va, si.Text, si.Length, si.Wide, allowLineBreaks);
+        if (replacement is null) return;
+        if (!StringEditCodec.TryEncode(replacement, si.Length, si.Wide, allowLineBreaks,
+                out var bytes, out string error))
+        {
+            MessageBox.Show(this, error, "Edit string", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (_dbgViewLive)
+        {
+            if (_dbg is not { IsStopped: true } dbg) return;
+            var current = dbg.Engine.ReadMemory(si.Va, bytes.Length);
+            if (current.Length != bytes.Length)
+            {
+                MessageBox.Show(this, "The complete string allocation could not be read from process memory.",
+                    "Edit string", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (current.AsSpan().SequenceEqual(bytes)) { StatusText.Text = "String is unchanged."; return; }
+            if (!dbg.Engine.WriteMemory(si.Va, bytes))
+            {
+                MessageBox.Show(this, "The process-memory write failed.", "Edit string",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            Hex.RefreshWithChangeHighlight(highlight: false);
+            QueueStringRefresh(immediate: true);
+            StatusText.Text = $"Edited live {si.Kind} string at {si.Va:X} (memory-only; not saved or undoable).";
+            return;
+        }
+
+        if (_image is null) return;
+        var old = _image.ReadBytesAtVa(si.Va, bytes.Length);
+        if (old.AsSpan().SequenceEqual(bytes)) { StatusText.Text = "String is unchanged."; return; }
+        if (!_image.PatchVa(si.Va, bytes))
+        {
+            MessageBox.Show(this, "That string is not file-backed.", "Edit string",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        _changeStack.Push(new ByteEdit(si.Va, si.Va + (ulong)bytes.Length, false));
+        Hex.InvalidateView();
+        UpdatePatchButtons();
+        QueueStringRefresh(immediate: true);
+        StatusText.Text = $"Edited {si.Kind} string at {si.Va:X}; use Ctrl+Z to undo or Save Patched As… to export.";
+    }
+
     private void OnStringActivate(object sender, MouseButtonEventArgs e)
     {
         if (StringList.SelectedItem is not StringItem si || _result is null) return;
@@ -3186,7 +3435,9 @@ public partial class MainWindow : Window
         SearchRefHeader.Text = "Select a result to list references";
     }
 
-    private void OnSearchFilter(object sender, TextChangedEventArgs e)
+    private void OnSearchFilter(object sender, TextChangedEventArgs e) => RefreshSearchResults();
+
+    private void RefreshSearchResults()
     {
         string q = SearchBox.Text.Trim();
         if (q.Length == 0)
