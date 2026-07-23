@@ -27,6 +27,8 @@ internal static class StringEditSmoke
         string path = Path.Combine(Path.GetTempPath(), "ds_smoke_string_edit.bin");
         string snapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_string_edit.dssnap");
         string savedSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_string_edit_saved.dssnap");
+        string truncatedSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_snapshot_truncated.dssnap");
+        string invalidRangeSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_snapshot_range.dssnap");
         try
         {
             var data = new byte[128];
@@ -98,6 +100,30 @@ internal static class StringEditSmoke
             Check(savedSnapshot.ReadBytesAtVa(snapshotStringVa, snapshotEdit.Length).AsSpan().SequenceEqual(snapshotEdit),
                 "memory-backed snapshot saves edited bytes", ref pass);
 
+            var truncatedSnapshot = new byte[40];
+            ProcessSnapshotImage.Magic.CopyTo(truncatedSnapshot);
+            BitConverter.GetBytes(1u).CopyTo(truncatedSnapshot, 8);
+            BitConverter.GetBytes(64u).CopyTo(truncatedSnapshot, 12);
+            BitConverter.GetBytes(1u).CopyTo(truncatedSnapshot, 32);   // claims one entry, but has no table
+            File.WriteAllBytes(truncatedSnapshotPath, truncatedSnapshot);
+            bool rejectedTruncated;
+            try { _ = ProcessSnapshotImage.Load(truncatedSnapshotPath); rejectedTruncated = false; }
+            catch (BinaryFormatException) { rejectedTruncated = true; }
+            Check(rejectedTruncated, "snapshot rejects a truncated segment table", ref pass);
+
+            var invalidRangeSnapshot = new byte[88];
+            ProcessSnapshotImage.Magic.CopyTo(invalidRangeSnapshot);
+            BitConverter.GetBytes(1u).CopyTo(invalidRangeSnapshot, 8);
+            BitConverter.GetBytes(64u).CopyTo(invalidRangeSnapshot, 12);
+            BitConverter.GetBytes(1u).CopyTo(invalidRangeSnapshot, 32);
+            BitConverter.GetBytes(1UL).CopyTo(invalidRangeSnapshot, 48);            // segment size
+            BitConverter.GetBytes(ulong.MaxValue).CopyTo(invalidRangeSnapshot, 56); // overflowing data offset
+            File.WriteAllBytes(invalidRangeSnapshotPath, invalidRangeSnapshot);
+            bool rejectedRange;
+            try { _ = ProcessSnapshotImage.Load(invalidRangeSnapshotPath); rejectedRange = false; }
+            catch (BinaryFormatException) { rejectedRange = true; }
+            Check(rejectedRange, "snapshot rejects an overflowing segment range", ref pass);
+
             var peMemory = PeMemoryImage.Load(typeof(StringEditSmoke).Assembly.Location);
             ulong peHeaderVa = peMemory.ImageBase + 8;
             byte[] peOriginal = peMemory.ReadBytesAtVa(peHeaderVa, 2);
@@ -119,6 +145,8 @@ internal static class StringEditSmoke
             try { File.Delete(path); } catch { }
             try { File.Delete(snapshotPath); } catch { }
             try { File.Delete(savedSnapshotPath); } catch { }
+            try { File.Delete(truncatedSnapshotPath); } catch { }
+            try { File.Delete(invalidRangeSnapshotPath); } catch { }
         }
 
         Log(pass ? "RESULT: PASS" : "RESULT: FAIL");

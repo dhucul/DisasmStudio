@@ -56,6 +56,7 @@ public sealed class MachOImage : IBinaryImage, IDisposable
     public IReadOnlyList<ulong> FunctionStarts => _funcStarts;
     public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa => _importsByIat;
     public int BackingLength => _f.Length;
+    public long SliceOffset => _base;
 
     /// <summary>Parsed Objective-C metadata (classes/methods), or null if the binary has none.</summary>
     public ObjCImage? ObjC { get; private set; }

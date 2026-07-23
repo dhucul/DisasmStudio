@@ -142,7 +142,15 @@ public static class UnpackVerifier
         IntPtr job = IntPtr.Zero;
         try
         {
-            if (sandbox) job = TrySetupJob(pi.hProcess);
+            if (sandbox)
+            {
+                job = TrySetupJob(pi.hProcess);
+                if (job == IntPtr.Zero)
+                {
+                    report?.Invoke("Sandbox containment could not be established; the target was not resumed.");
+                    return (false, false, false, 0);
+                }
+            }
             Native.ResumeThread(pi.hThread);
 
             uint code = STILL_ACTIVE;
@@ -167,14 +175,17 @@ public static class UnpackVerifier
 
     private static IntPtr TrySetupJob(IntPtr hProcess)
     {
-        if (Native.IsProcessInJob(hProcess, IntPtr.Zero, out bool already) && already) return IntPtr.Zero;
         IntPtr job = Native.CreateJobObjectW(IntPtr.Zero, null);
         if (job == IntPtr.Zero) return IntPtr.Zero;
         var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
         info.BasicLimitInformation.LimitFlags = Native.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | Native.JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
         info.BasicLimitInformation.ActiveProcessLimit = 1;
         uint sz = (uint)Marshal.SizeOf<Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
-        Native.SetInformationJobObject(job, Native.JobObjectExtendedLimitInformation, ref info, sz);
+        if (!Native.SetInformationJobObject(job, Native.JobObjectExtendedLimitInformation, ref info, sz))
+        {
+            Native.CloseHandle(job);
+            return IntPtr.Zero;
+        }
         if (Native.AssignProcessToJobObject(job, hProcess)) return job;
         Native.CloseHandle(job);
         return IntPtr.Zero;

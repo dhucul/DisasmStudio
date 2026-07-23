@@ -46,6 +46,7 @@ internal sealed class ManagedDebugClient : IDisposable
     private Process? _host;
     private StreamReader? _reader;
     private StreamWriter? _writer;
+    private CancellationTokenSource? _connectCts;
     private readonly object _writeLock = new();
     private readonly Queue<string> _sendQueue = new();   // buffers commands issued before the pipe connects
     private volatile bool _disposed;
@@ -62,7 +63,9 @@ internal sealed class ManagedDebugClient : IDisposable
     public void Start()
     {
         string pipeName = "disasmstudio-mdbg-" + Guid.NewGuid().ToString("N");
-        _pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        _pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        _connectCts = new CancellationTokenSource();
 
         // The debuggee inherits the host's console (dbgshim's CreateProcessForLaunch can't request its own), so
         // give the host a console ONLY for a console target — otherwise a GUI target gets a stray blank window.
@@ -71,25 +74,58 @@ internal sealed class ManagedDebugClient : IDisposable
         psi.ArgumentList.Add(pipeName);
         _host = Process.Start(psi) ?? throw new InvalidOperationException("failed to start the managed-debug host");
 
-        Task.Run(async () =>
+        _ = ConnectAndReadAsync();
+    }
+
+    private async Task ConnectAndReadAsync()
+    {
+        var pipe = _pipe ?? throw new InvalidOperationException("managed-debug pipe was not created");
+        var host = _host ?? throw new InvalidOperationException("managed-debug host was not started");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_connectCts!.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        try
         {
-            try
+            var connect = pipe.WaitForConnectionAsync(timeout.Token);
+            var exited = host.WaitForExitAsync(timeout.Token);
+            var winner = await Task.WhenAny(connect, exited).ConfigureAwait(false);
+            if (winner == exited && host.HasExited && !pipe.IsConnected)
             {
-                await _pipe.WaitForConnectionAsync().ConfigureAwait(false);
-                var reader = new StreamReader(_pipe);
-                var writer = new StreamWriter(_pipe) { AutoFlush = true };
-                lock (_writeLock)
-                {
-                    _reader = reader;
-                    _writer = writer;
-                    // Flush anything queued before the host connected (crucially, the launch command + initial breakpoints).
-                    while (_sendQueue.Count > 0)
-                        try { _writer.WriteLine(_sendQueue.Dequeue()); } catch { }
-                }
-                ReadLoop();
+                int code = host.ExitCode;
+                timeout.Cancel();
+                try { await connect.ConfigureAwait(false); } catch (OperationCanceledException) { }
+                ReportStartupFailure($"managed-debug host exited before connecting (code {code})");
+                return;
             }
-            catch (Exception ex) { Raise(new MdbgEvent { Ev = Mdbg.Error, Message = "host connect failed: " + ex.Message }); }
-        });
+            await connect.ConfigureAwait(false);
+
+            var reader = new StreamReader(pipe);
+            var writer = new StreamWriter(pipe) { AutoFlush = true };
+            lock (_writeLock)
+            {
+                _reader = reader;
+                _writer = writer;
+                // Flush anything queued before the host connected (crucially, the launch command + initial breakpoints).
+                while (_sendQueue.Count > 0)
+                    try { _writer.WriteLine(_sendQueue.Dequeue()); } catch { }
+            }
+            ReadLoop();
+        }
+        catch (OperationCanceledException)
+        {
+            if (!_disposed) ReportStartupFailure("managed-debug host did not connect within 15 seconds");
+        }
+        catch (Exception ex)
+        {
+            if (!_disposed) ReportStartupFailure("host connect failed: " + ex.Message);
+        }
+    }
+
+    private void ReportStartupFailure(string message)
+    {
+        if (_disposed || _sawExit) return;
+        Raise(new MdbgEvent { Ev = Mdbg.Error, Message = message });
+        _sawExit = true;
+        Raise(new MdbgEvent { Ev = Mdbg.Exited, Code = -1 });
     }
 
     private void ReadLoop()
@@ -139,8 +175,10 @@ internal sealed class ManagedDebugClient : IDisposable
         if (_disposed) return;
         _disposed = true;
         try { Send(new MdbgCommand { Cmd = Mdbg.Quit }); } catch { }
+        try { _connectCts?.Cancel(); } catch { }
         try { _pipe?.Dispose(); } catch { }
         try { if (_host is { HasExited: false }) { if (!_host.WaitForExit(1500)) _host.Kill(entireProcessTree: true); } } catch { }
         try { _host?.Dispose(); } catch { }
+        try { _connectCts?.Dispose(); } catch { }
     }
 }

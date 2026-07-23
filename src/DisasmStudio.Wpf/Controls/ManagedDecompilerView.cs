@@ -201,6 +201,7 @@ public sealed class ManagedDecompilerView : Grid
     /// <summary>Show the assembly: build the tree and select its first application type.</summary>
     public void SetAssembly(ManagedAssembly asm)
     {
+        _buildSeq++;
         _asm = asm;
         _node = null;
         _il = false;
@@ -245,6 +246,7 @@ public sealed class ManagedDecompilerView : Grid
 
     public void Clear()
     {
+        _buildSeq++;
         _asm = null;
         _node = null;
         _tree.Items.Clear();
@@ -262,6 +264,7 @@ public sealed class ManagedDecompilerView : Grid
     /// <summary>Show a placeholder before the assembly finishes loading (so switching here shows a note, not blank).</summary>
     public void ShowLoading(string message)
     {
+        _buildSeq++;
         _asm = null;
         _node = null;
         _tree.Items.Clear();
@@ -381,7 +384,7 @@ public sealed class ManagedDecompilerView : Grid
                 : (Lines: (IReadOnlyList<DecompLine>)[new DecompLine(0, [new AsmToken("// failed", AsmTokenKind.Comment)], 0)], Map: ManagedLineMap.Empty);
             Dispatcher.Invoke(() =>
             {
-                if (seq != _buildSeq) return;   // a newer selection won
+                if (seq != _buildSeq || !ReferenceEquals(_asm, asm) || !ReferenceEquals(_node, node)) return;
                 _lines = result.Lines;
                 _map = result.Map;
                 _renderedSeq = seq;   // this build's map is now live

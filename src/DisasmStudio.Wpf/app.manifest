@@ -4,11 +4,9 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- Run elevated: a debugger needs administrator rights to launch/attach elevated targets (and to debug
-             .NET programs whose own manifest requests requireAdministrator). Explorer-to-app file drag/drop still
-             works while elevated because the app uses native WM_DROPFILES with a UIPI message filter (see
-             NativeFileDrop), not cross-integrity OLE drag/drop. -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <!-- Keep normal analysis and file handling at the caller's integrity level. Debugging an elevated target
+             still requires the user to launch DisasmStudio explicitly as administrator. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

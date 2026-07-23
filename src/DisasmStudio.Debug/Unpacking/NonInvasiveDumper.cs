@@ -357,19 +357,21 @@ public static class NonInvasiveDumper
         }
 
         IntPtr job = IntPtr.Zero;
-        bool resumed = false;
         try
         {
-            if (launch.Sandbox) job = TrySetupJob(pi, Log);
+            if (launch.Sandbox)
+            {
+                job = TrySetupJob(pi, Log);
+                if (job == IntPtr.Zero)
+                    return Err("sandbox containment could not be established; the target was not resumed. Disable Sandbox explicitly to run without containment.");
+            }
             Native.ResumeThread(pi.hThread);   // the target now starts running; we already hold its PID to watch
-            resumed = true;
             Log($"Launched pid {pi.dwProcessId}; watching from start.");
             return DumpWhenSettled((int)pi.dwProcessId, outputPath, suspend, preferredImageBase, opt, report, cancelled, snapshotPath);
         }
         catch (Exception ex) { return Err("Unexpected error: " + ex.Message); }
         finally
         {
-            if (!resumed) { try { Native.ResumeThread(pi.hThread); } catch { } }   // never leave it suspended
             try { Native.TerminateProcess(pi.hProcess, 0); } catch { }
             if (job != IntPtr.Zero) Native.CloseHandle(job);   // kill-on-close reaps any survivor
             Native.CloseHandle(pi.hThread);
@@ -378,31 +380,29 @@ public static class NonInvasiveDumper
     }
 
     /// <summary>Create a kill-on-close, one-process job and assign the freshly-launched target to it (mirrors the
-    /// unpacker's containment). Best-effort: returns the job handle to keep alive, or IntPtr.Zero if it couldn't
-    /// (e.g. the target broke into the host's own job). Process-level only — use a VM for truly untrusted samples.</summary>
+    /// unpacker's containment). Returns the job handle to keep alive, or IntPtr.Zero when containment could not
+    /// be established. Process-level only — use a VM for truly untrusted samples.</summary>
     private static IntPtr TrySetupJob(Native.PROCESS_INFORMATION pi, Action<string> log)
     {
-        if (Native.IsProcessInJob(pi.hProcess, IntPtr.Zero, out bool already) && already)
-        {
-            log("Sandbox: target is already in a host job (Terminal/VS); containment is active from the host side.");
-            return IntPtr.Zero;
-        }
         IntPtr job = Native.CreateJobObjectW(IntPtr.Zero, null);
-        if (job == IntPtr.Zero) { log("Sandbox: CreateJobObject failed; running uncontained."); return IntPtr.Zero; }
+        if (job == IntPtr.Zero) { log("Sandbox: CreateJobObject failed."); return IntPtr.Zero; }
         var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
         info.BasicLimitInformation.LimitFlags = Native.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | Native.JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
         info.BasicLimitInformation.ActiveProcessLimit = 1;   // block child-process spawning
         uint sz = (uint)Marshal.SizeOf<Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
         if (!Native.SetInformationJobObject(job, Native.JobObjectExtendedLimitInformation, ref info, sz))
+        {
             log($"Sandbox: SetInformationJobObject failed (err {Marshal.GetLastWin32Error()}).");
+            Native.CloseHandle(job);
+            return IntPtr.Zero;
+        }
         if (Native.AssignProcessToJobObject(job, pi.hProcess))
         {
             log("Sandbox: job containment active (kill-on-close, child processes blocked).");
             return job;
         }
         int err = Marshal.GetLastWin32Error();
-        log(err == 5 ? "Sandbox: target not breakable from its host job; it remains contained by the host."
-                     : $"Sandbox: AssignProcessToJobObject failed (err {err}); running uncontained.");
+        log($"Sandbox: AssignProcessToJobObject failed (err {err}).");
         Native.CloseHandle(job);
         return IntPtr.Zero;
     }

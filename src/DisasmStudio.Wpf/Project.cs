@@ -14,7 +14,8 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 public sealed record ProjectFile
 {
-    public int Version { get; init; } = 7;
+    public int Version { get; init; } = 8;
+    public long MachSliceOffset { get; init; }   // v8: selected slice in a fat/universal Mach-O (0 for a thin file)
     public string BinaryPath { get; init; } = "";
     public string Format { get; init; } = "";   // "PE" / "ELF" / "Raw"
     public ulong RawBaseVa { get; init; }        // raw blobs only

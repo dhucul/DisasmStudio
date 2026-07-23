@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private Task _analysisDone = Task.CompletedTask;   // completes when the in-flight analysis ends (success/cancel/fault)
     private ulong[] _funcStarts = [];
     private string? _projectPath;
+    private bool _sessionDirty;
     // User markup (renames / comments / bookmarks), keyed by static VA. The single source of truth for the
     // session: re-applied to each (re-)analysis result via UseMarkup so edits survive a patch/undo re-analysis,
     // and saved into the .dsproj. Reset on a fresh file open; loaded from the project on OpenProject.
@@ -278,11 +279,9 @@ public partial class MainWindow : Window
         else if (e.ChangedButton == MouseButton.XButton2) { _nav.Forward(); e.Handled = true; }
     }
 
-    // The app runs elevated (requireAdministrator); WPF's OLE drag-and-drop can't receive files from a
-    // normal-integrity Explorer (UIPI blocks it). Use the native shell path (WM_DROPFILES) instead, which works
-    // across integrity levels via the ChangeWindowMessageFilterEx allow-list in NativeFileDrop. Wired at Loaded so
-    // any OLE IDropTarget WPF may have registered already exists and can be revoked — otherwise it would swallow
-    // WM_DROPFILES and neither path would work once elevated. No AllowDrop is set anywhere in this window.
+    // Use the native shell path (WM_DROPFILES). Wired at Loaded so any OLE IDropTarget WPF may have registered
+    // already exists and can be revoked; otherwise it would swallow WM_DROPFILES. No AllowDrop is set anywhere
+    // in this window. The app normally runs at the caller's integrity level, so no UIPI allow-list is needed.
     private void EnableFileDrop() => Loaded += (_, _) => EnableNativeFileDrop();
 
     private bool _nativeDropReady;
@@ -312,17 +311,10 @@ public partial class MainWindow : Window
     private static class NativeFileDrop
     {
         public const int WmDropFiles = 0x0233;
-        private const uint WmCopyData = 0x004A;
-        private const uint WmCopyGlobalData = 0x0049;
-        private const uint MsgfltAllow = 1;
-
         public static void Enable(IntPtr hwnd)
         {
             _ = RevokeDragDrop(hwnd);   // drop any WPF OLE IDropTarget so the shell delivers WM_DROPFILES to us instead
             DragAcceptFiles(hwnd, true);
-            _ = ChangeWindowMessageFilterEx(hwnd, WmDropFiles, MsgfltAllow, IntPtr.Zero);
-            _ = ChangeWindowMessageFilterEx(hwnd, WmCopyData, MsgfltAllow, IntPtr.Zero);
-            _ = ChangeWindowMessageFilterEx(hwnd, WmCopyGlobalData, MsgfltAllow, IntPtr.Zero);
         }
 
         public static bool TryGetFirstFile(IntPtr dropHandle, out string path)
@@ -359,9 +351,6 @@ public partial class MainWindow : Window
 
         [DllImport("shell32.dll")]
         private static extern void DragFinish(IntPtr hDrop);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, uint message, uint action, IntPtr changeInfo);
 
         [DllImport("ole32.dll")]
         private static extern int RevokeDragDrop(IntPtr hwnd);
@@ -542,6 +531,7 @@ public partial class MainWindow : Window
             Decompiler.Refresh();
             Debug.Refresh();
             RefreshBreakpointList();
+            MarkSessionDirty();
             return;
         }
         if (_dbgViewLive && _dbg is { } d)
@@ -557,6 +547,7 @@ public partial class MainWindow : Window
         Decompiler.Refresh();
         Debug.Refresh();
         RefreshBreakpointList();
+        MarkSessionDirty();
     }
 
     /// <summary>Add or replace a hardware breakpoint at the caret (right-click → Hardware breakpoint…). Asks for
@@ -569,6 +560,7 @@ public partial class MainWindow : Window
         var def = _pendingBreakpoints.TryGetValue(sva, out var existing) ? existing : new BpDef();
         def.Hardware = true; def.Kind = hw.Kind; def.Size = hw.Size;
         _pendingBreakpoints[sva] = def;
+        MarkSessionDirty();
         if (_dbgViewLive && _dbg is { } d)
         {
             if (d.HasBreakpoint(va)) d.Engine.RemoveBreakpoint(va);   // replace any software bp at this address
@@ -592,6 +584,7 @@ public partial class MainWindow : Window
         var def = _pendingBreakpoints.TryGetValue(sva, out var existing) ? existing : new BpDef();
         def.Memory = true; def.Hardware = false; def.MemAccess = w.Access; def.MemLength = (int)len;
         _pendingBreakpoints[sva] = def;
+        MarkSessionDirty();
         if (_dbgViewLive && _dbg is { } d)
             d.Engine.SetMemoryBreakpoint(start, len, w.Access);
         Linear.Refresh();
@@ -611,6 +604,7 @@ public partial class MainWindow : Window
         if (!_pendingBreakpoints.TryGetValue(sva, out var def)) return;
         if (Dialogs.AskBreakpointEdit(this, def) is not { } updated) return;
         _pendingBreakpoints[sva] = updated;
+        MarkSessionDirty();
         if (_dbgViewLive && _dbg is { } d && d.HasBreakpoint(va))
             d.Engine.ConfigureBreakpoint(va, updated.Condition, updated.HitMode, updated.HitTarget, updated.Enabled);
         Linear.Refresh();
@@ -685,6 +679,7 @@ public partial class MainWindow : Window
         if (name is null) return;   // cancelled
         _result.SetName(va, name);   // update the displayed result (static or live) immediately
         MirrorToStaticMarkup(m => { ulong sva = va - LiveSlide; if (name.Length == 0) m.Names.Remove(sva); else m.Names[sva] = name; });
+        MarkSessionDirty();
         RefreshAfterMarkup(namesChanged: true);
         StatusText.Text = name.Length == 0 ? $"Reset name at {va - LiveSlide:X}" : $"Renamed {va - LiveSlide:X} → {name}";
     }
@@ -698,6 +693,7 @@ public partial class MainWindow : Window
         if (text is null) return;
         _result.SetComment(va, text);
         MirrorToStaticMarkup(m => { ulong sva = va - LiveSlide; if (text.Length == 0) m.Comments.Remove(sva); else m.Comments[sva] = text; });
+        MarkSessionDirty();
         RefreshAfterMarkup(namesChanged: false);
         StatusText.Text = text.Length == 0 ? $"Cleared comment at {va - LiveSlide:X}" : $"Commented {va - LiveSlide:X}";
     }
@@ -708,6 +704,7 @@ public partial class MainWindow : Window
         if (va == 0) return;
         ulong sva = va - LiveSlide;
         bool now = _markup.Bookmarks.Add(sva) || !_markup.Bookmarks.Remove(sva);
+        MarkSessionDirty();
         RefreshBookmarkList();
         Linear.Refresh();
         Graph.Refresh();
@@ -757,6 +754,7 @@ public partial class MainWindow : Window
         ulong sva = va - LiveSlide;
         bool taken = _jumpAssume.TryGetValue(sva, out var cur) ? !cur : true;
         _jumpAssume[sva] = taken;
+        MarkSessionDirty();
         Linear.Refresh(); Graph.Refresh(); Decompiler.Refresh();
         StatusText.Text = $"Jump {sva:X} assumed {(taken ? "taken (green)" : "not taken (red)")}";
     }
@@ -775,6 +773,7 @@ public partial class MainWindow : Window
         _funcStarts = _result.Functions.Select(f => f.Va).ToArray();    // AddFunction inserts sorted, so this stays ordered
         RefreshAfterMarkup(namesChanged: true);                        // rebuild label lines, function rows, search index, decompiler cache
         _changeStack.Push(new CreateFunctionEdit(sva, addedName));
+        MarkSessionDirty();
         UpdatePatchButtons();
         _nav.Navigate(va);                                             // caret to the new function header
         // Show its pseudo-C — except 8051, which has no decompiler path (OpenDecompiler would just show a notice).
@@ -887,6 +886,7 @@ public partial class MainWindow : Window
         foreach (var b in er.Branches.DistinctBy(b => b.Va))
             Set(b.Va, b.Taken ? "opaque: always taken (emulated)" : "opaque: never taken (emulated)");
         RefreshAfterMarkup(namesChanged: false);
+        if (er.Values.Count > 0 || er.Branches.Count > 0) MarkSessionDirty();
         StatusText.Text = "Applied emulation results as comments.";
     }
 
@@ -898,6 +898,7 @@ public partial class MainWindow : Window
         int patched = 0;
         foreach (var (start, bytes) in ContiguousRuns(er.MemoryWrites))
             if (_image.PatchVa(start, bytes)) { _changeStack.Push(new ByteEdit(start, start + (ulong)bytes.Length, false)); patched += bytes.Length; }
+        if (patched > 0) MarkSessionDirty();
         UpdatePatchButtons();
         StatusText.Text = $"Patched {patched:N0} decrypted byte(s); re-analyzing to surface decrypted strings…";
         await StartAnalysis(_image, _nav.Current, CenterTabs.SelectedIndex, fresh: false);
@@ -1340,6 +1341,7 @@ public partial class MainWindow : Window
         ulong sva = va - LiveSlide;
         if (!_pendingBreakpoints.TryGetValue(sva, out var def)) return;
         def.Enabled = enabled;
+        MarkSessionDirty();
         if (_dbgViewLive && _dbg is { } d)
         {
             if (def.Memory)
@@ -1441,7 +1443,11 @@ public partial class MainWindow : Window
             _dbg.StartTrace(live.Image.MinVa, live.Image.MaxVa);
             // Seed with the instruction we're stopped on so it lights up immediately (it shows amber as the
             // current IP until we step off it).
-            if (_coveredInstrs.Add(_dbg.CurrentIp - LiveSlide)) ClearCoverageBtn.IsEnabled = true;
+            if (_coveredInstrs.Add(_dbg.CurrentIp - LiveSlide))
+            {
+                ClearCoverageBtn.IsEnabled = true;
+                MarkSessionDirty();
+            }
             StartCoverageTimer();
             Linear.Refresh();
             Graph.Refresh();
@@ -1466,6 +1472,7 @@ public partial class MainWindow : Window
     {
         // Wipe the highlights and the engine's recorded instructions (no memory writes either way). The trace,
         // if still on, simply starts recording afresh from wherever execution goes next.
+        if (_coveredInstrs.Count > 0) MarkSessionDirty();
         _coveredInstrs.Clear();
         _dbg?.ClearCoveredPoints();
         ClearCoverageBtn.IsEnabled = false;
@@ -1486,6 +1493,7 @@ public partial class MainWindow : Window
         foreach (ulong liveVa in _dbg.CoveredPoints()) _coveredInstrs.Add(liveVa - slide);
         if (_coveredInstrs.Count != before)
         {
+            MarkSessionDirty();
             ClearCoverageBtn.IsEnabled = true;
             Linear.Refresh();
             Graph.Refresh();   // the graph carries the same trace overlay; repaint it as coverage grows
@@ -1846,12 +1854,20 @@ public partial class MainWindow : Window
             var prevOptions = _loadOptions;
             var set = new HashSet<string>(_loadOptions.IncludedDataSections);
             if (!isHeader && sectionName is not null) set.Add(sectionName);
-            _loadOptions = _loadOptions with { IncludedDataSections = set, IncludeHeader = _loadOptions.IncludeHeader || isHeader };
+            var attemptedOptions = _loadOptions with { IncludedDataSections = set, IncludeHeader = _loadOptions.IncludeHeader || isHeader };
+            _loadOptions = attemptedOptions;
             CenterTabs.SelectedIndex = 0;                        // show the result in the linear view
             var outcome = await StartAnalysis(_image, va, 0, fresh: false);   // re-analyse with the section loaded in, land on it
-            if (outcome == AnalyzeOutcome.Failed) { _loadOptions = prevOptions; return; }   // errored — undo the change
+            if (outcome != AnalyzeOutcome.Applied)
+            {
+                if (ReferenceEquals(_loadOptions, attemptedOptions)) _loadOptions = prevOptions;
+                return;
+            }
             if (outcome == AnalyzeOutcome.Applied)
+            {
+                MarkSessionDirty();
                 StatusText.Text = $"Loaded {sectionName ?? "HEADER"} into the listing: {before:N0} → {_result?.Linear.Count ?? before:N0} lines (@ {va:X})";
+            }
             return;
         }
 
@@ -2088,6 +2104,7 @@ public partial class MainWindow : Window
             // Record the instruction we stopped on, so a Step (Into/Over/Out) or a breakpoint stop contributes to
             // the trace too — not only the continuous single-step a Continue drives. Stored in static space.
             bool added = _coveredInstrs.Add(_dbg.CurrentIp - LiveSlide);
+            if (added) MarkSessionDirty();
             HarvestCoverage();   // repaints (Refresh) when it adds anything
             if (added) { ClearCoverageBtn.IsEnabled = true; Linear.Refresh(); Decompiler.Refresh(); }   // ensure the stepped row paints
         }
@@ -2233,6 +2250,7 @@ public partial class MainWindow : Window
         }
         ulong end = va + (ulong)final.Length;
         _changeStack.Push(new ByteEdit(va, end, true));
+        MarkSessionDirty();
         RepairIndex(va, end);          // local re-decode of just this region — no full re-sweep
         QueueStringRefresh();
         UpdatePatchButtons();
@@ -2252,6 +2270,7 @@ public partial class MainWindow : Window
         // Hex byte edits stay view-local (no linear re-index — typing must stay snappy on huge files);
         // tracked so undo stays in lock-step with the image's undo stack.
         _changeStack.Push(new ByteEdit(va, va + 1, false));
+        MarkSessionDirty();
         QueueStringRefresh();
         UpdatePatchButtons();
     }
@@ -2324,6 +2343,7 @@ public partial class MainWindow : Window
                 StatusText.Text = $"Removed function sub_{c.StaticVa:X}";
                 break;
         }
+        MarkSessionDirty();
         UpdatePatchButtons();
     }
 
@@ -2435,6 +2455,8 @@ public partial class MainWindow : Window
 
     private async Task LoadProject(string path)
     {
+        if (!ConfirmDiscardSessionChanges()) return;
+
         ProjectFile proj;
         try { proj = ProjectFile.Load(path); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
@@ -2450,6 +2472,8 @@ public partial class MainWindow : Window
                                 null)
                 : proj.Format == "PE memory"
                 ? PeMemoryImage.Load(proj.BinaryPath, proj.RawBaseVa)
+                : proj.Format == "Mach-O" && proj.Version >= 8
+                ? MachOImage.Load(proj.BinaryPath, proj.MachSliceOffset)
                 : BinaryLoader.Load(proj.BinaryPath);
         }
         catch (Exception ex)
@@ -2459,22 +2483,35 @@ public partial class MainWindow : Window
             return;
         }
 
-        _projectPath = path;
-        _markup = proj.Markup?.Clone() ?? new Markup();   // restore user renames/comments/bookmarks (applied in StartAnalysis)
-        _loadOptions = new AnalysisOptions
+        var markup = proj.Markup?.Clone() ?? new Markup();
+        var options = new AnalysisOptions
         {
             IncludedDataSections = proj.LoadedSections is { Count: > 0 } ls ? new HashSet<string>(ls) : new HashSet<string>(),
             IncludeHeader = proj.LoadHeader,
         };
         // Re-apply saved byte edits to the pristine image BEFORE analysis, so the disassembly decodes the patched
         // bytes and "Save patched binary…" / IsDirty light up. Keyed by file offset — stable for the same binary.
-        if (proj.Patches is { Count: > 0 })
-            foreach (var run in proj.Patches) image.Patch(run.Offset, run.Bytes);
-        var outcome = await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab);
+        try
+        {
+            if (proj.Patches is { Count: > 0 })
+                foreach (var run in proj.Patches) image.Patch(run.Offset, run.Bytes);
+        }
+        catch (Exception ex)
+        {
+            (image as IDisposable)?.Dispose();
+            MessageBox.Show(this, "The project contains an invalid byte patch.\n\n" + ex.Message,
+                "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        var outcome = await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab,
+            freshMarkup: markup, freshOptions: options);
         // The fresh analysis wiped the cross-run breakpoint / trace / jump-toggle sets (they belonged to the old
         // file); re-arm them from the project now that the new result exists.
-        if (outcome == AnalyzeOutcome.Applied) RestoreSessionState(proj);
+        if (outcome != AnalyzeOutcome.Applied) return;
+        _projectPath = path;
+        RestoreSessionState(proj);
         RefreshBookmarkList();
+        _sessionDirty = false;
         Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(image.FilePath)})";
     }
 
@@ -2531,6 +2568,7 @@ public partial class MainWindow : Window
             RawBitness = _image.Format == BinaryFormat.Raw ? _image.Bitness : 0,
             RawEntryVa = _image.Format == BinaryFormat.Raw ? _image.EntryVa : 0,
             RawArch = _image.Format == BinaryFormat.Raw ? _image.Arch.ToString() : null,
+            MachSliceOffset = _image is MachOImage mach ? mach.SliceOffset : 0,
             CurrentVa = _nav.Current ?? _image.EntryVa,
             CenterTab = CenterTabs.SelectedIndex,
             LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
@@ -2546,6 +2584,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
 
         _projectPath = path;
+        _sessionDirty = false;
         Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(_image.FilePath)})";
         StatusText.Text = $"Saved project to {path}";
     }
@@ -2705,8 +2744,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        _projectPath = null; // opening a binary directly starts an unsaved session
-        _markup = new Markup();   // a new binary starts with no user renames/comments/bookmarks
+        if (!ConfirmDiscardSessionChanges()) return;
         SignatureLibrary.Reload();   // re-scan signatures/*.sig so newly-added files apply to this binary
         IBinaryImage image;
         FirmwareScan? firmware = null;
@@ -2759,8 +2797,10 @@ public partial class MainWindow : Window
         // IDA-style: let the user fold optional non-code sections / the PE header into the listing.
         var opts = Dialogs.AskLoadSections(this, image, AnalysisOptions.None);
         if (opts is null) { (image as IDisposable)?.Dispose(); return; }   // cancelled
-        _loadOptions = opts;
-        await StartAnalysis(image);
+        var outcome = await StartAnalysis(image, freshMarkup: new Markup(), freshOptions: opts);
+        if (outcome != AnalyzeOutcome.Applied) return;
+        _projectPath = null;
+        _sessionDirty = false;
 
         // Report what the firmware sniffer found (and where the entry landed) once analysis has settled.
         if (firmware is not null) StatusText.Text = firmware.Summary;
@@ -2799,7 +2839,8 @@ public partial class MainWindow : Window
 
     private enum AnalyzeOutcome { Applied, Cancelled, Failed }
 
-    private async Task<AnalyzeOutcome> StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0, bool fresh = true)
+    private async Task<AnalyzeOutcome> StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0,
+        bool fresh = true, Markup? freshMarkup = null, AnalysisOptions? freshOptions = null)
     {
         // On a fresh load, retire the previous file-backed image once the new one is up and its analysis stopped.
         var prevImage = fresh ? _image : null;
@@ -2807,12 +2848,16 @@ public partial class MainWindow : Window
 
         CancelStaticStringRefresh();
         _cts?.Cancel();
-        _cts = new CancellationTokenSource();
-        var token = _cts.Token;
+        var analysisCts = new CancellationTokenSource();
+        _cts = analysisCts;
+        var token = analysisCts.Token;
+        var opts = freshOptions ?? _loadOptions;
+        bool applied = false;
 
-        _image = image;
-        if (fresh)
+        void CommitFresh()
         {
+            _image = image;
+            _sessionDirty = false;
             // A new file: wipe the old session. A re-analyse after a patch/undo keeps the current
             // lists and navigation visible until the new results replace them (no empty flash).
             _result = null;
@@ -2838,16 +2883,25 @@ public partial class MainWindow : Window
         Progress.Visibility = Visibility.Visible;
         Progress.IsIndeterminate = true;
         StatusText.Text = "Analyzing…";
-        var progress = new Progress<string>(s => StatusText.Text = s);
+        var progress = new Progress<string>(s =>
+        {
+            if (ReferenceEquals(_cts, analysisCts)) StatusText.Text = s;
+        });
 
         try
         {
-            var opts = _loadOptions;
             var task = Task.Run(() => AnalysisEngine.Analyze(image, opts, progress, token), token);
             _analysisDone = SilentlyAwait(task);
             var result = await task;
             if (token.IsCancellationRequested) return AnalyzeOutcome.Cancelled;
 
+            if (fresh)
+            {
+                _markup = freshMarkup ?? new Markup();
+                _loadOptions = opts;
+                CommitFresh();
+                applied = true;
+            }
             _result = result;
             result.UseMarkup(_markup);   // overlay user renames/comments (and re-apply function-start renames) onto the fresh analysis
             _callGraph = null;           // rebuilt lazily against the new result on the next Call Graph tab view
@@ -2886,14 +2940,37 @@ public partial class MainWindow : Window
         }
         finally
         {
-            Progress.Visibility = Visibility.Collapsed;
-            Progress.IsIndeterminate = false;
+            if (ReferenceEquals(_cts, analysisCts))
+            {
+                _cts = null;
+                Progress.Visibility = Visibility.Collapsed;
+                Progress.IsIndeterminate = false;
+            }
+            analysisCts.Dispose();
+            if (fresh && !applied && !ReferenceEquals(_image, image))
+                (image as IDisposable)?.Dispose();
         }
     }
 
     /// <summary>Await a task purely for its completion (success/cancel/fault); the real outcome is handled by
     /// the direct awaiter. Used to know when a cancelled analysis has actually stopped reading its image.</summary>
     private static async Task SilentlyAwait(Task t) { try { await t; } catch { } }
+
+    private void MarkSessionDirty() => _sessionDirty = true;
+
+    private bool ConfirmDiscardSessionChanges()
+    {
+        if (!_sessionDirty) return true;
+        return MessageBox.Show(this,
+            "This session has unsaved project changes. Discard them?",
+            "Unsaved session", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
+    }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        if (!e.Cancel && !ConfirmDiscardSessionChanges()) e.Cancel = true;
+        base.OnClosing(e);
+    }
 
     protected override void OnClosed(EventArgs e)
     {
@@ -3361,6 +3438,7 @@ public partial class MainWindow : Window
         }
 
         _changeStack.Push(new ByteEdit(si.Va, si.Va + (ulong)bytes.Length, false));
+        MarkSessionDirty();
         Hex.InvalidateView();
         UpdatePatchButtons();
         QueueStringRefresh(immediate: true);
@@ -3616,6 +3694,7 @@ public partial class MainWindow : Window
         if (_dbg is { IsStopped: true } && _dbgViewLive)
         {
             _dbg.ClearCoverage();          // drop any prior coverage instrumentation + recorded hits
+            if (_coveredInstrs.Count > 0) MarkSessionDirty();
             _coveredInstrs.Clear();
             _findTraceArmed = false;
             ArmCoverageTrace();            // plant on the current matches from here
@@ -3870,23 +3949,30 @@ public partial class MainWindow : Window
         bool header = _loadOptions.IncludeHeader;
         if (item.IsHeader) header = on;
         else if (on) set.Add(item.Name); else set.Remove(item.Name);
-        _loadOptions = _loadOptions with { IncludedDataSections = set, IncludeHeader = header };
+        var attemptedOptions = _loadOptions with { IncludedDataSections = set, IncludeHeader = header };
+        _loadOptions = attemptedOptions;
 
         // On enable, jump to the section in the linear view so the change is visibly applied (it usually lands
         // at a high address you'd otherwise have to scroll to); on disable, stay put.
         long before = _result.Linear.Count;
         var outcome = await StartAnalysis(_image, on ? item.Va : _nav.Current, on ? 0 : CenterTabs.SelectedIndex, fresh: false);
-        if (outcome == AnalyzeOutcome.Failed)   // re-analysis errored — undo the option + checkbox change
+        if (outcome != AnalyzeOutcome.Applied)
         {
-            _loadOptions = prevOptions;
-            item.Loaded = !on;
-            cb.IsChecked = !on;
+            if (ReferenceEquals(_loadOptions, attemptedOptions))
+            {
+                _loadOptions = prevOptions;
+                item.Loaded = !on;
+                cb.IsChecked = !on;
+            }
             return;
         }
         if (outcome == AnalyzeOutcome.Applied)
+        {
+            MarkSessionDirty();
             StatusText.Text = on
                 ? $"Loaded {item.Name} into the listing: {before:N0} → {_result?.Linear.Count ?? before:N0} lines (@ {item.Va:X})"
                 : $"Removed {item.Name}: {before:N0} → {_result?.Linear.Count ?? before:N0} lines";
+        }
     }
 
     // ---- resources ----

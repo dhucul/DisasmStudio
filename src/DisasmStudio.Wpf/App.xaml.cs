@@ -28,7 +28,7 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
-        // Hidden self-test for .dsproj persistence: round-trip a v7 project (breakpoints / trace / patches /
+        // Hidden self-test for .dsproj persistence: round-trip a v8 project (breakpoints / trace / patches /
         // jump what-ifs / markup) plus a legacy v6 file, print to the launching terminal, and exit — no UI.
         if (e.Args.Length > 0 && e.Args[0] == "--smoke-project")
         {

@@ -250,7 +250,7 @@ public sealed class DecompilerView : Grid
             var dc = t.IsCompletedSuccessfully ? t.Result : null;
             Dispatcher.Invoke(() =>
             {
-                if (seq != _buildSeq) return;        // user moved on to another function
+                if (seq != _buildSeq || !ReferenceEquals(_result, result)) return;
                 if (dc is null) return;
                 _cache[fn.Va] = dc;
                 Show(dc);
@@ -260,6 +260,7 @@ public sealed class DecompilerView : Grid
 
     public void Clear()
     {
+        _buildSeq++;          // invalidate any background decompilation still targeting the previous image
         _dc = null;
         _dis = null;          // a new file means a new image; the decoder is rebuilt on next SetFunction
         _lines = [];

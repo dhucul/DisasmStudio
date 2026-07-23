@@ -81,11 +81,18 @@ public sealed class ProcessSnapshotImage : IBinaryImage
     /// <summary>Serialize a snapshot to a <c>.dssnap</c> file.</summary>
     public static void Write(string path, int bitness, ulong imageBase, ulong entryVa, IReadOnlyList<SnapshotSegment> segments)
     {
-        long dataOffset = HeaderSize + (long)segments.Count * SegEntrySize;
+        long dataOffset = checked(HeaderSize + (long)segments.Count * SegEntrySize);
         long total = dataOffset;
-        foreach (var s in segments) total += s.Bytes.Length;
+        foreach (var s in segments)
+        {
+            if (s.Va > ulong.MaxValue - (ulong)s.Bytes.Length)
+                throw new ArgumentException("A snapshot segment extends beyond the virtual-address range.", nameof(segments));
+            total = checked(total + s.Bytes.Length);
+        }
+        if (total > int.MaxValue)
+            throw new ArgumentException("Snapshot containers larger than 2 GiB are not supported.", nameof(segments));
 
-        var buf = new byte[total];
+        var buf = new byte[checked((int)total)];
         Magic.CopyTo(buf);
         WriteU32(buf, 8, 1);                       // version
         WriteU32(buf, 12, (uint)bitness);
@@ -93,7 +100,7 @@ public sealed class ProcessSnapshotImage : IBinaryImage
         WriteU64(buf, 24, entryVa);
         WriteU32(buf, 32, (uint)segments.Count);
 
-        long off = dataOffset;
+        int off = checked((int)dataOffset);
         for (int i = 0; i < segments.Count; i++)
         {
             var s = segments[i];
@@ -105,7 +112,7 @@ public sealed class ProcessSnapshotImage : IBinaryImage
             var name = Encoding.ASCII.GetBytes(s.Name);
             Array.Copy(name, 0, buf, e + 32, Math.Min(name.Length, 15));
             Array.Copy(s.Bytes, 0, buf, off, s.Bytes.Length);
-            off += s.Bytes.Length;
+            off = checked(off + s.Bytes.Length);
         }
         File.WriteAllBytes(path, buf);
     }
@@ -117,22 +124,29 @@ public sealed class ProcessSnapshotImage : IBinaryImage
         var b = File.ReadAllBytes(path);
         if (b.Length < HeaderSize || !IsSnapshot(b))
             throw new BinaryFormatException("Not a DisasmStudio process snapshot (.dssnap).");
+        if (U32(b, 8) != 1) throw new BinaryFormatException("Unsupported process snapshot version.");
         int bitness = (int)U32(b, 12);
+        if (bitness is not (32 or 64)) throw new BinaryFormatException("Invalid process snapshot bitness.");
         ulong imageBase = U64(b, 16);
         ulong entryVa = U64(b, 24);
-        int segCount = (int)U32(b, 32);
+        uint rawSegCount = U32(b, 32);
+        if (rawSegCount > int.MaxValue) throw new BinaryFormatException("Invalid process snapshot segment count.");
+        long tableEnd = checked(HeaderSize + (long)rawSegCount * SegEntrySize);
+        if (tableEnd > b.Length) throw new BinaryFormatException("Truncated process snapshot segment table.");
+        int segCount = (int)rawSegCount;
 
         var segs = new List<Seg>(segCount);
         for (int i = 0; i < segCount; i++)
         {
-            int e = HeaderSize + i * SegEntrySize;
-            if (e + SegEntrySize > b.Length) break;
+            int e = checked(HeaderSize + i * SegEntrySize);
             ulong va = U64(b, e + 0);
-            long size = (long)U64(b, e + 8);
-            long start = (long)U64(b, e + 16);
+            ulong size = U64(b, e + 8);
+            ulong start = U64(b, e + 16);
             uint ch = U32(b, e + 24);
             string name = ReadName(b, e + 32);
-            if (start < 0 || size < 0 || start + size > b.Length) continue;   // skip a corrupt entry
+            if (start < (ulong)tableEnd || start > (ulong)b.Length || size > (ulong)b.Length - start
+                || start > int.MaxValue || size > int.MaxValue || va > ulong.MaxValue - size)
+                throw new BinaryFormatException($"Invalid process snapshot segment {i}.");
             segs.Add(new Seg(va, (int)start, (int)size, ch, name));
         }
         segs.Sort((x, y) => x.Va.CompareTo(y.Va));

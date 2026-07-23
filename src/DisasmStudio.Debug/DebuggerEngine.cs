@@ -163,7 +163,14 @@ public sealed partial class DebuggerEngine
         if (_attached)
         {
             Native.DebugSetProcessKillOnExit(false);
-            if (!Native.DebugActiveProcess(_attachPid)) { Output?.Invoke($"DebugActiveProcess failed ({Marshal_LastError()})"); return false; }
+            if (!Native.DebugActiveProcess(_attachPid))
+            {
+                int err = Marshal_LastError();
+                Output?.Invoke(err == 5
+                    ? "DebugActiveProcess failed: access denied. Run DisasmStudio as administrator when attaching to an elevated or protected target."
+                    : $"DebugActiveProcess failed ({err})");
+                return false;
+            }
             _pid = _attachPid;
             return true;
         }
@@ -177,21 +184,26 @@ public sealed partial class DebuggerEngine
         // To job-contain the target we must first pull it out of any job the host itself was launched into
         // (Windows Terminal, a CI runner, VS, …), since such a job usually forbids nesting ours — the later
         // AssignProcessToJobObject would fail with ERROR_ACCESS_DENIED. CREATE_BREAKAWAY_FROM_JOB breaks the
-        // child out, but only if the host's job permits breakaway; if it doesn't, CreateProcess itself fails
-        // with ERROR_ACCESS_DENIED, so we fall back to a normal, uncontained launch. (When the host is in no
-        // job, the flag is simply ignored.)
+        // child out, but only if the host's job permits breakaway. If it does not, retry inside the host job and
+        // require a nested assignment to our own constrained job before allowing the debuggee to continue.
         bool wantBreakaway = _useJob;
         uint flags = baseFlags | (wantBreakaway ? Native.CREATE_BREAKAWAY_FROM_JOB : 0);
         bool ok = Native.CreateProcessW(appName, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
             flags, IntPtr.Zero, workDir, ref si, out var pi);
         if (!ok && wantBreakaway && Marshal_LastError() == 5)   // ERROR_ACCESS_DENIED: host job forbids breakaway
         {
-            _useJob = false;   // can't contain in this environment — don't bother trying to assign a job later
-            Output?.Invoke("Job containment: the host's job forbids breakaway; launching without containment.");
+            Output?.Invoke("Job containment: the host forbids breakaway; retrying in its job and requiring nested containment.");
             ok = Native.CreateProcessW(appName, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
                 baseFlags, IntPtr.Zero, workDir, ref si, out pi);
         }
-        if (!ok) { Output?.Invoke($"CreateProcess failed ({Marshal_LastError()})"); return false; }
+        if (!ok)
+        {
+            int err = Marshal_LastError();
+            Output?.Invoke(err is 5 or 740
+                ? "CreateProcess failed: the target requires elevation. Run DisasmStudio as administrator for this target."
+                : $"CreateProcess failed ({err})");
+            return false;
+        }
         _pid = pi.dwProcessId;
         Native.CloseHandle(pi.hThread);
         return true;
@@ -241,7 +253,11 @@ public sealed partial class DebuggerEngine
             {
                 var info = ev.CreateProcess;
                 _proc = info.hProcess;
-                if (_useJob) TrySetupJob();
+                if (_useJob && !TrySetupJob())
+                {
+                    Output?.Invoke("Job containment could not be established; aborting before the target can continue.");
+                    _stopping = true;
+                }
                 Native.IsWow64Process(_proc, out bool wow);
                 Is32 = wow;   // host bitness == DLL bitness (rundll32 is bitness-matched), so this is correct
                 lock (_lock) _threads[ev.dwThreadId] = info.hThread;
@@ -824,27 +840,22 @@ public sealed partial class DebuggerEngine
     }
 
     /// <summary>Create a job object (kill-on-close + one active process) and assign the debuggee to it.
-    /// Best-effort: failures are reported but do not abort the launch. If the process is already in a
-    /// job (e.g. the host terminal's) and can't be moved, that's still acceptable — it's already
-    /// contained by the host's job; we note it and drop our own (now-unused) job handle.</summary>
-    private void TrySetupJob()
+    /// The sandboxed launch is aborted unless both the limits and assignment succeed. Nested assignment is
+    /// attempted when the host itself runs in a job; merely inheriting an unknown host job is not sufficient.</summary>
+    private bool TrySetupJob()
     {
-        // Is the process already in a job (e.g. launched by Windows Terminal/VS)? If so, it's already
-        // contained and we cannot re-assign it. Err 5 (ACCESS_DENIED) from AssignProcessToJobObject is a
-        // reliable "already in a job" signal; we check proactively to give a better diagnostic.
-        if (Native.IsProcessInJob(_proc, IntPtr.Zero, out bool alreadyJob) && alreadyJob)
-        {
-            Output?.Invoke("Job containment: process is already in a host job (Terminal/VS runner); containment is active from the host side.");
-            return;
-        }
         _job = Native.CreateJobObjectW(IntPtr.Zero, null);
-        if (_job == IntPtr.Zero) { Output?.Invoke("Job containment: CreateJobObject failed; running uncontained."); return; }
+        if (_job == IntPtr.Zero) { Output?.Invoke("Job containment: CreateJobObject failed."); return false; }
         var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
         info.BasicLimitInformation.LimitFlags = Native.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | Native.JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
         info.BasicLimitInformation.ActiveProcessLimit = 1;   // block child-process spawning
         uint sz = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
         if (!Native.SetInformationJobObject(_job, Native.JobObjectExtendedLimitInformation, ref info, sz))
+        {
             Output?.Invoke($"Job containment: SetInformationJobObject failed (err {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}).");
+            Native.CloseHandle(_job); _job = IntPtr.Zero;
+            return false;
+        }
 
         // AssignProcessToJobObject requires PROCESS_SET_QUOTA and PROCESS_TERMINATE on the process handle.
         // The handle from CREATE_PROCESS_DEBUG_EVENT may not carry these. Open a fresh handle via the PID.
@@ -854,18 +865,13 @@ public sealed partial class DebuggerEngine
         int assignErr = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
         if (hProc != _proc) Native.CloseHandle(hProc);
         if (assigned)
-            Output?.Invoke("Job containment active (child processes blocked, kill-on-close).");
-        else
         {
-            // If the process is already in a job (CREATE_BREAKAWAY_FROM_JOB couldn't pull it out because
-            // the host job doesn't allow breakaway), AssignProcessToJobObject returns ERROR_ACCESS_DENIED.
-            // That containment is still active — just not ours. Report it and drop our unused job handle.
-            if (assignErr == 5 || assignErr == 0)
-                Output?.Invoke("Job containment: process was not breakable from its host job; it remains contained by the host (Terminal/VS runner).");
-            else
-                Output?.Invoke($"Job containment: AssignProcessToJobObject failed (err {assignErr}).");
-            Native.CloseHandle(_job); _job = IntPtr.Zero;
+            Output?.Invoke("Job containment active (child processes blocked, kill-on-close).");
+            return true;
         }
+        Output?.Invoke($"Job containment: AssignProcessToJobObject failed (err {assignErr}).");
+        Native.CloseHandle(_job); _job = IntPtr.Zero;
+        return false;
     }
 
     // ---- breakpoints ----
