@@ -11,26 +11,40 @@ namespace DisasmStudio.Core.Analysis;
 /// </summary>
 public static class PointerScanner
 {
+    private const int ScanReadChunkBytes = 1024 * 1024;
+
     public static Dictionary<ulong, ulong> BuildStringPointerMap(
         IBinaryImage img, IReadOnlySet<ulong> stringStarts, long maxBytes = 64 * 1024 * 1024,
         CancellationToken token = default)
     {
         var map = new Dictionary<ulong, ulong>();
-        if (stringStarts.Count == 0) return map;
+        if (stringStarts.Count == 0 || maxBytes <= 0) return map;
 
         int ptr = img.Bitness / 8; // 4 or 8
         long scanned = 0;
         foreach (var s in img.Sections)
         {
             if (!s.IsReadable || s.IsExecutable || s.FileSize <= 0) continue;
-            var buf = img.ReadBytesAtVa(s.StartVa, s.FileSize);
-            for (int i = 0; i + ptr <= buf.Length; i += ptr) // pointers are aligned
+            long sectionLimit = Math.Min(s.FileSize, maxBytes - scanned);
+            int sectionOffset = 0;
+            while (sectionOffset < sectionLimit)
             {
-                if ((i & 0xFFFFF) == 0 && token.IsCancellationRequested) return map;
-                ulong val = ptr == 8 ? BitConverter.ToUInt64(buf, i) : BitConverter.ToUInt32(buf, i);
-                if (stringStarts.Contains(val)) map.TryAdd(val, s.StartVa + (ulong)i);
+                if (token.IsCancellationRequested) return map;
+                int requested = (int)Math.Min(ScanReadChunkBytes, sectionLimit - sectionOffset);
+                var buf = img.ReadBytesAtVa(s.StartVa + (ulong)sectionOffset, requested);
+                if (token.IsCancellationRequested) return map;
+                int count = Math.Min(requested, buf.Length);
+                for (int i = 0; i + ptr <= count; i += ptr) // pointers are aligned relative to the section
+                {
+                    if ((i & 0xFFFFF) == 0 && token.IsCancellationRequested) return map;
+                    ulong val = ptr == 8 ? BitConverter.ToUInt64(buf, i) : BitConverter.ToUInt32(buf, i);
+                    if (stringStarts.Contains(val)) map.TryAdd(val, s.StartVa + (ulong)sectionOffset + (ulong)i);
+                }
+                if (count == 0) break;
+                scanned += count;
+                sectionOffset += count;
+                if (count < requested) break;
             }
-            scanned += buf.Length;
             if (scanned >= maxBytes) break;
         }
         return map;
@@ -47,19 +61,32 @@ public static class PointerScanner
     {
         var result = new List<ulong>();
         var seen = new HashSet<ulong>();
+        if (maxBytes <= 0) return result;
         int ptr = img.Bitness / 8;
         long scanned = 0;
         foreach (var s in img.Sections)
         {
             if (!s.IsReadable || s.IsExecutable || s.FileSize <= 0) continue;
-            var buf = img.ReadBytesAtVa(s.StartVa, s.FileSize);
-            for (int i = 0; i + ptr <= buf.Length; i += ptr)
+            long sectionLimit = Math.Min(s.FileSize, maxBytes - scanned);
+            int sectionOffset = 0;
+            while (sectionOffset < sectionLimit)
             {
-                if ((i & 0xFFFFF) == 0 && token.IsCancellationRequested) return result;
-                ulong v = ptr == 8 ? BitConverter.ToUInt64(buf, i) : BitConverter.ToUInt32(buf, i);
-                if (img.IsExecutableVa(v) && seen.Add(v)) result.Add(v);
+                if (token.IsCancellationRequested) return result;
+                int requested = (int)Math.Min(ScanReadChunkBytes, sectionLimit - sectionOffset);
+                var buf = img.ReadBytesAtVa(s.StartVa + (ulong)sectionOffset, requested);
+                if (token.IsCancellationRequested) return result;
+                int count = Math.Min(requested, buf.Length);
+                for (int i = 0; i + ptr <= count; i += ptr)
+                {
+                    if ((i & 0xFFFFF) == 0 && token.IsCancellationRequested) return result;
+                    ulong v = ptr == 8 ? BitConverter.ToUInt64(buf, i) : BitConverter.ToUInt32(buf, i);
+                    if (img.IsExecutableVa(v) && seen.Add(v)) result.Add(v);
+                }
+                if (count == 0) break;
+                scanned += count;
+                sectionOffset += count;
+                if (count < requested) break;
             }
-            scanned += buf.Length;
             if (scanned >= maxBytes) break;
         }
         return result;

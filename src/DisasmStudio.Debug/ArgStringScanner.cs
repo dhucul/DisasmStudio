@@ -105,6 +105,7 @@ public static class ArgStringScanner
     }
 
     private static bool IsPrint(byte c) => c is >= 0x20 and <= 0x7E;
+    private static bool IsStringHead(byte c) => IsPrint(c) || c == 0x09;
     private static bool IsStrChar(byte c) => IsPrint(c) || c is 0x09 or 0x0A or 0x0D;   // allow tab/LF/CR inside
 
     /// <summary>Classify a freshly-read buffer as an ANSI or UTF-16LE string located at <paramref name="va"/>,
@@ -114,7 +115,7 @@ public static class ArgStringScanner
     {
         int n = b.Length;
         // UTF-16LE: alternating printable / zero bytes, terminated by a wide NUL.
-        if (n >= 4 && b[1] == 0 && b[3] == 0 && IsPrint(b[0]) && IsPrint(b[2]))
+        if (n >= 4 && b[1] == 0 && b[3] == 0 && IsStringHead(b[0]) && IsStringHead(b[2]))
         {
             int len = 0;
             while (len + 1 < n && !(b[len] == 0 && b[len + 1] == 0)) len += 2;
@@ -127,7 +128,7 @@ public static class ArgStringScanner
             }
         }
         // ANSI: a printable run (tab/LF/CR allowed inside so a "…%s\n" message isn't truncated) ending in NUL.
-        if (IsPrint(b[0]))
+        if (IsStringHead(b[0]))
         {
             int len = 0;
             while (len < n && b[len] != 0 && IsStrChar(b[len])) len++;

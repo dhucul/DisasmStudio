@@ -3394,7 +3394,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool allowLineBreaks = _dbgViewLive && !si.Wide;
+        // Only ArgStringScanner rows accept CR/LF. The general section scanner does not, so offering line
+        // breaks for an ordinary live-section row would make that row disappear on the immediate rescan.
+        bool allowLineBreaks = _dbgViewLive && si.Referenced && !si.Wide;
         string? replacement = Dialogs.AskStringEdit(this, si.Va, si.Text, si.Length, si.Wide, allowLineBreaks);
         if (replacement is null) return;
         if (!StringEditCodec.TryEncode(replacement, si.Length, si.Wide, allowLineBreaks,

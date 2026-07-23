@@ -591,8 +591,8 @@ internal static class Dialogs
         var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 70 };
         void Validate()
         {
-            bool valid = StringEditCodec.TryEncode(box.Text, capacityChars, wide, allowLineBreaks,
-                out _, out string why);
+            bool valid = StringEditCodec.TryValidate(
+                box.Text, capacityChars, wide, allowLineBreaks, out string why);
             count.Text = $"{box.Text.Length:N0} / {capacityChars:N0}";
             error.Text = valid ? "" : why;
             ok.IsEnabled = valid;

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using DisasmStudio.Core.Formats;
 
@@ -20,6 +21,8 @@ public sealed record FoundString(ulong Va, int Length, bool Wide, string Text)
 /// </summary>
 public static class StringScanner
 {
+    private const int ScanReadChunkBytes = 1024 * 1024;
+
     /// <summary>Cap on bytes scanned per section when reading live process memory: a section's VirtualSize can
     /// be huge or only partly committed, so this bounds the read + buffer (ReadBytesAtVa returns the committed
     /// prefix anyway).</summary>
@@ -44,22 +47,25 @@ public static class StringScanner
             // that legitimately holds string tables; ArmAnalyzer opts in, then filters out code-region hits).
             var gate = s.IsExecutable ? execRefs : null;
             if (s.IsExecutable && gate is null && !includeExecutable) continue;
-            ScanSection(img, s.StartVa, size, minLength, maxResults, found, gate, token);
+            if (!ScanSection(img, s.StartVa, size, minLength, maxResults, found, gate, token))
+                break;
             if (found.Count >= maxResults) break;
         }
         return found;
     }
 
-    private static void ScanSection(IBinaryImage img, ulong start, int size, int minLength, int maxResults,
+    private static bool ScanSection(IBinaryImage img, ulong start, int size, int minLength, int maxResults,
         List<FoundString> found, IReadOnlySet<ulong>? gate, CancellationToken token)
     {
-        var buf = img.ReadBytesAtVa(start, size);
+        var storage = ReadSection(img, start, size, token);
+        if (storage is null) return false;
+        ReadOnlySpan<byte> buf = storage.WrittenSpan;
 
         int i = 0;
         while (i < buf.Length)
         {
-            if ((i & 0xFFFF) == 0 && token.IsCancellationRequested) return;
-            if (found.Count >= maxResults) return;
+            if ((i & 0xFFFF) == 0 && token.IsCancellationRequested) return false;
+            if (found.Count >= maxResults) return true;
 
             // ASCII run
             int a = i;
@@ -84,6 +90,32 @@ public static class StringScanner
             }
             else i++;
         }
+        return true;
+    }
+
+    /// <summary>Read a section incrementally so cancellation is observed between bounded reads instead of only
+    /// after one potentially multi-gigabyte allocation/copy. The growing buffer preserves strings that cross a
+    /// chunk boundary without splitting or duplicating them.</summary>
+    private static ArrayBufferWriter<byte>? ReadSection(
+        IBinaryImage img, ulong start, int size, CancellationToken token)
+    {
+        if (token.IsCancellationRequested) return null;
+        var result = new ArrayBufferWriter<byte>(Math.Min(size, ScanReadChunkBytes));
+        int read = 0;
+        while (read < size)
+        {
+            if (token.IsCancellationRequested) return null;
+            int requested = Math.Min(ScanReadChunkBytes, size - read);
+            var chunk = img.ReadBytesAtVa(start + (ulong)read, requested);
+            if (token.IsCancellationRequested) return null;
+            int count = Math.Min(requested, chunk.Length);
+            if (count == 0) break;
+            chunk.AsSpan(0, count).CopyTo(result.GetSpan(count));
+            result.Advance(count);
+            read += count;
+            if (count < requested) break;
+        }
+        return result;
     }
 
     /// <summary>True if any byte of the run is a recorded data-reference target.</summary>
@@ -96,7 +128,7 @@ public static class StringScanner
 
     private static bool IsPrintable(byte b) => b is >= 0x20 and < 0x7F or 0x09;
 
-    private static string DecodeAscii(byte[] buf, int offset, int byteLen, bool wide)
+    private static string DecodeAscii(ReadOnlySpan<byte> buf, int offset, int byteLen, bool wide)
     {
         var sb = new StringBuilder(byteLen);
         for (int k = 0; k < byteLen; k += wide ? 2 : 1)

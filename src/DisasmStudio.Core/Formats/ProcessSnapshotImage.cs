@@ -207,7 +207,18 @@ public sealed class ProcessSnapshotImage : IBinaryImage
 
     // ---- patching (in place over the backing; persisted by re-writing the container) ----
     public void Patch(int offset, ReadOnlySpan<byte> bytes) => _edits.Patch(offset, bytes);
-    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes) { int o = VaToOffset(va); if (o < 0) return false; Patch(o, bytes); return true; }
+    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes)
+    {
+        int i = FindSeg(va);
+        if (i < 0) return false;
+        var s = _segs[i];
+        int within = (int)(va - s.Va);
+        // Segment payloads are contiguous in the container even when their VAs are disjoint. Never let a VA
+        // patch run past this segment and silently overwrite the next segment's bytes.
+        if (bytes.Length > s.Size - within) return false;
+        Patch(s.Start + within, bytes);
+        return true;
+    }
     public void RevertPatch(int offset, int count) => _edits.RevertPatch(offset, count);
     public bool IsPatchedAt(int offset) => _edits.IsPatchedAt(offset);
     public bool IsDirty => _edits.IsDirty;

@@ -21,6 +21,11 @@ public sealed class MappedFile : IDisposable
     // Reads happen on background analysis/string-scan threads while the UI can add another patch. A concurrent
     // map keeps those overlay probes/enumerations safe; the undo list itself remains UI-thread-owned.
     private readonly ConcurrentDictionary<int, byte> _patches = [];   // in-memory edits, overlaid on every read
+    // ConcurrentDictionary.Count coordinates across every internal partition. File analysis calls the read
+    // methods millions of times, so keep a separately-published count for the overwhelmingly common clean-file
+    // fast path instead of consulting Count for every byte.
+    private int _patchCount;
+    private bool HasPatches => Volatile.Read(ref _patchCount) != 0;
     private readonly List<Dictionary<int, (bool Had, byte Val)>> _undo = [];   // per-Patch pre-edit state, for undo
     private bool _disposed;
 
@@ -64,14 +69,14 @@ public sealed class MappedFile : IDisposable
 
     public byte ReadByte(int o)
     {
-        if (_patches.Count > 0 && _patches.TryGetValue(o, out var p)) return p;
+        if (HasPatches && _patches.TryGetValue(o, out var p)) return p;
         return (uint)o < (uint)Length ? _view.ReadByte(o) : (byte)0;
     }
-    public ushort ReadU16(int o) => _patches.Count == 0 && InBounds(o, 2) ? _view.ReadUInt16(o) : (ushort)(ReadByte(o) | ReadByte(o + 1) << 8);
-    public uint ReadU32(int o) => _patches.Count == 0 && InBounds(o, 4) ? _view.ReadUInt32(o)
+    public ushort ReadU16(int o) => !HasPatches && InBounds(o, 2) ? _view.ReadUInt16(o) : (ushort)(ReadByte(o) | ReadByte(o + 1) << 8);
+    public uint ReadU32(int o) => !HasPatches && InBounds(o, 4) ? _view.ReadUInt32(o)
         : (uint)(ReadByte(o) | ReadByte(o + 1) << 8 | ReadByte(o + 2) << 16 | ReadByte(o + 3) << 24);
     public int ReadI32(int o) => (int)ReadU32(o);
-    public ulong ReadU64(int o) => _patches.Count == 0 && InBounds(o, 8) ? _view.ReadUInt64(o) : ReadU32(o) | (ulong)ReadU32(o + 4) << 32;
+    public ulong ReadU64(int o) => !HasPatches && InBounds(o, 8) ? _view.ReadUInt64(o) : ReadU32(o) | (ulong)ReadU32(o + 4) << 32;
 
     public byte[] ReadBytes(int offset, int count)
     {
@@ -79,7 +84,7 @@ public sealed class MappedFile : IDisposable
         count = Math.Min(count, Length - offset);
         var b = new byte[count];
         _view.ReadArray(offset, b, 0, count);
-        if (_patches.Count > 0)
+        if (HasPatches)
             for (int i = 0; i < count; i++) if (_patches.TryGetValue(offset + i, out var p)) b[i] = p;
         return b;
     }
@@ -94,8 +99,8 @@ public sealed class MappedFile : IDisposable
     }
 
     // ---- patching ----
-    public bool IsDirty => _patches.Count > 0;
-    public int PatchCount => _patches.Count;
+    public bool IsDirty => HasPatches;
+    public int PatchCount => Volatile.Read(ref _patchCount);
     public bool IsPatched(int offset) => _patches.ContainsKey(offset);
 
     /// <summary>The live edit map (file offset → new value) — a read-only view, for persisting into a project.</summary>
@@ -110,8 +115,10 @@ public sealed class MappedFile : IDisposable
         {
             int o = offset + i;
             if ((uint)o >= (uint)Length) continue;
-            group[o] = _patches.TryGetValue(o, out var prev) ? (true, prev) : (false, (byte)0);
+            bool hadPatch = _patches.TryGetValue(o, out var prev);
+            group[o] = hadPatch ? (true, prev) : (false, (byte)0);
             _patches[o] = bytes[i];
+            if (!hadPatch) Interlocked.Increment(ref _patchCount);
         }
         if (group.Count > 0) _undo.Add(group);
     }
@@ -125,14 +132,20 @@ public sealed class MappedFile : IDisposable
         var group = _undo[^1];
         _undo.RemoveAt(_undo.Count - 1);
         foreach (var kv in group)
-            if (kv.Value.Had) _patches[kv.Key] = kv.Value.Val; else _patches.TryRemove(kv.Key, out _);
+            if (kv.Value.Had)
+            {
+                if (_patches.TryAdd(kv.Key, kv.Value.Val)) Interlocked.Increment(ref _patchCount);
+                else _patches[kv.Key] = kv.Value.Val;
+            }
+            else if (_patches.TryRemove(kv.Key, out _)) Interlocked.Decrement(ref _patchCount);
         return true;
     }
 
     /// <summary>Drop edits in [offset, offset+count), restoring the original bytes.</summary>
     public void RevertPatch(int offset, int count)
     {
-        for (int i = 0; i < count; i++) _patches.TryRemove(offset + i, out _);
+        for (int i = 0; i < count; i++)
+            if (_patches.TryRemove(offset + i, out _)) Interlocked.Decrement(ref _patchCount);
     }
 
     /// <summary>Write the original file plus all edits to <paramref name="dest"/> (must differ from the open file).</summary>
@@ -141,7 +154,7 @@ public sealed class MappedFile : IDisposable
         if (string.Equals(System.IO.Path.GetFullPath(dest), System.IO.Path.GetFullPath(Path), StringComparison.OrdinalIgnoreCase))
             throw new IOException("The original file is open and can't be overwritten in place — save the patched copy under a different name.");
         File.Copy(Path, dest, overwrite: true);
-        if (_patches.Count == 0) return;
+        if (!HasPatches) return;
         using var fs = new FileStream(dest, FileMode.Open, FileAccess.Write);
         foreach (var (off, b) in _patches) { fs.Seek(off, SeekOrigin.Begin); fs.WriteByte(b); }
     }
