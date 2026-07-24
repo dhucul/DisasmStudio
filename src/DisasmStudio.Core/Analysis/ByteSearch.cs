@@ -70,7 +70,7 @@ public static class ByteSearch
     {
         if (pattern.Length == 0) return null;
         ulong min = img.MinVa, max = img.MaxVa;
-        if (max < min + (ulong)pattern.Length) return null;
+        if (max < min || (ulong)pattern.Length > max - min) return null;
         if (start < min) start = min;
         if (start > max - 1) start = max - 1;
 
@@ -93,16 +93,23 @@ public static class ByteSearch
         var buf = new byte[ChunkSize + len - 1];
 
         ulong pos = from;
-        while (pos + (ulong)len <= max)
+        while (pos <= max && (ulong)len <= max - pos)
         {
             if (token.IsCancellationRequested) return null;
             int want = (int)Math.Min((ulong)buf.Length, max - pos);
             int read = img.ReadVa(pos, buf.AsSpan(0, want));
             if (read == 0)
             {
-                // Whole window unmapped — jump to the next page (mappings are page-granular).
-                ulong nextPage = (pos & ~0xFFFUL) + 0x1000;
-                pos = nextPage > pos ? nextPage : pos + 1;
+                // Jump to the next surfaced mapped region; ELF and Mach-O sections need not be page-aligned.
+                ulong next = max;
+                if (img.HeaderRegion is { } header && header.StartVa > pos)
+                    next = Math.Min(next, header.StartVa);
+                foreach (var section in img.Sections)
+                    if (section.StartVa > pos)
+                        next = Math.Min(next, section.StartVa);
+
+                if (next <= pos || next >= max) break;
+                pos = next;
                 continue;
             }
             if (read < len) { pos += (ulong)read; continue; }   // short mapped tail: no full pattern fits

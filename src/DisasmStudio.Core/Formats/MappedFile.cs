@@ -65,7 +65,11 @@ public sealed class MappedFile : IDisposable
         return new MappedFile(mmf, view, (int)Math.Min(length, int.MaxValue), path);
     }
 
-    public bool InBounds(int offset, int count) => offset >= 0 && count >= 0 && offset + count <= Length;
+    public bool InBounds(int offset, int count) =>
+        offset >= 0 &&
+        count >= 0 &&
+        count <= Length &&
+        offset <= Length - count;
 
     public byte ReadByte(int o)
     {

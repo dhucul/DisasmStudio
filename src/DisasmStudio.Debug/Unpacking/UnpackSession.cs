@@ -510,17 +510,20 @@ public sealed class UnpackSession
         if (_done) return;
         _done = true;
         string? report = _vmTrace?.ReportPath;
-        if (!string.IsNullOrWhiteSpace(report))
+        bool reportWritten = !string.IsNullOrWhiteSpace(report);
+        string? resultError = null;
+        if (reportWritten)
             Report($"VM trace report: {report}");
         else
         {
-            Report("VM trace completed without a report.");
-            if (!string.IsNullOrWhiteSpace(_vmTrace?.LastReportError))
-                Report("VM trace report write failed: " + _vmTrace.LastReportError);
+            resultError = !string.IsNullOrWhiteSpace(_vmTrace?.LastReportError)
+                ? "VM trace report write failed: " + _vmTrace.LastReportError
+                : "VM trace completed without producing a report.";
+            Report(resultError);
         }
         if (!alreadyExited)
             try { _eng.Stop(); } catch { }
-        _tcs.TrySetResult(new UnpackResult(true, 0, OepMethod.TraceVm, false, 0, 0, null, null,
+        _tcs.TrySetResult(new UnpackResult(reportWritten, 0, OepMethod.TraceVm, false, 0, 0, null, resultError,
             _log.ToString(), _faultDumpPath, _eng.ImageBase, ProbeSnapshotArray(), report));
     }
 

@@ -2,6 +2,7 @@ using System.IO;
 using System.Text;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Core.Unpacking;
 
 namespace DisasmStudio.Wpf.Diagnostics;
 
@@ -30,6 +31,8 @@ internal static class StringEditSmoke
         string chunkBoundaryPath = Path.Combine(Path.GetTempPath(), "ds_smoke_string_chunk_boundary.bin");
         string truncatedSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_snapshot_truncated.dssnap");
         string invalidRangeSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_snapshot_range.dssnap");
+        string samePageSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_snapshot_same_page.dssnap");
+        string invalidPePath = Path.Combine(Path.GetTempPath(), "ds_smoke_invalid_pe.bin");
         try
         {
             var data = new byte[128];
@@ -187,6 +190,35 @@ internal static class StringEditSmoke
             catch (BinaryFormatException) { rejectedRange = true; }
             Check(rejectedRange, "snapshot rejects an overflowing segment range", ref pass);
 
+            const ulong samePageBase = 0x720000;
+            byte[] samePageNeedle = [0xDE, 0xAD, 0xBE, 0xEF];
+            ProcessSnapshotImage.Write(samePageSnapshotPath, 64, samePageBase, samePageBase,
+                [
+                    new SnapshotSegment(samePageBase, new byte[0x50], 0x40000040, ".first"),
+                    new SnapshotSegment(samePageBase + 0x80, samePageNeedle, 0x40000040, ".second"),
+                ]);
+            var samePageSnapshot = ProcessSnapshotImage.Load(samePageSnapshotPath);
+            Check(ByteSearch.Find(samePageSnapshot, samePageBase, samePageNeedle, null, forward: true)
+                    == samePageBase + 0x80,
+                "byte search finds a later same-page mapping after an unmapped gap", ref pass);
+
+            byte[] invalidPe = new byte[0x40];
+            invalidPe[0] = (byte)'M';
+            invalidPe[1] = (byte)'Z';
+            BitConverter.GetBytes(int.MaxValue).CopyTo(invalidPe, PeConstants.DosLfanewOffset);
+            Check(!PeView.TryParse(invalidPe, out _),
+                "PE view rejects an overflowing header offset without throwing", ref pass);
+            File.WriteAllBytes(invalidPePath, invalidPe);
+            bool rejectedInvalidPe;
+            try { _ = PeImage.Load(invalidPePath); rejectedInvalidPe = false; }
+            catch (BinaryFormatException) { rejectedInvalidPe = true; }
+            Check(rejectedInvalidPe, "file PE loader rejects an overflowing header offset", ref pass);
+
+            Check(!Patcher.Assemble(64, 0x1000, "add rax, 0x100000000").Ok
+                    && !Patcher.Assemble(32, 0x1000, "mov eax, 0x100000000").Ok
+                    && Patcher.Assemble(32, 0x1000, "mov eax, 0xFFFFFFFF").Ok,
+                "assembler rejects truncated immediates and accepts a 32-bit bit pattern", ref pass);
+
             var peMemory = PeMemoryImage.Load(typeof(StringEditSmoke).Assembly.Location);
             ulong peHeaderVa = peMemory.ImageBase + 8;
             byte[] peOriginal = peMemory.ReadBytesAtVa(peHeaderVa, 2);
@@ -211,6 +243,8 @@ internal static class StringEditSmoke
             try { File.Delete(chunkBoundaryPath); } catch { }
             try { File.Delete(truncatedSnapshotPath); } catch { }
             try { File.Delete(invalidRangeSnapshotPath); } catch { }
+            try { File.Delete(samePageSnapshotPath); } catch { }
+            try { File.Delete(invalidPePath); } catch { }
         }
 
         Log(pass ? "RESULT: PASS" : "RESULT: FAIL");

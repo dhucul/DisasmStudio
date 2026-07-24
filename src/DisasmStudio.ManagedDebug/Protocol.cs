@@ -48,6 +48,8 @@ public sealed record MdbgEvent
 /// <summary>Command / event name constants (avoid stringly-typed drift across the two processes).</summary>
 public static class Mdbg
 {
+    public const int LaunchFailedExitCode = int.MinValue;
+
     // commands
     public const string Launch = "launch", SetBreakpoint = "setBreakpoint", RemoveBreakpoint = "removeBreakpoint",
         Go = "go", StepInto = "stepInto", StepOver = "stepOver", StepOut = "stepOut",

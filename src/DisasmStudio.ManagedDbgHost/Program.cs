@@ -49,7 +49,11 @@ while ((line = reader.ReadLine()) is not null)
                 _ = Task.Run(() =>
                 {
                     try { engine.Launch(lc.Target!, lc.Args, lc.Cwd, lc.Breakpoints, lc.Framework); }
-                    catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message }); }
+                    catch (Exception ex)
+                    {
+                        Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message });
+                        Emit(new MdbgEvent { Ev = Mdbg.Exited, Code = Mdbg.LaunchFailedExitCode });
+                    }
                 });
                 break;
             case Mdbg.SetBreakpoint: if (cmd.Bp is not null) engine.SetBreakpoint(cmd.Bp); break;

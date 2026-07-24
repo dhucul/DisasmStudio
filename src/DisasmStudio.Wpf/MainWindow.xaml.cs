@@ -1731,7 +1731,8 @@ public partial class MainWindow : Window
 
     private void OnManagedExited(int code)
     {
-        StatusText.Text = $"Managed target exited (code {code}).";
+        if (code != Mdbg.LaunchFailedExitCode)
+            StatusText.Text = $"Managed target exited (code {code}).";
         EndManagedDebug();
     }
 
@@ -2237,11 +2238,46 @@ public partial class MainWindow : Window
             }
         }
 
+        if (patch.Length == 0)
+        {
+            MessageBox.Show(this, "The patch contains no bytes.", "Patch",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         // Cover enough whole instructions to hold the new bytes; pad the remainder with NOPs so the
         // following instruction stays aligned.
         int cover = 0;
         ulong p = va;
         while (cover < patch.Length && dis.TryDecodeAt(p, out var n) && n.Length > 0) { cover += n.Length; p += (ulong)n.Length; }
+
+        if (cover < patch.Length)
+        {
+            MessageBox.Show(this, "The patch does not fit in the remaining decodable bytes.", "Patch",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        int firstOffset = _image.VaToOffset(va);
+        bool contiguous = firstOffset >= 0;
+        for (int i = 0; contiguous && i < cover; i++)
+        {
+            if ((ulong)i > ulong.MaxValue - va)
+            {
+                contiguous = false;
+                break;
+            }
+
+            int actualOffset = _image.VaToOffset(va + (ulong)i);
+            contiguous = actualOffset >= 0 && (long)actualOffset == (long)firstOffset + i;
+        }
+        if (!contiguous)
+        {
+            MessageBox.Show(this, "The patch crosses a non-contiguous file-backed region.", "Patch",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         var final = Patcher.PadNop(patch, cover);
         if (!_image.PatchVa(va, final))
         {

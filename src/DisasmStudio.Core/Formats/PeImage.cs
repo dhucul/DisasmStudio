@@ -433,7 +433,7 @@ public sealed class PeImage : IBinaryImage, IDisposable
     {
         if (_f.Length < 0x40 || _f.ReadByte(0) != (byte)'M' || _f.ReadByte(1) != (byte)'Z')
             throw new BinaryFormatException("Not a valid MZ/DOS image.");
-        if (_peHeader <= 0 || _peHeader + 0x100 > _f.Length)
+        if (_peHeader <= 0 || _f.Length < 0x100 || _peHeader > _f.Length - 0x100)
             throw new BinaryFormatException("Invalid PE header offset.");
         if (_f.ReadU32(_peHeader) != 0x00004550)
             throw new BinaryFormatException("Missing 'PE\\0\\0' signature.");

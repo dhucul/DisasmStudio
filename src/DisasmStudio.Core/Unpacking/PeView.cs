@@ -78,7 +78,7 @@ public sealed class PeView
         view = null!;
         if (buffer.Length < 0x40 || buffer[0] != (byte)'M' || buffer[1] != (byte)'Z') return false;
         int pe = BitConverter.ToInt32(buffer, PeConstants.DosLfanewOffset);
-        if (pe <= 0 || pe + 0x108 > buffer.Length) return false;
+        if (pe <= 0 || buffer.Length < 0x108 || pe > buffer.Length - 0x108) return false;
         if (BitConverter.ToUInt32(buffer, pe) != PeConstants.PeSignature) return false;
         ushort magic = BitConverter.ToUInt16(buffer, pe + PeConstants.OptHeaderFromSig + PeConstants.Opt_Magic);
         if (magic != PeConstants.Pe32Magic && magic != PeConstants.Pe32PlusMagic) return false;

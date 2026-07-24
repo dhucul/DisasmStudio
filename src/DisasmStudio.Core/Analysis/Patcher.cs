@@ -136,7 +136,7 @@ public static class Patcher
             else if (TryReg32(d, out var d32))
             {
                 if (TryReg32(s, out var s32)) return Bin32(a, mn, d32, s32);
-                if (TryImm(s, out long imm)) return Bin32i(a, mn, d32, (int)imm);
+                if (TryImm(s, out long imm)) return Bin32i(a, mn, d32, imm);
             }
         }
         return $"can't assemble: {line}";
@@ -159,7 +159,10 @@ public static class Patcher
     }
     private static string? Bin64i(Assembler a, string mn, AssemblerRegister64 d, long imm)
     {
-        int i32 = (int)imm;   // ALU ops on r64 take a sign-extended imm32; mov takes the full imm64
+        if (mn != "mov" && (imm < int.MinValue || imm > int.MaxValue))
+            return "immediate does not fit a sign-extended 32-bit operand";
+
+        int i32 = unchecked((int)imm);   // ALU ops on r64 take a sign-extended imm32; mov takes the full imm64
         switch (mn)
         {
             case "mov": a.mov(d, imm); return null;
@@ -188,18 +191,22 @@ public static class Patcher
             default: return $"unsupported: {mn}";
         }
     }
-    private static string? Bin32i(Assembler a, string mn, AssemblerRegister32 d, int imm)
+    private static string? Bin32i(Assembler a, string mn, AssemblerRegister32 d, long imm)
     {
+        if (imm < int.MinValue || imm > uint.MaxValue)
+            return "immediate does not fit a 32-bit operand";
+
+        int bits = unchecked((int)imm);
         switch (mn)
         {
-            case "mov": a.mov(d, imm); return null;
-            case "add": a.add(d, imm); return null;
-            case "sub": a.sub(d, imm); return null;
-            case "xor": a.xor(d, imm); return null;
-            case "and": a.and(d, imm); return null;
-            case "or": a.or(d, imm); return null;
-            case "cmp": a.cmp(d, imm); return null;
-            case "test": a.test(d, imm); return null;
+            case "mov": a.mov(d, bits); return null;
+            case "add": a.add(d, bits); return null;
+            case "sub": a.sub(d, bits); return null;
+            case "xor": a.xor(d, bits); return null;
+            case "and": a.and(d, bits); return null;
+            case "or": a.or(d, bits); return null;
+            case "cmp": a.cmp(d, bits); return null;
+            case "test": a.test(d, bits); return null;
             default: return $"unsupported: {mn}";
         }
     }
