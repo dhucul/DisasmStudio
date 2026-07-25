@@ -21,6 +21,8 @@ public sealed partial class DebuggerEngine
     /// <summary>Raised on EXIT_PROCESS_DEBUG_EVENT before the debug event is continued.</summary>
     public event Action<int>? ProcessExiting;
     public event Action<int>? Exited;
+    /// <summary>Raised after the debug loop has released all process, thread, and job handles.</summary>
+    public event Action? Completed;
     /// <summary>Raised when the debugger has detached but left the debuggee running (see <see cref="Detach"/>).
     /// Distinct from <see cref="Exited"/> so the UI can report "still running" rather than an exit code.</summary>
     public event Action? Detached;
@@ -214,35 +216,41 @@ public sealed partial class DebuggerEngine
     // ---- the loop ----
     private void DebugLoop()
     {
-        if (!StartTarget()) { Exited?.Invoke(-1); return; }
-        IsActive = true;
-
-        while (!_ended)
+        try
         {
-            if (!Native.WaitForDebugEvent(out var ev, 0xFFFFFFFF)) break;
-            CurrentThreadId = ev.dwThreadId;
-            ClearExecCache();   // the target just ran; its committed-memory map may have changed since the last stop
-            uint cont = Native.DBG_CONTINUE;
-            bool stop = HandleEvent(ev, ref cont);
-            if (_ended) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont); break; }
-            if (_stopping) { DoStop(ev); break; }
+            if (!StartTarget()) { Exited?.Invoke(-1); return; }
+            IsActive = true;
 
-            if (stop)
+            while (!_ended)
             {
-                // Re-arm any breakpoints we stepped off (for step over/out/run-to) regardless of why we stopped.
-                if (_reArmOnNextStop.Count > 0) { foreach (var a in _reArmOnNextStop) ArmAddr(a); _reArmOnNextStop.Clear(); }
-                IsStopped = true;
-                var (mode, target) = _resume.Take();
-                IsStopped = false;
-                if (mode == ResumeMode.Stop) { DoStop(ev); break; }
-                if (mode == ResumeMode.Detach) { DoDetach(); break; }
-                Running?.Invoke();
-                DoResume(mode, target, ev, cont);
-            }
-            else Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
-        }
+                if (!Native.WaitForDebugEvent(out var ev, 0xFFFFFFFF)) break;
+                CurrentThreadId = ev.dwThreadId;
+                ClearExecCache();   // the target just ran; its committed-memory map may have changed since the last stop
+                uint cont = Native.DBG_CONTINUE;
+                bool stop = HandleEvent(ev, ref cont);
+                if (_ended) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont); break; }
+                if (_stopping) { DoStop(ev); break; }
 
-        Cleanup();
+                if (stop)
+                {
+                    // Re-arm any breakpoints we stepped off (for step over/out/run-to) regardless of why we stopped.
+                    if (_reArmOnNextStop.Count > 0) { foreach (var a in _reArmOnNextStop) ArmAddr(a); _reArmOnNextStop.Clear(); }
+                    IsStopped = true;
+                    var (mode, target) = _resume.Take();
+                    IsStopped = false;
+                    if (mode == ResumeMode.Stop) { DoStop(ev); break; }
+                    if (mode == ResumeMode.Detach) { DoDetach(); break; }
+                    Running?.Invoke();
+                    DoResume(mode, target, ev, cont);
+                }
+                else Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+            }
+        }
+        finally
+        {
+            Cleanup();
+            Completed?.Invoke();
+        }
     }
 
     private bool HandleEvent(in Native.DEBUG_EVENT ev, ref uint cont)

@@ -26,6 +26,8 @@ internal sealed class ManagedDebugEngine
     private int _pid;
 
     private readonly object _gate = new();
+    private readonly ManualResetEvent _lifecycleRequested = new(false);
+    private volatile bool _stopRequested;
     private CorDebugController? _stoppedController;   // non-null while the target is stopped
     private CorDebugThread? _stoppedThread;
 
@@ -43,6 +45,7 @@ internal sealed class ManagedDebugEngine
 
     public void Launch(string target, string? args, string? cwd, BpLoc[]? pending, bool framework)
     {
+        if (_stopRequested) return;
         if (pending is { Length: > 0 }) lock (_gate) _pending.AddRange(pending);
 
         string cmdline = string.IsNullOrEmpty(args) ? Quote(target) : $"{Quote(target)} {args}";
@@ -65,6 +68,18 @@ internal sealed class ManagedDebugEngine
         }
         _pid = proc.ProcessId;
         try { _osProc = Process.GetProcessById(_pid); } catch { /* best-effort for exit code */ }
+        if (_stopRequested)
+        {
+            _dbgshim.CloseResumeHandle(proc.ResumeHandle);
+            KillTarget();
+            return;
+        }
+        if (_detachRequested)
+        {
+            try { _dbgshim.ResumeProcess(proc.ResumeHandle); }
+            finally { _dbgshim.CloseResumeHandle(proc.ResumeHandle); }
+            return;
+        }
 
         CorDebug? cordebug = null;
         HRESULT hr = HRESULT.E_FAIL;
@@ -82,8 +97,14 @@ internal sealed class ManagedDebugEngine
                     ready.Set();
                 });
                 _dbgshim.ResumeProcess(proc.ResumeHandle);
-                if (!ready.WaitOne(TimeSpan.FromSeconds(30)))
+                int wait = WaitHandle.WaitAny([ready, _lifecycleRequested], TimeSpan.FromSeconds(30));
+                if (wait == WaitHandle.WaitTimeout)
                     throw new TimeoutException("the target's .NET (Core/5+) runtime did not start within 30s — is it a supported .NET Core app?");
+                if (wait == 1)
+                {
+                    if (_stopRequested) KillTarget();
+                    return;
+                }
             }
             finally
             {
@@ -99,11 +120,25 @@ internal sealed class ManagedDebugEngine
             throw;
         }
 
+        if (_stopRequested) { KillTarget(); return; }
+        if (_detachRequested) return;   // target was resumed, but the user cancelled attachment
         _cordebug = cordebug;
         _cb = BuildCallback();
         cordebug.Initialize();
         cordebug.SetManagedHandler(_cb);
         _process = cordebug.DebugActiveProcess(proc.ProcessId, false);
+        if (_stopRequested)
+        {
+            try { _process.Terminate(0); } catch { }
+            KillTarget();
+            return;
+        }
+        if (_detachRequested)
+        {
+            try { _process.Stop(0); } catch { }
+            try { _process.Detach(); } catch { }
+            return;
+        }
 
         _emit(new MdbgEvent { Ev = Mdbg.Launched, Pid = _pid });
     }
@@ -117,6 +152,7 @@ internal sealed class ManagedDebugEngine
     /// breakpoints, stepping, stacks, locals — is the same ICorDebug machinery as the Core path.</summary>
     private void LaunchFramework(string target, string cmdline, string workdir)
     {
+        if (_stopRequested) return;
         CorDebug cordebug;
         string version = "v4.0.30319";
         try
@@ -169,6 +205,18 @@ internal sealed class ManagedDebugEngine
 
         _pid = _process.Id;
         try { _osProc = Process.GetProcessById(_pid); } catch { /* best-effort for exit code */ }
+        if (_stopRequested)
+        {
+            try { _process.Terminate(0); } catch { }
+            KillTarget();
+            return;
+        }
+        if (_detachRequested)
+        {
+            try { _process.Stop(0); } catch { }
+            try { _process.Detach(); } catch { }
+            return;
+        }
         _emit(new MdbgEvent { Ev = Mdbg.Launched, Pid = _pid });
     }
 
@@ -453,7 +501,9 @@ internal sealed class ManagedDebugEngine
     {
         // A Detach can race the launch (before _process exists) and be dropped; the flag makes the subsequent
         // Quit → Stop honor it — detach, don't terminate the debuggee the user asked to keep running.
-        if (_detachRequested) { try { _process?.Stop(0); } catch { } try { _process?.Detach(); } catch { } return; }
+        if (_detachRequested) { _lifecycleRequested.Set(); try { _process?.Stop(0); } catch { } try { _process?.Detach(); } catch { } return; }
+        _stopRequested = true;
+        _lifecycleRequested.Set();
         try { _process?.Stop(0); } catch { }
         try { _process?.Terminate(0); } catch { }
         if (_process is null) KillTarget();   // launch failed before attach → kill the orphaned target
@@ -461,10 +511,11 @@ internal sealed class ManagedDebugEngine
 
     public void Detach()
     {
+        if (_stopRequested) return;
         _detachRequested = true;
+        _lifecycleRequested.Set();
         try { _process?.Stop(0); } catch { }
         try { _process?.Detach(); } catch { }
-        if (_process is null) KillTarget();   // resumed-but-never-attached orphan (failed launch) → clean up
     }
 
     /// <summary>Terminate the target via the OS handle — the fallback when we resumed it but never attached

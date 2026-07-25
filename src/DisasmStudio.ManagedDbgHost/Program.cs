@@ -33,6 +33,7 @@ try { engine = new ManagedDebugEngine(Emit); }
 catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = "engine init failed: " + ex.Message }); return 1; }
 
 string? line;
+Task? launchTask = null;
 while ((line = reader.ReadLine()) is not null)
 {
     MdbgCommand? cmd;
@@ -45,8 +46,13 @@ while ((line = reader.ReadLine()) is not null)
             case Mdbg.Launch:
                 // Launch (register-for-startup + wait + attach) can take seconds; run it off the command-reader
                 // thread so Stop/Quit stay responsive if the target's runtime never starts (e.g. a wrong-runtime target).
+                if (launchTask is not null)
+                {
+                    Emit(new MdbgEvent { Ev = Mdbg.Error, Message = "a managed target has already been launched by this host" });
+                    break;
+                }
                 var lc = cmd;
-                _ = Task.Run(() =>
+                launchTask = Task.Run(() =>
                 {
                     try { engine.Launch(lc.Target!, lc.Args, lc.Cwd, lc.Breakpoints, lc.Framework); }
                     catch (Exception ex)
@@ -65,11 +71,15 @@ while ((line = reader.ReadLine()) is not null)
             case Mdbg.Pause: engine.Pause(); break;
             case Mdbg.Stop: engine.Stop(); break;
             case Mdbg.Detach: engine.Detach(); break;
-            case Mdbg.Quit: engine.Stop(); return 0;   // terminate the debuggee, then exit
+            case Mdbg.Quit:
+                engine.Stop();
+                if (launchTask is not null) try { await launchTask.ConfigureAwait(false); } catch { }
+                return 0;   // launch has observed Stop/Detach and resolved its target before the host exits
         }
     }
     catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message }); }
 }
 // Pipe closed (the app went away) — terminate the debuggee so it isn't orphaned. A prior Detach makes this a no-op.
 engine.Stop();
+if (launchTask is not null) try { await launchTask.ConfigureAwait(false); } catch { }
 return 0;

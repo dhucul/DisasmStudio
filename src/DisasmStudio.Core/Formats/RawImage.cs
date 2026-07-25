@@ -79,19 +79,43 @@ public sealed class RawImage : IBinaryImage, IDisposable
 
     /// <summary>Map a flat blob at <paramref name="baseVa"/> with the entry at the base (shellcode / dumps).</summary>
     public static RawImage Load(string path, ulong baseVa, int bitness) =>
-        new(MappedFile.Open(path), path, baseVa, bitness, baseVa, ArchFor(bitness), null);
+        Create(path, baseVa, bitness, baseVa, ArchFor(bitness), null);
 
     /// <summary>Map a flat blob with an explicit entry point and optional firmware markers (see
     /// <see cref="FirmwareScanner"/>). Used for firmware, whose entry is a reset vector near the top of the image.</summary>
     public static RawImage Load(string path, ulong baseVa, int bitness, ulong entryVa,
                                 IReadOnlyList<NamedSymbol>? symbols) =>
-        new(MappedFile.Open(path), path, baseVa, bitness, entryVa, ArchFor(bitness), symbols);
+        Create(path, baseVa, bitness, entryVa, ArchFor(bitness), symbols);
 
     /// <summary>Map a flat blob with an explicit instruction-set architecture — the ARM-family path used by
     /// the raw-load dialog to open firmware as ARM/Thumb/AArch64. Bitness is derived from the architecture.</summary>
     public static RawImage Load(string path, ulong baseVa, int bitness, ulong entryVa,
                                 Architecture arch, IReadOnlyList<NamedSymbol>? symbols) =>
-        new(MappedFile.Open(path), path, baseVa, bitness, entryVa, arch, symbols);
+        Create(path, baseVa, bitness, entryVa, arch, symbols);
+
+    private static RawImage Create(string path, ulong baseVa, int bitness, ulong entryVa,
+                                   Architecture arch, IReadOnlyList<NamedSymbol>? symbols)
+    {
+        var file = MappedFile.Open(path);
+        try
+        {
+            ulong length = (ulong)file.Length;
+            if (length > ulong.MaxValue - baseVa)
+                throw new BinaryFormatException("Raw image address range overflows.");
+            ulong end = baseVa + length;
+            if (entryVa < baseVa || entryVa >= end)
+                throw new BinaryFormatException("Raw entry point is outside the mapped image.");
+            if (arch == Architecture.I8051 &&
+                (baseVa > ushort.MaxValue || length > 0x10000UL - baseVa))
+                throw new BinaryFormatException("An 8051 image must fit in its 16-bit code space.");
+            return new RawImage(file, path, baseVa, bitness, entryVa, arch, symbols);
+        }
+        catch
+        {
+            file.Dispose();
+            throw;
+        }
+    }
 
     private static Architecture ArchFor(int bitness) => bitness == 64 ? Architecture.X64 : Architecture.X86;
 

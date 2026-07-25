@@ -25,6 +25,7 @@ public sealed class MachOImage : IBinaryImage, IDisposable
 
     private readonly MappedFile _f;
     private readonly int _base;              // this slice's byte offset within the file (0 for a thin file)
+    private readonly int _sliceEnd;           // exclusive absolute file offset of the selected slice
     private readonly bool _is64;
     private readonly Architecture _arch;
 
@@ -76,17 +77,23 @@ public sealed class MachOImage : IBinaryImage, IDisposable
     internal int ChainedFixupsOffset { get; private set; } = -1;   // slice-relative, or -1
     internal int ChainedFixupsSize { get; private set; }
 
-    private MachOImage(MappedFile f, string path, long sliceOffset)
+    private MachOImage(MappedFile f, string path, long sliceOffset, long sliceSize)
     {
         _f = f;
         FilePath = path;
-        _base = checked((int)sliceOffset);
+        if (sliceSize <= 0 || sliceOffset < 0 || sliceOffset > f.Length ||
+            sliceSize > f.Length - sliceOffset)
+            throw new BinaryFormatException("Invalid Mach-O slice range.");
+        _base = (int)sliceOffset;
+        _sliceEnd = checked((int)(sliceOffset + sliceSize));
 
-        if (_f.Length < _base + 0x1C) throw new BinaryFormatException("Truncated Mach-O.");
+        if (_base > _sliceEnd - sizeof(uint)) throw new BinaryFormatException("Truncated Mach-O.");
         uint magic = _f.ReadU32(_base);
         _is64 = magic == MH_MAGIC_64;
         if (magic is not (MH_MAGIC or MH_MAGIC_64))
             throw new BinaryFormatException("Not a thin little-endian Mach-O (byte-swapped/PPC not supported).");
+        int headerSize = _is64 ? 0x20 : 0x1C;
+        if (_base > _sliceEnd - headerSize) throw new BinaryFormatException("Truncated Mach-O.");
 
         int cpuType = _f.ReadI32(_base + 4);
         uint filetype = _f.ReadU32(_base + 0x0C);
@@ -95,11 +102,14 @@ public sealed class MachOImage : IBinaryImage, IDisposable
         (_arch, Bitness, ArchName) = MapCpu(cpuType, _is64);
         IsDll = filetype is 6 or 8;                                 // MH_DYLIB / MH_BUNDLE
 
-        int lc = _base + (_is64 ? 0x20 : 0x1C);
+        int lc = _base + headerSize;
+        if (sizeofcmds > int.MaxValue || lc > _sliceEnd ||
+            (int)sizeofcmds > _sliceEnd - lc)
+            throw new BinaryFormatException("Mach-O load commands exceed the selected slice.");
         int? entryFileOff = null;
         int fnStartsOff = -1, fnStartsSize = 0;
 
-        ReadLoadCommands(lc, ncmds, (int)sizeofcmds, ref entryFileOff, ref fnStartsOff, ref fnStartsSize);
+        ReadLoadCommands(lc, ncmds, lc + (int)sizeofcmds, ref entryFileOff, ref fnStartsOff, ref fnStartsSize);
 
         if (fnStartsOff >= 0) ReadFunctionStarts(fnStartsOff, fnStartsSize);
         if (entryFileOff is int eo) EntryVa = OffsetToVa((ulong)eo);
@@ -124,13 +134,37 @@ public sealed class MachOImage : IBinaryImage, IDisposable
             var pick = slices.FirstOrDefault(s => s.CpuType == CPU_TYPE_X86_64);
             if (pick.Size == 0) pick = slices.FirstOrDefault(s => s.CpuType == CPU_TYPE_ARM64);
             if (pick.Size == 0) pick = slices[0];
-            return Load(path, pick.Offset);
+            return LoadOwned(path, pick.Offset, pick.Size);
         }
-        return Load(path, 0);
+        return LoadOwned(path, 0, new FileInfo(path).Length);
     }
 
     /// <summary>Load a specific slice of a Mach-O file (offset 0 for a thin file).</summary>
-    public static MachOImage Load(string path, long sliceOffset) => new(MappedFile.Open(path), path, sliceOffset);
+    public static MachOImage Load(string path, long sliceOffset)
+    {
+        long size;
+        if (MachOFat.TryList(path, out var slices) && slices.Count > 0)
+        {
+            var match = slices.FirstOrDefault(s => s.Offset == sliceOffset);
+            if (match.Size <= 0) throw new BinaryFormatException("The requested Mach-O slice does not exist.");
+            size = match.Size;
+        }
+        else
+        {
+            long length = new FileInfo(path).Length;
+            if (sliceOffset < 0 || sliceOffset >= length)
+                throw new BinaryFormatException("Invalid Mach-O slice offset.");
+            size = length - sliceOffset;
+        }
+        return LoadOwned(path, sliceOffset, size);
+    }
+
+    private static MachOImage LoadOwned(string path, long sliceOffset, long sliceSize)
+    {
+        var file = MappedFile.Open(path);
+        try { return new MachOImage(file, path, sliceOffset, sliceSize); }
+        catch { file.Dispose(); throw; }
+    }
 
     internal static (Architecture arch, int bitness, string name) MapCpu(int cpuType, bool is64) => cpuType switch
     {
@@ -148,37 +182,84 @@ public sealed class MachOImage : IBinaryImage, IDisposable
     };
 
     // ---- load-command walk ----
-    private void ReadLoadCommands(int lc, uint ncmds, int sizeofcmds, ref int? entryFileOff, ref int fnStartsOff, ref int fnStartsSize)
+    private bool TrySliceRange(ulong relativeOffset, ulong size, out int absoluteOffset)
+    {
+        absoluteOffset = -1;
+        ulong sliceLength = (ulong)(_sliceEnd - _base);
+        if (relativeOffset > sliceLength || size > sliceLength - relativeOffset ||
+            relativeOffset > int.MaxValue || size > int.MaxValue)
+            return false;
+        absoluteOffset = checked(_base + (int)relativeOffset);
+        return true;
+    }
+
+    private static void RequireCommand(uint cmdsize, int minimum, uint cmd)
+    {
+        if (cmdsize < minimum)
+            throw new BinaryFormatException($"Mach-O load command 0x{cmd:X} is truncated.");
+    }
+
+    private void ReadLoadCommands(int lc, uint ncmds, int end, ref int? entryFileOff, ref int fnStartsOff, ref int fnStartsSize)
     {
         int p = lc;
-        int end = lc + sizeofcmds;
-        for (uint i = 0; i < ncmds && p + 8 <= _f.Length && p < end; i++)
+        for (uint i = 0; i < ncmds; i++)
         {
+            if (p > end - 8)
+                throw new BinaryFormatException("Truncated Mach-O load-command table.");
             uint cmd = _f.ReadU32(p);
             uint cmdsize = _f.ReadU32(p + 4);
-            if (cmdsize < 8) break;   // malformed — avoid an infinite loop
+            if (cmdsize < 8 || cmdsize > int.MaxValue || (long)p + cmdsize > end)
+                throw new BinaryFormatException("Invalid Mach-O load-command size.");
+            int commandEnd = p + (int)cmdsize;
 
             switch (cmd)
             {
-                case LC_SEGMENT_64: ReadSegment(p, is64: true); break;
-                case LC_SEGMENT: ReadSegment(p, is64: false); break;
-                case LC_SYMTAB: ReadSymtab(p); break;
-                case LC_LOAD_DYLIB: _dylibs.Add(ReadDylibName(p)); break;
-                case LC_MAIN: entryFileOff = (int)_f.ReadU64(p + 0x08); break;
+                case LC_SEGMENT_64:
+                    RequireCommand(cmdsize, 72, cmd);
+                    ReadSegment(p, is64: true, commandEnd);
+                    break;
+                case LC_SEGMENT:
+                    RequireCommand(cmdsize, 56, cmd);
+                    ReadSegment(p, is64: false, commandEnd);
+                    break;
+                case LC_SYMTAB:
+                    RequireCommand(cmdsize, 24, cmd);
+                    ReadSymtab(p);
+                    break;
+                case LC_LOAD_DYLIB:
+                    RequireCommand(cmdsize, 24, cmd);
+                    _dylibs.Add(ReadDylibName(p));
+                    break;
+                case LC_MAIN:
+                    RequireCommand(cmdsize, 24, cmd);
+                    ulong entry = _f.ReadU64(p + 0x08);
+                    if (!TrySliceRange(entry, 1, out _))
+                        throw new BinaryFormatException("Mach-O entry point is outside the selected slice.");
+                    entryFileOff = checked((int)entry);
+                    break;
                 case LC_FUNCTION_STARTS:
-                    fnStartsOff = _base + (int)_f.ReadU32(p + 0x08);
-                    fnStartsSize = (int)_f.ReadU32(p + 0x0C);
+                    RequireCommand(cmdsize, 16, cmd);
+                    uint startsOffset = _f.ReadU32(p + 0x08);
+                    uint startsSize = _f.ReadU32(p + 0x0C);
+                    if (!TrySliceRange(startsOffset, startsSize, out fnStartsOff))
+                        throw new BinaryFormatException("Mach-O function-start table exceeds the selected slice.");
+                    fnStartsSize = checked((int)startsSize);
                     break;
                 case LC_DYLD_CHAINED_FIXUPS:
-                    ChainedFixupsOffset = _base + (int)_f.ReadU32(p + 0x08);
-                    ChainedFixupsSize = (int)_f.ReadU32(p + 0x0C);
+                    RequireCommand(cmdsize, 16, cmd);
+                    uint fixupsOffset = _f.ReadU32(p + 0x08);
+                    uint fixupsSize = _f.ReadU32(p + 0x0C);
+                    if (!TrySliceRange(fixupsOffset, fixupsSize, out int fixupsAbsolute))
+                        throw new BinaryFormatException("Mach-O chained-fixups data exceeds the selected slice.");
+                    ChainedFixupsOffset = fixupsAbsolute;
+                    ChainedFixupsSize = checked((int)fixupsSize);
                     break;
             }
-            p += (int)cmdsize;
+            p = commandEnd;
         }
     }
 
-    private void ReadSegment(int p, bool is64)
+    private void ReadSegment(int p, bool is64, int commandEnd)
     {
         string segname = ReadFixedStr(p + 0x08, 16);
         ulong vmaddr, vmsize, fileoff, filesize; int initprot; uint nsects; int secBase, secSize;
@@ -196,6 +277,13 @@ public sealed class MachOImage : IBinaryImage, IDisposable
             initprot = _f.ReadI32(p + 0x2C); nsects = _f.ReadU32(p + 0x30);
             secBase = p + 56; secSize = 68;
         }
+        if (filesize > vmsize || vmaddr > ulong.MaxValue - vmsize)
+            throw new BinaryFormatException("Mach-O segment virtual range overflows.");
+        if (!TrySliceRange(fileoff, filesize, out _))
+            throw new BinaryFormatException("Mach-O segment exceeds the selected slice.");
+        long sectionBytes = checked((long)nsects * secSize);
+        if (sectionBytes > commandEnd - secBase)
+            throw new BinaryFormatException("Mach-O section table exceeds its load command.");
 
         if (segname != "__PAGEZERO")
             _segments.Add((vmaddr, fileoff, filesize));
@@ -223,6 +311,15 @@ public sealed class MachOImage : IBinaryImage, IDisposable
             }
             uint stype = flags & 0xFF;
             bool zerofill = stype is 0x1 or 0xC or 0x12;   // S_ZEROFILL / S_GB_ZEROFILL / S_THREAD_LOCAL_ZEROFILL
+            if (addr > ulong.MaxValue - size)
+                throw new BinaryFormatException($"Mach-O section '{sectname}' virtual range overflows.");
+            int fileOffset = 0, fileSize = 0;
+            if (!zerofill)
+            {
+                if (!TrySliceRange(offset, size, out fileOffset))
+                    throw new BinaryFormatException($"Mach-O section '{sectname}' exceeds the selected slice.");
+                fileSize = checked((int)size);
+            }
             // Prefer the section instruction-attributes; but some compilers leave them unset on __text, so fall
             // back to "in an executable segment and a known code section" (avoids sweeping __cstring/__const).
             bool isExec = (flags & 0x80000000) != 0 || (flags & 0x400) != 0   // S_ATTR_PURE/SOME_INSTRUCTIONS
@@ -232,8 +329,8 @@ public sealed class MachOImage : IBinaryImage, IDisposable
                 Name = sectname.Length == 0 ? $"sect{_sections.Count}" : sectname,
                 StartVa = addr,
                 VirtualSize = size,
-                FileOffset = (int)(_base + offset),
-                FileSize = zerofill ? 0 : (int)size,
+                FileOffset = fileOffset,
+                FileSize = fileSize,
                 IsExecutable = isExec,
                 IsReadable = segReadable,
                 IsWritable = segWritable,
@@ -246,12 +343,16 @@ public sealed class MachOImage : IBinaryImage, IDisposable
         uint symoff = _f.ReadU32(p + 0x08);
         uint nsyms = _f.ReadU32(p + 0x0C);
         uint stroff = _f.ReadU32(p + 0x10);
+        uint strsize = _f.ReadU32(p + 0x14);
         int nlistSize = _is64 ? 16 : 12;
-        int strBase = _base + (int)stroff;
+        ulong symbolBytes = checked((ulong)nsyms * (ulong)nlistSize);
+        if (!TrySliceRange(symoff, symbolBytes, out int symbolsBase) ||
+            !TrySliceRange(stroff, strsize, out int strBase))
+            throw new BinaryFormatException("Mach-O symbol table exceeds the selected slice.");
 
         for (int i = 0; i < nsyms && i < 500_000; i++)
         {
-            int e = _base + (int)symoff + i * nlistSize;
+            int e = symbolsBase + i * nlistSize;
             uint nStrx = _f.ReadU32(e + 0);
             byte nType = _f.ReadByte(e + 4);
             ulong nValue = _is64 ? _f.ReadU64(e + 8) : _f.ReadU32(e + 8);
@@ -259,7 +360,8 @@ public sealed class MachOImage : IBinaryImage, IDisposable
             if ((nType & 0xE0) != 0) continue;         // N_STAB debug symbol
             if ((nType & 0x0E) != 0x0E) continue;      // keep only N_SECT (defined in a section)
             if (nValue == 0) continue;
-            string name = _f.ReadAsciiZ(strBase + (int)nStrx, 512);
+            if (nStrx >= strsize) continue;
+            string name = _f.ReadAsciiZ(strBase + (int)nStrx, (int)Math.Min(512u, strsize - nStrx));
             if (name.Length == 0) continue;
             if (name[0] == '_') name = name[1..];       // strip the C-symbol leading underscore
             var kind = (nType & 0x01) != 0 ? NamedSymbolKind.Export : NamedSymbolKind.Function;
@@ -272,6 +374,7 @@ public sealed class MachOImage : IBinaryImage, IDisposable
         // dylib_command: cmd, cmdsize, dylib{ name(lc_str offset)@0x08, ... }
         uint nameOff = _f.ReadU32(p + 0x08);
         uint cmdsize = _f.ReadU32(p + 4);
+        if (nameOff >= cmdsize) return "";
         int start = p + (int)nameOff;
         int max = p + (int)cmdsize - start;
         string full = max > 0 ? _f.ReadAsciiZ(start, max) : "";
@@ -288,6 +391,8 @@ public sealed class MachOImage : IBinaryImage, IDisposable
             (ulong delta, int len) = ReadUleb(p, end);
             if (len == 0 || delta == 0) break;
             p += len;
+            if (delta > ulong.MaxValue - addr)
+                throw new BinaryFormatException("Mach-O function-start address overflows.");
             addr += delta;
             if (_funcStarts.Count < 500_000) _funcStarts.Add(addr);
         }
@@ -383,7 +488,12 @@ public sealed class MachOImage : IBinaryImage, IDisposable
     public byte ReadByteAtOffset(int offset) => _f.ReadByte(offset);
 
     public void Patch(int offset, ReadOnlySpan<byte> bytes) => _f.Patch(offset, bytes);
-    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes) { int o = VaToOffset(va); if (o < 0) return false; _f.Patch(o, bytes); return true; }
+    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes)
+    {
+        if (!TryFileSpan(va, bytes.Length, out int offset, out _)) return false;
+        _f.Patch(offset, bytes);
+        return true;
+    }
     public void RevertPatch(int offset, int count) => _f.RevertPatch(offset, count);
     public bool IsPatchedAt(int offset) => _f.IsPatched(offset);
     public bool IsDirty => _f.IsDirty;
@@ -399,12 +509,32 @@ public sealed class MachOImage : IBinaryImage, IDisposable
         return null;
     }
 
+    private Section? FileSectionAt(ulong va)
+    {
+        foreach (var s in _sections)
+            if (s.IsReadable && s.FileSize > 0 && va >= s.StartVa && va - s.StartVa < (ulong)s.FileSize)
+                return s;
+        return null;
+    }
+
+    private bool TryFileSpan(ulong va, int requested, out int offset, out int available)
+    {
+        offset = -1;
+        available = 0;
+        if (requested < 0) return false;
+        var s = FileSectionAt(va);
+        if (s is null) return false;
+        int delta = (int)(va - s.StartVa);
+        long fileOffset = (long)s.FileOffset + delta;
+        if (fileOffset < 0 || fileOffset >= _f.Length) return false;
+        offset = (int)fileOffset;
+        available = Math.Min(s.FileSize - delta, _f.Length - offset);
+        return requested <= available;
+    }
+
     public int VaToOffset(ulong va)
     {
-        var s = SectionAt(va);
-        if (s is null) return -1;
-        long off = (long)(va - s.StartVa) + s.FileOffset;
-        return off >= 0 && off < _f.Length ? (int)off : -1;
+        return TryFileSpan(va, 1, out int offset, out _) ? offset : -1;
     }
 
     public bool IsMappedVa(ulong va) => VaToOffset(va) >= 0;
@@ -412,10 +542,8 @@ public sealed class MachOImage : IBinaryImage, IDisposable
 
     public byte[] ReadBytesAtVa(ulong va, int count)
     {
-        int off = VaToOffset(va);
-        if (off < 0) return [];
-        count = Math.Clamp(count, 0, _f.Length - off);
-        return _f.ReadBytes(off, count);
+        if (count <= 0 || !TryFileSpan(va, 1, out int offset, out int available)) return [];
+        return _f.ReadBytes(offset, Math.Min(count, available));
     }
 
     public int ReadVa(ulong va, Span<byte> dest)
@@ -475,7 +603,7 @@ public static class MachOFat
                     off = BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(8));
                     size = BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(12));
                 }
-                if (off < 8 || size <= 0 || off + size > fileLen) return false;   // out of bounds → not fat
+                if (off < 8 || size <= 0 || size > fileLen || off > fileLen - size) return false;   // out of bounds → not fat
                 list.Add(new MachOSlice(cpuType, off, size, MachOImage.CpuName(cpuType)));
             }
             slices = list;

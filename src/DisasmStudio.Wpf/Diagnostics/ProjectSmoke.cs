@@ -7,7 +7,7 @@ using DisasmStudio.Wpf.ViewModels;
 namespace DisasmStudio.Wpf.Diagnostics;
 
 /// <summary>A console self-test for <c>.dsproj</c> persistence (<see cref="ProjectFile"/>), run via
-/// <c>DisasmStudio --smoke-project</c>. Pure serialization — no GUI, no binary — so it verifies that the v8
+/// <c>DisasmStudio --smoke-project</c>. Pure serialization — no GUI, no binary — so it verifies that the v9
 /// live-session state round-trips: breakpoints (fields + <see cref="HwKind"/>/<see cref="MemAccess"/>/
 /// <see cref="HitCountMode"/> enums), the execution trace, byte patches (base64), static jump what-ifs, and
 /// the existing markup; plus that an older (pre-v7) file with none of those fields still loads (nulls).
@@ -26,6 +26,7 @@ internal static class ProjectSmoke
         var proj = new ProjectFile
         {
             BinaryPath = @"C:\some\path\target.exe",
+            BinarySha256 = "0123456789ABCDEF",
             Format = "PE",
             MachSliceOffset = 0x123400,
             CurrentVa = 0x401234,
@@ -60,8 +61,9 @@ internal static class ProjectSmoke
         var back = ProjectFile.Load(path);
 
         // ---- base fields ----
-        Check("Version is 8", back.Version == 8);
+        Check("Version is 9", back.Version == 9);
         Check("BinaryPath round-trips", back.BinaryPath == proj.BinaryPath);
+        Check("BinarySha256 round-trips", back.BinarySha256 == proj.BinarySha256);
         Check("Mach-O slice offset round-trips", back.MachSliceOffset == 0x123400);
         Check("CurrentVa round-trips", back.CurrentVa == 0x401234);
         Check("CenterTab round-trips", back.CenterTab == 1);

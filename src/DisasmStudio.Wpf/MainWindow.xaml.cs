@@ -2497,6 +2497,26 @@ public partial class MainWindow : Window
         try { proj = ProjectFile.Load(path); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
 
+        if (!string.IsNullOrWhiteSpace(proj.BinarySha256))
+        {
+            string actualHash;
+            try { actualHash = await Task.Run(() => ProjectFile.ComputeBinarySha256(proj.BinaryPath)); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Couldn't verify the binary referenced by this project:\n{proj.BinaryPath}\n\n{ex.Message}",
+                    "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (!string.Equals(actualHash, proj.BinarySha256, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this,
+                    "The binary at the project's saved path no longer matches the file this project was created from.\n\n" +
+                    "No patches, breakpoints, trace data, or markup were applied.",
+                    "Binary changed", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+        }
+
         IBinaryImage image;
         try
         {
@@ -2530,7 +2550,13 @@ public partial class MainWindow : Window
         try
         {
             if (proj.Patches is { Count: > 0 })
-                foreach (var run in proj.Patches) image.Patch(run.Offset, run.Bytes);
+                foreach (var run in proj.Patches)
+                {
+                    if (run.Bytes is null || run.Offset < 0 || run.Offset > image.BackingLength ||
+                        run.Bytes.Length > image.BackingLength - run.Offset)
+                        throw new InvalidDataException($"Patch at file offset 0x{run.Offset:X} exceeds the binary.");
+                    image.Patch(run.Offset, run.Bytes);
+                }
         }
         catch (Exception ex)
         {
@@ -2596,9 +2622,19 @@ public partial class MainWindow : Window
             path = dlg.FileName;
         }
 
+        string binaryHash;
+        try { binaryHash = ProjectFile.ComputeBinarySha256(_image.FilePath); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "Couldn't fingerprint the project binary.\n\n" + ex.Message,
+                "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         var proj = new ProjectFile
         {
             BinaryPath = _image.FilePath,
+            BinarySha256 = binaryHash,
             Format = _image.FormatName,
             RawBaseVa = _image.Format == BinaryFormat.Raw || _image.FormatName == "PE memory" ? _image.ImageBase : 0,
             RawBitness = _image.Format == BinaryFormat.Raw ? _image.Bitness : 0,
@@ -4157,13 +4193,25 @@ public partial class MainWindow : Window
         var dlg = new OpenFolderDialog { Title = "Extract all embedded resources to…" };
         if (dlg.ShowDialog(this) != true) return;
         int ok = 0, fail = 0;
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in asm.Resources)
         {
             try
             {
                 var bytes = r.GetBytes();
                 if (bytes.Length == 0) continue;
-                File.WriteAllBytes(Path.Combine(dlg.FolderName, SafeResourceFileName(r.Name)), bytes);
+                string safe = SafeResourceFileName(r.Name);
+                string stem = Path.GetFileNameWithoutExtension(safe);
+                string ext = Path.GetExtension(safe);
+                string candidate = safe;
+                for (int suffix = 2;
+                     usedNames.Contains(candidate) || File.Exists(Path.Combine(dlg.FolderName, candidate));
+                     suffix++)
+                    candidate = $"{stem}_{suffix}{ext}";
+                usedNames.Add(candidate);
+                string outputPath = Path.Combine(dlg.FolderName, candidate);
+                using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                output.Write(bytes);
                 ok++;
             }
             catch { fail++; }

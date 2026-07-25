@@ -28,6 +28,30 @@ public sealed class AnalysisResult
         init => _functionByVa = value as Dictionary<ulong, Function> ?? new(value);
     }
 
+    /// <summary>Return the function whose actual CFG contains <paramref name="va"/>. A nearest preceding start
+    /// is not sufficient: executable sections can contain padding, literal pools, and jump-table data between
+    /// functions. CFGs are already lazy/cached, so each candidate pays this cost at most once.</summary>
+    public Function? FunctionContaining(ulong va)
+    {
+        if (_functionByVa.TryGetValue(va, out var exact)) return exact;
+        if (!Image.IsMappedVa(va)) return null;
+        int lo = 0, hi = _functions.Count;
+        while (lo < hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            if (_functions[mid].Va <= va) lo = mid + 1;
+            else hi = mid;
+        }
+        for (int i = lo - 1; i >= 0; i--)
+        {
+            var fn = _functions[i];
+            try { CfgBuilder.Build(Image, fn, JumpTables); }
+            catch { continue; }
+            if (fn.Blocks.Any(b => va >= b.Start && va < b.End)) return fn;
+        }
+        return null;
+    }
+
     public required XrefDatabase Xrefs { get; init; }
 
     private IReadOnlyList<FoundString> _strings = [];

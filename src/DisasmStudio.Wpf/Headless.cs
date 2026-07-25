@@ -41,14 +41,13 @@ public static class Headless
         try { image = LoadImage(opt); }
         catch (Exception ex) { Console.Error.WriteLine($"error loading '{opt.Input}': {ex.Message}\n(hint: for a flat blob pass --raw --base <hex> --arch <x86|x64|arm|thumb|arm64|8051>)"); return 2; }
 
-        AnalysisResult result;
-        try { result = AnalysisEngine.Analyze(image, BuildOptions(opt, image), opt.Verbose ? new SyncProgress(s => Console.Error.WriteLine(s)) : null); }
-        catch (Exception ex) { Console.Error.WriteLine($"analysis failed: {ex.Message}"); return 2; }
-
-        var (w, dispose) = OpenOut(opt);
         try
         {
-            return verb switch
+            AnalysisResult result;
+            try { result = AnalysisEngine.Analyze(image, BuildOptions(opt, image), opt.Verbose ? new SyncProgress(s => Console.Error.WriteLine(s)) : null); }
+            catch (Exception ex) { Console.Error.WriteLine($"analysis failed: {ex.Message}"); return 2; }
+
+            int Execute(TextWriter w) => verb switch
             {
                 "analyze" => Analyze(w, result, opt),
                 "disasm" => Disasm(w, result, opt),
@@ -58,9 +57,45 @@ public static class Headless
                 "emulate" => Emulate(w, result, opt),
                 _ => Unknown(verb),
             };
+
+            if (opt.Out is null)
+            {
+                try { return Execute(Console.Out); }
+                catch (Exception ex) { Console.Error.WriteLine($"'{verb}' failed: {ex.Message}"); return 2; }
+            }
+
+            string output = Path.GetFullPath(opt.Out);
+            if (string.Equals(output, Path.GetFullPath(opt.Input), StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine("output path must not overwrite the input binary.");
+                return 2;
+            }
+            string directory = Path.GetDirectoryName(output) ?? Environment.CurrentDirectory;
+            string temp = Path.Combine(directory, $".{Path.GetFileName(output)}.{Guid.NewGuid():N}.tmp");
+            try
+            {
+                int exit;
+                using (var writer = new StreamWriter(temp, false, new UTF8Encoding(false)))
+                {
+                    exit = Execute(writer);
+                    writer.Flush();
+                }
+                if (exit != 0) return exit;
+                File.Move(temp, output, overwrite: true);
+                Console.Error.WriteLine($"wrote {output}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"'{verb}' failed: {ex.Message}");
+                return 2;
+            }
+            finally
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+            }
         }
-        catch (Exception ex) { Console.Error.WriteLine($"'{verb}' failed: {ex.Message}"); return 2; }
-        finally { w.Flush(); if (dispose) w.Dispose(); if (opt.Out is { } f) Console.Error.WriteLine($"wrote {f}"); }
+        finally { (image as IDisposable)?.Dispose(); }
     }
 
     // ---- verbs ----
@@ -230,12 +265,7 @@ public static class Headless
 
     /// <summary>The function starting at <paramref name="va"/>, else the one that contains it.</summary>
     private static Function? FindFunc(AnalysisResult r, ulong va)
-    {
-        if (r.FunctionByVa.TryGetValue(va, out var f)) return f;
-        Function? best = null;
-        foreach (var fn in r.Functions) if (fn.Va <= va && (best is null || fn.Va > best.Va)) best = fn;
-        return best;
-    }
+        => r.FunctionContaining(va);
 
     private static string NameFor(AnalysisResult r, ulong va) => r.NameFor(va) is { Length: > 0 } n ? n : $"sub_{va:X}";
     private static string Hex(ulong v) => v.ToString("X");
@@ -253,9 +283,6 @@ public static class Headless
         if (cur is not null) runs.Add((start, cur.ToArray()));
         return runs;
     }
-
-    private static (TextWriter, bool) OpenOut(Opts opt) =>
-        opt.Out is { } f ? (new StreamWriter(f, false, new UTF8Encoding(false)), true) : (Console.Out, false);
 
     private static int Unknown(string verb) { Console.Error.WriteLine($"unknown verb: {verb}"); Usage(Console.Error); return 1; }
 

@@ -21,7 +21,9 @@ public sealed class CodeBitmap
     {
         var regions = image.Sections
             .Where(s => s.IsExecutable && s.FileSize > 0)
-            .Select(s => (s.StartVa, Span: (long)Math.Max(s.VirtualSize, (ulong)s.FileSize)))
+            .Select(s => (s.StartVa, Span: (long)(s.VirtualSize > 0
+                ? Math.Min(s.VirtualSize, (ulong)s.FileSize)
+                : (ulong)s.FileSize)))
             .ToArray();
         _start = regions.Select(r => r.StartVa).ToArray();
         _end = regions.Select(r => r.StartVa + (ulong)r.Span).ToArray();

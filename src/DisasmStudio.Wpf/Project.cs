@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DisasmStudio.Core.Analysis;
@@ -14,9 +15,10 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 public sealed record ProjectFile
 {
-    public int Version { get; init; } = 8;
+    public int Version { get; init; } = 9;
     public long MachSliceOffset { get; init; }   // v8: selected slice in a fat/universal Mach-O (0 for a thin file)
     public string BinaryPath { get; init; } = "";
+    public string? BinarySha256 { get; init; }   // v9: pristine backing-file identity before offset-based state is restored
     public string Format { get; init; } = "";   // "PE" / "ELF" / "Raw"
     public ulong RawBaseVa { get; init; }        // raw blobs only
     public int RawBitness { get; init; }         // raw blobs only
@@ -50,6 +52,13 @@ public sealed record ProjectFile
     public static ProjectFile Load(string path) =>
         JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path), Opts)
         ?? throw new InvalidDataException("Not a valid DisasmStudio project file.");
+
+    public static string ComputeBinarySha256(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
 }
 
 /// <summary>A contiguous run of patched bytes at file <paramref name="Offset"/> — how a project stores byte edits,

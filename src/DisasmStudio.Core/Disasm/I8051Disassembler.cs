@@ -97,6 +97,7 @@ public sealed class I8051Disassembler : INeutralDisassembler
         if (b.Length == 0) return null;
         byte op = b[0];
         int len = OpLen(op);
+        if (b.Length < len) return null;
         byte b1 = b.Length > 1 ? b[1] : (byte)0;
         byte b2 = b.Length > 2 ? b[2] : (byte)0;
         int r = op & 7;
@@ -106,7 +107,7 @@ public sealed class I8051Disassembler : INeutralDisassembler
         ulong? target = null;
 
         // PC-relative target = next-VA + signed disp (a true VA — resolves at any load base).
-        ulong Rel(byte rb) => va + (ulong)len + (ulong)(long)(sbyte)rb;
+        ulong Rel(byte rb) => unchecked((ushort)((ushort)va + len + (sbyte)rb));
         // Absolute (LJMP/LCALL) and 11-bit page (AJMP/ACALL) targets are 16-bit CPU code addresses;
         // they resolve directly when the image is loaded at its natural base (16-bit code space, base 0).
         ulong Abs() => (uint)((b1 << 8) | b2);

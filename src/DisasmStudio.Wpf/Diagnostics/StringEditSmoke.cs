@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
 
@@ -33,6 +34,11 @@ internal static class StringEditSmoke
         string invalidRangeSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_snapshot_range.dssnap");
         string samePageSnapshotPath = Path.Combine(Path.GetTempPath(), "ds_smoke_snapshot_same_page.dssnap");
         string invalidPePath = Path.Combine(Path.GetTempPath(), "ds_smoke_invalid_pe.bin");
+        string decoder8051Path = Path.Combine(Path.GetTempPath(), "ds_smoke_8051.bin");
+        string peVirtualTailPath = Path.Combine(Path.GetTempPath(), "ds_smoke_pe_virtual_tail.bin");
+        string elfMetadataPath = Path.Combine(Path.GetTempPath(), "ds_smoke_elf_metadata.bin");
+        string machMetadataPath = Path.Combine(Path.GetTempPath(), "ds_smoke_mach_metadata.bin");
+        string headlessOutputPath = Path.Combine(Path.GetTempPath(), "ds_smoke_headless_output.json");
         try
         {
             var data = new byte[128];
@@ -58,6 +64,30 @@ internal static class StringEditSmoke
                 "ASCII patch undo clears published patch state", ref pass);
             var afterUndo = StringScanner.Scan(img, includeExecutable: true);
             Check(afterUndo.Any(s => !s.Wide && s.Va == ascii.Va && s.Text == "Original"), "undo restores scanned value", ref pass);
+
+            var racingMap = MappedFile.Open(path);
+            Exception? racingReadError = null;
+            using (var readerStarted = new ManualResetEventSlim(false))
+            {
+                var racingReader = Task.Run(() =>
+                {
+                    readerStarted.Set();
+                    try
+                    {
+                        for (int i = 0; i < 100_000; i++)
+                        {
+                            _ = racingMap.ReadU64(0);
+                            _ = racingMap.ReadBytes(0, 64);
+                        }
+                    }
+                    catch (Exception ex) { racingReadError = ex; }
+                });
+                readerStarted.Wait();
+                racingMap.Dispose();
+                racingReader.GetAwaiter().GetResult();
+            }
+            Check(racingReadError is null && racingMap.ReadBytes(0, 1).Length == 0,
+                "mapped-file reads remain safe while the mapping is disposed", ref pass);
 
             bool wideOk = StringEditCodec.TryEncode("Edit", wide.Length, wide: true, out var wideBytes, out _);
             Check(wideOk && wideBytes.Length == 16 && wideBytes.AsSpan(0, 8).SequenceEqual(Encoding.Unicode.GetBytes("Edit"))
@@ -229,6 +259,119 @@ internal static class StringEditSmoke
             Check(peMemory.Undo() && !peMemory.IsDirty
                 && peMemory.ReadBytesAtVa(peHeaderVa, 2).AsSpan().SequenceEqual(peOriginal),
                 "PE memory image undo restores bytes", ref pass);
+
+            byte[] peWithOverlay = File.ReadAllBytes(typeof(StringEditSmoke).Assembly.Location);
+            int peHeader = BitConverter.ToInt32(peWithOverlay, 0x3C);
+            int sectionCount = BitConverter.ToUInt16(peWithOverlay, peHeader + 6);
+            int sectionTable = peHeader + 24 + BitConverter.ToUInt16(peWithOverlay, peHeader + 20);
+            int selectedSection = -1;
+            for (int i = sectionCount - 1; i >= 0; i--)
+            {
+                int sh = sectionTable + i * 40;
+                if (BitConverter.ToUInt32(peWithOverlay, sh + 16) > 0) { selectedSection = i; break; }
+            }
+            if (selectedSection < 0) throw new InvalidDataException("Smoke-test PE has no file-backed section.");
+            int selectedHeader = sectionTable + selectedSection * 40;
+            uint selectedRawSize = BitConverter.ToUInt32(peWithOverlay, selectedHeader + 16);
+            uint selectedVirtualSize = BitConverter.ToUInt32(peWithOverlay, selectedHeader + 8);
+            uint enlargedVirtualSize = Math.Max(selectedVirtualSize, checked(selectedRawSize + 0x100));
+            BitConverter.GetBytes(enlargedVirtualSize).CopyTo(peWithOverlay, selectedHeader + 8);
+            Array.Resize(ref peWithOverlay, peWithOverlay.Length + 0x100);   // bytes the old mapping aliased as the virtual tail
+            File.WriteAllBytes(peVirtualTailPath, peWithOverlay);
+            using (var peTailImage = PeImage.Load(peVirtualTailPath))
+            {
+                var section = peTailImage.Sections[selectedSection];
+                ulong tailVa = section.StartVa + (ulong)section.FileSize;
+                Check(section.ContainsVa(tailVa) && peTailImage.VaToOffset(tailVa) < 0
+                    && peTailImage.ReadBytesAtVa(tailVa, 1).Length == 0
+                    && !peTailImage.PatchVa(tailVa, [0x90]),
+                    "PE virtual-only section tail cannot read or patch following file bytes", ref pass);
+            }
+
+            byte[] elf = new byte[0x40];
+            elf[0] = 0x7F; elf[1] = (byte)'E'; elf[2] = (byte)'L'; elf[3] = (byte)'F';
+            elf[4] = 2; elf[5] = 1;                                      // ELF64, little-endian
+            BitConverter.GetBytes((ushort)0x3E).CopyTo(elf, 0x12);        // x86-64
+            File.WriteAllBytes(elfMetadataPath, elf);
+            using (var minimalElf = ElfImage.Load(elfMetadataPath))
+                Check(minimalElf.Sections.Count == 0, "minimal sectionless ELF still loads", ref pass);
+            Array.Resize(ref elf, 0x80);
+            BitConverter.GetBytes(0x40UL).CopyTo(elf, 0x28);               // e_shoff
+            BitConverter.GetBytes((ushort)64).CopyTo(elf, 0x3A);         // e_shentsize
+            BitConverter.GetBytes((ushort)1).CopyTo(elf, 0x3C);          // e_shnum
+            File.WriteAllBytes(elfMetadataPath, elf);                     // e_shstrndx=SHN_UNDEF
+            using (var unnamedElf = ElfImage.Load(elfMetadataPath))
+                Check(unnamedElf.Sections.Count == 1,
+                    "ELF accepts a section table with no section-name string table", ref pass);
+            BitConverter.GetBytes((ushort)0xFFFF).CopyTo(elf, 0x3E);     // no supported shstr table
+            BitConverter.GetBytes(1u).CopyTo(elf, 0x44);                 // SHT_PROGBITS
+            BitConverter.GetBytes(6UL).CopyTo(elf, 0x48);                // ALLOC | EXEC
+            BitConverter.GetBytes(0x400000UL).CopyTo(elf, 0x50);
+            BitConverter.GetBytes(0x78UL).CopyTo(elf, 0x58);             // file offset 120
+            BitConverter.GetBytes(0x10UL).CopyTo(elf, 0x60);             // size 16 -> exceeds 128-byte file
+            File.WriteAllBytes(elfMetadataPath, elf);
+            bool badElfRejected = false;
+            try { using var _ = ElfImage.Load(elfMetadataPath); }
+            catch (BinaryFormatException) { badElfRejected = true; }
+            Check(badElfRejected, "ELF loader rejects a section outside the backing file", ref pass);
+
+            byte[] mach = new byte[0x1C];
+            BitConverter.GetBytes(0xFEEDFACFu).CopyTo(mach, 0);           // MH_MAGIC_64
+            BitConverter.GetBytes(0x01000007).CopyTo(mach, 4);           // CPU_TYPE_X86_64
+            BitConverter.GetBytes(2u).CopyTo(mach, 0x0C);                // MH_EXECUTE
+            File.WriteAllBytes(machMetadataPath, mach);
+            bool truncatedMachRejected = false;
+            try { using var _ = MachOImage.Load(machMetadataPath); }
+            catch (BinaryFormatException) { truncatedMachRejected = true; }
+            Check(truncatedMachRejected, "Mach-O loader enforces the complete 64-bit header size", ref pass);
+            Array.Resize(ref mach, 0x20);
+            File.WriteAllBytes(machMetadataPath, mach);
+            using (var minimalMach = MachOImage.Load(machMetadataPath))
+                Check(minimalMach.Sections.Count == 0, "minimal commandless Mach-O still loads", ref pass);
+            Array.Resize(ref mach, 0x28);
+            BitConverter.GetBytes(1u).CopyTo(mach, 0x10);                // ncmds
+            BitConverter.GetBytes(8u).CopyTo(mach, 0x14);                // sizeofcmds
+            BitConverter.GetBytes(0x19u).CopyTo(mach, 0x20);             // LC_SEGMENT_64
+            BitConverter.GetBytes(8u).CopyTo(mach, 0x24);                // too small for segment_command_64
+            File.WriteAllBytes(machMetadataPath, mach);
+            bool badMachRejected = false;
+            try { using var _ = MachOImage.Load(machMetadataPath); }
+            catch (BinaryFormatException) { badMachRejected = true; }
+            Check(badMachRejected, "Mach-O loader enforces load-command cmdsize", ref pass);
+
+            File.WriteAllBytes(decoder8051Path, [0x02]);   // LJMP without its two-byte address
+            using (var truncated8051 = RawImage.Load(decoder8051Path, 0, 16, 0, Architecture.I8051, null))
+            {
+                var decoder = new I8051Disassembler(truncated8051, null);
+                Check(!decoder.TryDecode(0, out _), "8051 decoder rejects a truncated multi-byte opcode", ref pass);
+            }
+            File.WriteAllBytes(decoder8051Path, [0x80, 0xFD]);   // SJMP -3 from PC 0 => 0xFFFF
+            using (var wrapping8051 = RawImage.Load(decoder8051Path, 0, 16, 0, Architecture.I8051, null))
+            {
+                var decoder = new I8051Disassembler(wrapping8051, null);
+                Check(decoder.TryDecode(0, out var branch) && branch.DirectTarget == 0xFFFF,
+                    "8051 relative branches wrap in 16-bit code space", ref pass);
+            }
+            bool rawOverflowRejected = false;
+            try { using var _ = RawImage.Load(decoder8051Path, ulong.MaxValue, 64); }
+            catch (BinaryFormatException) { rawOverflowRejected = true; }
+            Check(rawOverflowRejected, "raw loader rejects an overflowing base-plus-length range", ref pass);
+
+            File.WriteAllText(headlessOutputPath, "sentinel");
+            int failedExport = Headless.Run(
+                ["emulate", path, "--raw", "--base", "400000", "--arch", "x64", "--out", headlessOutputPath],
+                hasConsole: false);
+            Check(failedExport != 0 && File.ReadAllText(headlessOutputPath) == "sentinel",
+                "failed headless export preserves the existing output file", ref pass);
+
+            int successfulExport = Headless.Run(
+                ["analyze", path, "--raw", "--base", "400000", "--arch", "x64",
+                    "--json", "--limit", "1", "--out", headlessOutputPath],
+                hasConsole: false);
+            string exportedJson = File.ReadAllText(headlessOutputPath);
+            Check(successfulExport == 0
+                    && exportedJson.Contains("\"format\": \"Raw\"", StringComparison.Ordinal),
+                "successful headless export atomically replaces the output file", ref pass);
         }
         catch (Exception ex)
         {
@@ -245,6 +388,11 @@ internal static class StringEditSmoke
             try { File.Delete(invalidRangeSnapshotPath); } catch { }
             try { File.Delete(samePageSnapshotPath); } catch { }
             try { File.Delete(invalidPePath); } catch { }
+            try { File.Delete(decoder8051Path); } catch { }
+            try { File.Delete(peVirtualTailPath); } catch { }
+            try { File.Delete(elfMetadataPath); } catch { }
+            try { File.Delete(machMetadataPath); } catch { }
+            try { File.Delete(headlessOutputPath); } catch { }
         }
 
         Log(pass ? "RESULT: PASS" : "RESULT: FAIL");

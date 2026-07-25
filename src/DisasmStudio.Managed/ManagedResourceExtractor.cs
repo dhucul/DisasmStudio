@@ -86,12 +86,13 @@ public static class ManagedResourceExtractor
                 catch { continue; }
                 if (bytes is null || bytes.Length == 0) continue;
 
+                byte[]? inflated = StartsWithMz(bytes) ? null : TryInflate(bytes);
                 var kind = StartsWithMz(bytes)
                     ? (IsManagedImage(bytes) ? ManagedResourceKind.EmbeddedAssembly : ManagedResourceKind.NativeImage)
-                    : (TryInflate(bytes) is { } inf && StartsWithMz(inf))
+                    : (inflated is not null && StartsWithMz(inflated))
                         ? ManagedResourceKind.CompressedAssembly
                         : ManagedResourceKind.Raw;
-                byte[] outBytes = kind == ManagedResourceKind.CompressedAssembly ? TryInflate(bytes)! : bytes;
+                byte[] outBytes = kind == ManagedResourceKind.CompressedAssembly ? inflated! : bytes;
                 byte[] captured = outBytes;
                 list.Add(new ManagedResourceEntry($"{blobName} :: {key}", kind, captured.Length, () => captured));
             }
@@ -123,6 +124,7 @@ public static class ManagedResourceExtractor
 
     private static byte[]? TryInflate(byte[] raw)
     {
+        const int maxInflatedBytes = 256 * 1024 * 1024;
         // Costura writes raw DEFLATE; some tools use GZIP. Try both, reject implausible results.
         foreach (bool gzip in new[] { false, true })
         {
@@ -134,7 +136,15 @@ public static class ManagedResourceExtractor
                 using (ds)
                 using (var outMs = new MemoryStream())
                 {
-                    ds.CopyTo(outMs);
+                    byte[] buffer = new byte[81920];
+                    int total = 0, read;
+                    while ((read = ds.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        if (read > maxInflatedBytes - total)
+                            throw new InvalidDataException("Inflated resource exceeds the 256 MiB safety limit.");
+                        outMs.Write(buffer, 0, read);
+                        total += read;
+                    }
                     if (outMs.Length > 0) return outMs.ToArray();
                 }
             }

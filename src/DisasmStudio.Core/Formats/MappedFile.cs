@@ -27,7 +27,7 @@ public sealed class MappedFile : IDisposable
     private int _patchCount;
     private bool HasPatches => Volatile.Read(ref _patchCount) != 0;
     private readonly List<Dictionary<int, (bool Had, byte Val)>> _undo = [];   // per-Patch pre-edit state, for undo
-    private bool _disposed;
+    private int _disposed;
 
     public int Length { get; private set; }
     public string Path { get; }
@@ -36,8 +36,7 @@ public sealed class MappedFile : IDisposable
     /// read from a not-yet-cancelled reader degrades safely rather than throwing ObjectDisposedException.</summary>
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         Length = 0;          // bounds-checked reads now short-circuit without touching the view
         _view.Dispose();
         _mmf.Dispose();
@@ -74,20 +73,46 @@ public sealed class MappedFile : IDisposable
     public byte ReadByte(int o)
     {
         if (HasPatches && _patches.TryGetValue(o, out var p)) return p;
-        return (uint)o < (uint)Length ? _view.ReadByte(o) : (byte)0;
+        if (Volatile.Read(ref _disposed) != 0 || (uint)o >= (uint)Length) return 0;
+        try { return _view.ReadByte(o); }
+        catch (ObjectDisposedException) { return 0; }
     }
-    public ushort ReadU16(int o) => !HasPatches && InBounds(o, 2) ? _view.ReadUInt16(o) : (ushort)(ReadByte(o) | ReadByte(o + 1) << 8);
-    public uint ReadU32(int o) => !HasPatches && InBounds(o, 4) ? _view.ReadUInt32(o)
-        : (uint)(ReadByte(o) | ReadByte(o + 1) << 8 | ReadByte(o + 2) << 16 | ReadByte(o + 3) << 24);
+    public ushort ReadU16(int o)
+    {
+        if (!HasPatches && Volatile.Read(ref _disposed) == 0 && InBounds(o, 2))
+        {
+            try { return _view.ReadUInt16(o); }
+            catch (ObjectDisposedException) { return 0; }
+        }
+        return (ushort)(ReadByte(o) | ReadByte(o + 1) << 8);
+    }
+    public uint ReadU32(int o)
+    {
+        if (!HasPatches && Volatile.Read(ref _disposed) == 0 && InBounds(o, 4))
+        {
+            try { return _view.ReadUInt32(o); }
+            catch (ObjectDisposedException) { return 0; }
+        }
+        return (uint)(ReadByte(o) | ReadByte(o + 1) << 8 | ReadByte(o + 2) << 16 | ReadByte(o + 3) << 24);
+    }
     public int ReadI32(int o) => (int)ReadU32(o);
-    public ulong ReadU64(int o) => !HasPatches && InBounds(o, 8) ? _view.ReadUInt64(o) : ReadU32(o) | (ulong)ReadU32(o + 4) << 32;
+    public ulong ReadU64(int o)
+    {
+        if (!HasPatches && Volatile.Read(ref _disposed) == 0 && InBounds(o, 8))
+        {
+            try { return _view.ReadUInt64(o); }
+            catch (ObjectDisposedException) { return 0; }
+        }
+        return ReadU32(o) | (ulong)ReadU32(o + 4) << 32;
+    }
 
     public byte[] ReadBytes(int offset, int count)
     {
         if (count <= 0 || offset < 0 || offset >= Length) return [];
         count = Math.Min(count, Length - offset);
         var b = new byte[count];
-        _view.ReadArray(offset, b, 0, count);
+        try { _view.ReadArray(offset, b, 0, count); }
+        catch (ObjectDisposedException) { return []; }
         if (HasPatches)
             for (int i = 0; i < count; i++) if (_patches.TryGetValue(offset + i, out var p)) b[i] = p;
         return b;

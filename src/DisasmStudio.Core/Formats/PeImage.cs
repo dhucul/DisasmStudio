@@ -28,6 +28,8 @@ public sealed class PeImage : IBinaryImage, IDisposable
         FilePath = path;
         _peHeader = _f.ReadI32(0x3C);
         Validate();
+        if (ImageBase > ulong.MaxValue - SizeOfHeaders)
+            throw new BinaryFormatException("PE header virtual range overflows.");
 
         _sections = ReadSections();
         ParseImports();
@@ -37,7 +39,12 @@ public sealed class PeImage : IBinaryImage, IDisposable
         ImportsByIatVa = _importsByIat;
     }
 
-    public static PeImage Load(string path) => new(MappedFile.Open(path), path);
+    public static PeImage Load(string path)
+    {
+        var file = MappedFile.Open(path);
+        try { return new PeImage(file, path); }
+        catch { file.Dispose(); throw; }
+    }
 
     // ---- IBinaryImage ----
     public string FilePath { get; }
@@ -79,7 +86,12 @@ public sealed class PeImage : IBinaryImage, IDisposable
     public byte ReadByteAtOffset(int offset) => _f.ReadByte(offset);
 
     public void Patch(int offset, ReadOnlySpan<byte> bytes) => _f.Patch(offset, bytes);
-    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes) { int o = VaToOffset(va); if (o < 0) return false; _f.Patch(o, bytes); return true; }
+    public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes)
+    {
+        if (!TryFileSpan(va, bytes.Length, out int offset, out _)) return false;
+        _f.Patch(offset, bytes);
+        return true;
+    }
     public void RevertPatch(int offset, int count) => _f.RevertPatch(offset, count);
     public bool IsPatchedAt(int offset) => _f.IsPatched(offset);
     public bool IsDirty => _f.IsDirty;
@@ -95,15 +107,46 @@ public sealed class PeImage : IBinaryImage, IDisposable
         return null;
     }
 
+    /// <summary>The section whose file-backed bytes contain <paramref name="va"/>. A PE section's virtual
+    /// tail is mapped as zero-filled memory by the loader, but it has no file offset and must never alias the
+    /// following section's raw bytes.</summary>
+    private Section? FileSectionAt(ulong va)
+    {
+        foreach (var s in _sections)
+            if (s.FileSize > 0 && va >= s.StartVa && va - s.StartVa < (ulong)s.FileSize)
+                return s;
+        return null;
+    }
+
+    private bool TryFileSpan(ulong va, int requested, out int offset, out int available)
+    {
+        offset = -1;
+        available = 0;
+        if (requested < 0 || va < ImageBase || va - ImageBase > uint.MaxValue) return false;
+        uint rva = (uint)(va - ImageBase);
+
+        if (rva < SizeOfHeaders)
+        {
+            if (rva >= (uint)_f.Length) return false;
+            offset = (int)rva;
+            available = Math.Min(_f.Length - offset,
+                (int)Math.Min(SizeOfHeaders - rva, int.MaxValue));
+            return requested <= available;
+        }
+
+        var s = FileSectionAt(va);
+        if (s is null) return false;
+        int delta = (int)(va - s.StartVa);
+        long fileOffset = (long)s.FileOffset + delta;
+        if (fileOffset < 0 || fileOffset >= _f.Length) return false;
+        offset = (int)fileOffset;
+        available = Math.Min(s.FileSize - delta, _f.Length - offset);
+        return requested <= available;
+    }
+
     public int VaToOffset(ulong va)
     {
-        if (va < ImageBase || va - ImageBase > uint.MaxValue) return -1;
-        uint rva = (uint)(va - ImageBase);
-        if (rva < SizeOfHeaders) return (int)rva;
-        var s = SectionAt(va);
-        if (s is null) return -1;
-        long off = (long)(va - s.StartVa) + s.FileOffset;
-        return off >= 0 && off < _f.Length ? (int)off : -1;
+        return TryFileSpan(va, 1, out int offset, out _) ? offset : -1;
     }
 
     public bool IsMappedVa(ulong va)
@@ -117,10 +160,8 @@ public sealed class PeImage : IBinaryImage, IDisposable
 
     public byte[] ReadBytesAtVa(ulong va, int count)
     {
-        int off = VaToOffset(va);
-        if (off < 0) return [];
-        count = Math.Clamp(count, 0, _f.Length - off);
-        return _f.ReadBytes(off, count);
+        if (count <= 0 || !TryFileSpan(va, 1, out int offset, out int available)) return [];
+        return _f.ReadBytes(offset, Math.Min(count, available));
     }
 
     public int ReadVa(ulong va, Span<byte> dest)
@@ -197,10 +238,16 @@ public sealed class PeImage : IBinaryImage, IDisposable
             // balloons and SectionAt/ContainsVa then matches almost any VA.
             long fileOff = Math.Min(rawPtr, (uint)_f.Length);
             long fileSz = Math.Clamp((long)rawSize, 0, _f.Length - fileOff);
+            if (ImageBase > ulong.MaxValue - vaddr)
+                throw new BinaryFormatException($"PE section '{name}' start address overflows.");
+            ulong startVa = ImageBase + vaddr;
+            ulong span = Math.Max((ulong)vsize, (ulong)fileSz);
+            if (startVa > ulong.MaxValue - span)
+                throw new BinaryFormatException($"PE section '{name}' virtual range overflows.");
             list.Add(new Section
             {
                 Name = name,
-                StartVa = ImageBase + vaddr,
+                StartVa = startVa,
                 VirtualSize = vsize,
                 FileOffset = (int)fileOff,
                 FileSize = (int)fileSz,

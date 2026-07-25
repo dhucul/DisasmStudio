@@ -3,7 +3,7 @@ namespace DisasmStudio.Core.Analysis;
 /// <summary>
 /// A whole-program static call graph, built from the analysis's <see cref="XrefKind.Call"/> cross-references:
 /// for every function, which functions it calls (callees) and which call it (callers). A call site is
-/// attributed to the function that contains it (the nearest function start at or before the call address);
+/// attributed to the function whose control-flow graph actually contains it;
 /// the callee is the call target. Keys are VAs — a callee that isn't itself a discovered function start (an
 /// import thunk / IAT slot) is kept as-is and resolves to its name through the analysis's name map.
 ///
@@ -14,9 +14,9 @@ public sealed class CallGraph
 {
     private readonly Dictionary<ulong, SortedSet<ulong>> _callees = [];
     private readonly Dictionary<ulong, SortedSet<ulong>> _callers = [];
-    private readonly ulong[] _starts;   // sorted function-start VAs, for containing-function lookup
+    private readonly AnalysisResult _result;
 
-    private CallGraph(ulong[] starts) => _starts = starts;
+    private CallGraph(AnalysisResult result) => _result = result;
 
     /// <summary>Functions called directly from <paramref name="fnVa"/> (empty if it's a leaf).</summary>
     public IReadOnlyCollection<ulong> Callees(ulong fnVa) =>
@@ -29,24 +29,20 @@ public sealed class CallGraph
     /// <summary>The number of recorded call edges (for the header / diagnostics).</summary>
     public int EdgeCount { get; private set; }
 
-    /// <summary>The function start at or before <paramref name="va"/> (0 if <paramref name="va"/> precedes the
-    /// first function) — maps a call site, or a mid-function caret, to the function that encloses it.</summary>
+    /// <summary>The function whose actual CFG contains <paramref name="va"/>, or 0 when the address is padding,
+    /// data, or otherwise outside every discovered function.</summary>
     public ulong ContainingFunction(ulong va)
     {
-        int lo = 0, hi = _starts.Length;
-        while (lo < hi) { int m = (lo + hi) >> 1; if (_starts[m] <= va) lo = m + 1; else hi = m; }
-        return lo > 0 ? _starts[lo - 1] : 0;
+        return _result.FunctionContaining(va)?.Va ?? 0;
     }
 
     public static CallGraph Build(AnalysisResult result)
     {
-        var starts = result.Functions.Select(f => f.Va)
-            .Where(result.Image.IsExecutableVa).Distinct().OrderBy(x => x).ToArray();
-        var g = new CallGraph(starts);
+        var g = new CallGraph(result);
 
         foreach (var x in result.Xrefs.AllOfKind(XrefKind.Call))
         {
-            ulong caller = g.ContainingFunction(x.From);
+            ulong caller = result.FunctionContaining(x.From)?.Va ?? 0;
             if (caller == 0) continue;              // a call from outside any known function
             g.Add(caller, x.To);
         }

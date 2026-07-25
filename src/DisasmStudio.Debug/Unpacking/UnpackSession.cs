@@ -35,6 +35,7 @@ public sealed class UnpackSession
     private readonly DebuggerEngine _eng = new();
     private readonly OepFinder _finder;
     private readonly TaskCompletionSource<UnpackResult> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _engineCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly StringBuilder _log = new();
     private bool _done;
     private bool _first = true;
@@ -70,6 +71,7 @@ public sealed class UnpackSession
         _eng.Resumed += OnResumed;
         _eng.ProcessExiting += OnProcessExiting;
         _eng.Exited += OnExited;
+        _eng.Completed += () => _engineCompleted.TrySetResult();
         _eng.ExceptionObserved += OnException;
         if (_opt.Sandbox) _eng.EnableJobContainment();
         Report($"Launching {Path.GetFileName(_target)} under the debugger{(_opt.Sandbox ? " (job-contained)" : "")}…");
@@ -359,10 +361,9 @@ public sealed class UnpackSession
         try { File.WriteAllBytes(_opt.OutputPath, outBytes); }
         catch (Exception ex) { Fail("Failed to write output file: " + ex.Message); return; }
         Report($"Wrote memory image to {_opt.OutputPath} (entry-rooted raw dump, not a clean unpack — open it to inspect the decrypted state).");
-        _done = true;
-        try { _eng.Stop(); } catch { }
-        _tcs.TrySetResult(new UnpackResult(true, _eng.EntryPoint, OepMethod.RunFree, false, 0, 0, _opt.OutputPath,
-            null, _log.ToString(), _faultDumpPath, _eng.ImageBase, ProbeSnapshotArray()));
+        var result = new UnpackResult(true, _eng.EntryPoint, OepMethod.RunFree, false, 0, 0, _opt.OutputPath,
+            null, _log.ToString(), _faultDumpPath, _eng.ImageBase, ProbeSnapshotArray());
+        CompleteSuccessfulAfterCleanup(result);
     }
 
     private void CompleteAtOep(ulong oepVa)
@@ -383,11 +384,9 @@ public sealed class UnpackSession
         catch (Exception ex) { Fail("Failed to write output file: " + ex.Message); return; }
         Report($"Wrote {_opt.OutputPath}.");
 
-        _done = true;
         var result = new UnpackResult(true, oepVa, _finder.ActiveMethod, confirmed,
             dump.ImportsResolved, dump.ImportsUnresolved, _opt.OutputPath, null, _log.ToString());
-        try { _eng.Stop(); } catch { }
-        _tcs.TrySetResult(result);
+        CompleteSuccessfulAfterCleanup(result);
     }
 
     private void OnExited(int code)
@@ -505,6 +504,42 @@ public sealed class UnpackSession
         lock (_runFreeProbes) return [.. _runFreeProbes];
     }
 
+    private void CompleteSuccessfulAfterCleanup(UnpackResult result, bool alreadyExited = false)
+    {
+        _done = true;
+        if (!alreadyExited)
+        {
+            try { _eng.Stop(); }
+            catch (Exception ex)
+            {
+                _tcs.TrySetResult(result with
+                {
+                    Ok = false,
+                    Error = "Output was written, but target shutdown failed: " + ex.Message,
+                });
+                return;
+            }
+        }
+
+        _ = AwaitCleanup();
+        async Task AwaitCleanup()
+        {
+            try
+            {
+                await _engineCompleted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                _tcs.TrySetResult(result);
+            }
+            catch (TimeoutException)
+            {
+                _tcs.TrySetResult(result with
+                {
+                    Ok = false,
+                    Error = "Output was written, but the debug target did not finish cleanup within 10 seconds.",
+                });
+            }
+        }
+    }
+
     private void CompleteVmTrace(bool alreadyExited = false)
     {
         if (_done) return;
@@ -521,10 +556,14 @@ public sealed class UnpackSession
                 : "VM trace completed without producing a report.";
             Report(resultError);
         }
-        if (!alreadyExited)
-            try { _eng.Stop(); } catch { }
-        _tcs.TrySetResult(new UnpackResult(reportWritten, 0, OepMethod.TraceVm, false, 0, 0, null, resultError,
-            _log.ToString(), _faultDumpPath, _eng.ImageBase, ProbeSnapshotArray(), report));
+        var result = new UnpackResult(reportWritten, 0, OepMethod.TraceVm, false, 0, 0, null, resultError,
+            _log.ToString(), _faultDumpPath, _eng.ImageBase, ProbeSnapshotArray(), report);
+        if (reportWritten) CompleteSuccessfulAfterCleanup(result, alreadyExited);
+        else
+        {
+            if (!alreadyExited) try { _eng.Stop(); } catch { }
+            _tcs.TrySetResult(result);
+        }
     }
 
     private void Report(string msg) { lock (_log) _log.AppendLine(msg); Progress?.Invoke(msg); }
