@@ -46,10 +46,18 @@ public sealed partial class DebuggerEngine
     private long _fakeClock;                                            // monotonic synthetic timer (defeats timing checks)
     private readonly Dictionary<ulong, InternalBp> _internalBps = [];   // hook addr -> hook state
     private readonly Dictionary<uint, ulong> _internalStep = [];        // thread -> internal hook to re-arm after a step
-    private readonly Dictionary<ulong, PendingReturn> _pendingReturns = [];   // return-patch: retaddr -> output to scrub
+    private readonly Dictionary<ulong, ReturnSite> _pendingReturns = [];
+    private readonly Dictionary<uint, ReturnStepState> _returnStep = [];
 
     /// <summary>A pending return-patch: when execution returns to <see cref="RetAddr"/>, scrub the call's output.</summary>
-    private readonly record struct PendingReturn(AdKind Kind, ulong Ptr, ulong Len, byte Orig);
+    private readonly record struct PendingReturn(uint Tid, ulong EntrySp, AdKind Kind, ulong Ptr, ulong Len);
+    private readonly record struct ReturnStepState(ulong Address, IntPtr[] SuspendedPeers);
+    private sealed class ReturnSite
+    {
+        public byte Original;
+        public bool Armed;
+        public List<PendingReturn> Pending { get; } = [];
+    }
 
     /// <summary>What an internal anti-debug hook does and how its call frame is shaped.</summary>
     private enum AdKind
@@ -239,7 +247,8 @@ public sealed partial class DebuggerEngine
         }
 
         TryInstallWindowHooks();   // user32 is usually already mapped at this point
-        _lateHooksInstalled = true;
+        ulong user32 = ModuleBaseByName("user32.dll", Is32);
+        _lateHooksInstalled = kbase != 0 && k32 != 0 && user32 != 0;
 
         int lateCount = 0;
         lock (_lock) lateCount = _internalBps.Count(bp =>
@@ -340,7 +349,7 @@ public sealed partial class DebuggerEngine
         // registers from its output on return — so the program never sees our hardware breakpoints.
         if (bp.Kind == AdKind.GetContextThread)
         {
-            ArmReturnBp(ReadPtr(sp, Is32), AdKind.GetContextThread, Arg(2), 0);   // arg2 = PCONTEXT
+            ArmReturnBp(ReadPtr(sp, Is32), tid, sp, AdKind.GetContextThread, Arg(2), 0);   // arg2 = PCONTEXT
             LetItRun(addr, tid, c, hThread);
             return;
         }
@@ -350,7 +359,7 @@ public sealed partial class DebuggerEngine
         // return — emulating a system with no live debug object. Other classes pass straight through.
         if (bp.Kind == AdKind.QueryObject)
         {
-            if (Arg(2) == 3) ArmReturnBp(ReadPtr(sp, Is32), AdKind.QueryObject, Arg(3), Arg(4));   // arg3 = buffer, arg4 = length
+            if (Arg(2) == 3) ArmReturnBp(ReadPtr(sp, Is32), tid, sp, AdKind.QueryObject, Arg(3), Arg(4));   // arg3 = buffer, arg4 = length
             LetItRun(addr, tid, c, hThread);
             return;
         }
@@ -377,7 +386,7 @@ public sealed partial class DebuggerEngine
         // The per-call overhead is trivial: the function runs, and on return we check one dword.
         if (bp.Kind == AdKind.CloseHandle && Arg(1) is var hVal && hVal != 0)
         {
-            ArmReturnBp(ReadPtr(sp, Is32), AdKind.CloseHandle, 0, 0);
+            ArmReturnBp(ReadPtr(sp, Is32), tid, sp, AdKind.CloseHandle, 0, 0);
             LetItRun(addr, tid, c, hThread);
             return;
         }
@@ -389,7 +398,7 @@ public sealed partial class DebuggerEngine
         if (bp.Kind is AdKind.Process32First or AdKind.Process32Next && _spoofParentPid != 0)
         {
             ulong entryPtr = Arg(2);
-            ArmReturnBp(ReadPtr(sp, Is32), bp.Kind, entryPtr, 0);
+            ArmReturnBp(ReadPtr(sp, Is32), tid, sp, bp.Kind, entryPtr, 0);
             LetItRun(addr, tid, c, hThread);
             return;
         }
@@ -399,7 +408,7 @@ public sealed partial class DebuggerEngine
         // a packer compares against explorer.exe. arg2 = class (0 == ProcessBasicInformation), arg3 = buffer.
         if (bp.Kind == AdKind.QueryInfoProcess && _spoofParentPid != 0 && Arg(2) == 0)
         {
-            ArmReturnBp(ReadPtr(sp, Is32), AdKind.QueryInfoProcessParent, Arg(3), 0);
+            ArmReturnBp(ReadPtr(sp, Is32), tid, sp, AdKind.QueryInfoProcessParent, Arg(3), 0);
             LetItRun(addr, tid, c, hThread);
             return;
         }
@@ -528,28 +537,87 @@ public sealed partial class DebuggerEngine
     }
 
     // ---- return-patch hooks: run the real function, then scrub its output on return ----
-    private void ArmReturnBp(ulong retAddr, AdKind kind, ulong ptr, ulong len)
+    private void ArmReturnBp(ulong retAddr, uint tid, ulong sp, AdKind kind, ulong ptr, ulong len)
     {
         // CloseHandle doesn't scrub a buffer (ptr==0 is valid — it patches the return status instead).
         if (retAddr == 0 || (ptr == 0 && kind != AdKind.CloseHandle)) return;
         lock (_lock)
-            if (_pendingReturns.ContainsKey(retAddr) || _swBps.ContainsKey(retAddr)
-                || _tempBps.ContainsKey(retAddr) || _internalBps.ContainsKey(retAddr)) return;
-        var o = ReadMemory(retAddr, 1);
-        if (o.Length < 1) return;
-        lock (_lock) _pendingReturns[retAddr] = new PendingReturn(kind, ptr, len, o[0]);
-        WriteCode(retAddr, [0xCC]);
+        {
+            var pending = new PendingReturn(tid, sp, kind, ptr, len);
+            if (_pendingReturns.TryGetValue(retAddr, out var existing))
+            {
+                existing.Pending.Add(pending);
+                return;
+            }
+            if (_swBps.ContainsKey(retAddr) || _tempBps.ContainsKey(retAddr) || _internalBps.ContainsKey(retAddr))
+                return;
+            var o = ReadMemory(retAddr, 1);
+            if (o.Length < 1 || !WriteCode(retAddr, [0xCC])) return;
+            var site = new ReturnSite { Original = o[0], Armed = true };
+            site.Pending.Add(pending);
+            _pendingReturns[retAddr] = site;
+        }
     }
 
     /// <summary>At an armed return address: restore the original byte, rewind, and scrub the just-completed
     /// call's output per its kind — the queried CONTEXT's debug registers, or an NtQueryObject result's
     /// DebugObject counts. Handled silently (never surfaced to the UI).</summary>
-    private void HandleReturnHook(ulong addr, IntPtr hThread)
+    private bool HandleReturnHook(ulong addr, uint tid, IntPtr hThread)
     {
         PendingReturn pend;
-        lock (_lock) { if (!_pendingReturns.Remove(addr, out pend)) return; }
-        WriteCode(addr, [pend.Orig]);
-        SetIp(hThread, addr);
+        bool rearm;
+        IntPtr[] suspended = [];
+        ReturnSite site;
+        int index;
+        lock (_lock)
+        {
+            if (!_pendingReturns.TryGetValue(addr, out var found) || found is null) return false;
+            site = found;
+            index = site.Pending.FindLastIndex(p => p.Tid == tid);
+            if (index < 0) return false;
+            rearm = site.Pending.Count > 1;
+            if (rearm)
+            {
+                suspended = SuspendPeerThreads(tid) ?? [];
+                if (suspended.Length != _threads.Count - 1) return false;
+            }
+            if (!WriteCode(addr, [site.Original]))
+            {
+                ResumeThreads(suspended);
+                return false;
+            }
+            site.Armed = false;
+            pend = site.Pending[index];
+        }
+        using (var c = new Ctx(Is32))
+        {
+            if (!c.Get(hThread))
+            {
+                lock (_lock)
+                    if (_pendingReturns.TryGetValue(addr, out var current) && ReferenceEquals(current, site))
+                        _pendingReturns.Remove(addr);
+                ResumeThreads(suspended);
+                Output?.Invoke($"Anti-debug: failed to read thread context at return hook 0x{addr:X}.");
+                return false;
+            }
+            c.Ip = addr;
+            if (rearm) c.TrapFlag = true;
+            if (!c.Set(hThread))
+            {
+                lock (_lock)
+                    if (_pendingReturns.TryGetValue(addr, out var current) && ReferenceEquals(current, site))
+                        _pendingReturns.Remove(addr);
+                ResumeThreads(suspended);
+                Output?.Invoke($"Anti-debug: failed to update thread context at return hook 0x{addr:X}.");
+                return false;
+            }
+        }
+        lock (_lock)
+        {
+            site.Pending.RemoveAt(index);
+            if (!rearm) _pendingReturns.Remove(addr);
+            else _returnStep[tid] = new ReturnStepState(addr, suspended);
+        }
         switch (pend.Kind)
         {
             case AdKind.GetContextThread: ScrubDebugRegisters(pend.Ptr); break;
@@ -559,6 +627,24 @@ public sealed partial class DebuggerEngine
             case AdKind.Process32First:
             case AdKind.Process32Next: ScrubSnapshotParent(pend.Ptr); break;
         }
+        return true;
+    }
+
+    private bool CompleteReturnStep(uint tid)
+    {
+        if (!_returnStep.Remove(tid, out var step)) return false;
+        bool armed = false;
+        lock (_lock)
+        {
+            if (_pendingReturns.TryGetValue(step.Address, out var site))
+            {
+                armed = WriteCode(step.Address, [0xCC]);
+                site.Armed = armed;
+            }
+        }
+        ResumeThreads(step.SuspendedPeers);
+        if (!armed) Output?.Invoke($"Anti-debug: failed to re-arm return hook at 0x{step.Address:X}.");
+        return armed;
     }
 
     /// <summary>If a just-completed NtClose returned STATUS_INVALID_HANDLE (0xC0000008), overwrite the
@@ -766,12 +852,15 @@ public sealed partial class DebuggerEngine
         return best?.Base ?? 0;
     }
 
-    private ulong ResolveExport(ulong moduleBase, string name)
+    private ulong ResolveExport(ulong moduleBase, string name) => ResolveExport(moduleBase, name, 0);
+
+    private ulong ResolveExport(ulong moduleBase, string name, int depth)
     {
+        if (depth > 8) return 0;
         var hdr = ReadMemory(moduleBase, 0x1000);
         if (hdr.Length < 0x200 || !PeView.TryParse(hdr, out var view)) return 0;
-        var (expRva, _) = view.DataDir(PeConstants.DirExport);
-        if (expRva == 0) return 0;
+        var (expRva, expSize) = view.DataDir(PeConstants.DirExport);
+        if (expRva == 0 || expSize == 0) return 0;
         var dir = ReadMemory(moduleBase + expRva, 40);
         if (dir.Length < 40) return 0;
         uint numNames = U32(dir, 0x18);
@@ -788,6 +877,18 @@ public sealed partial class DebuggerEngine
             var eat = ReadMemory(moduleBase + eatRva + (ulong)ord * 4, 4);
             if (eat.Length < 4) return 0;
             uint funcRva = BitConverter.ToUInt32(eat, 0);
+            if (funcRva >= expRva && (ulong)funcRva < (ulong)expRva + expSize)
+            {
+                string forwarder = ReadCString(moduleBase + funcRva);
+                int dot = forwarder.LastIndexOf('.');
+                if (dot <= 0 || dot == forwarder.Length - 1) return 0;
+                string module = forwarder[..dot];
+                if (!module.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) module += ".dll";
+                string export = forwarder[(dot + 1)..];
+                if (export.StartsWith('#')) return 0;
+                ulong forwardedBase = ModuleBaseByName(module, Is32);
+                return forwardedBase == 0 ? 0 : ResolveExport(forwardedBase, export, depth + 1);
+            }
             return funcRva == 0 ? 0 : moduleBase + funcRva;
         }
         return 0;

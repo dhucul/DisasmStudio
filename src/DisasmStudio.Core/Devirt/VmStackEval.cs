@@ -86,7 +86,13 @@ internal static class VmStackEval
             if (ins.Mnemonic is Mnemonic.Add or Mnemonic.Sub && IsImm(ins.Op1Kind) && ins.Op0Kind == OpKind.Register)
             {
                 int k = (int)ins.GetImmediate(1);
-                if (op0 == vip) { t.OperandBytes += System.Math.Abs(k); continue; }
+                if (op0 == vip)
+                {
+                    long delta = k == int.MinValue ? (long)int.MaxValue + 1 : Math.Abs((long)k);
+                    long total = t.OperandBytes + delta;
+                    t.OperandBytes = total > int.MaxValue ? int.MaxValue : (int)total;
+                    continue;
+                }
                 if (op0 == t.Vsp) { if (ins.Mnemonic == Mnemonic.Sub) t.Pushes++; else t.Pops++; continue; }
             }
 

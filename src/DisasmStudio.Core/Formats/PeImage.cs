@@ -51,6 +51,13 @@ public sealed class PeImage : IBinaryImage, IDisposable
     public BinaryFormat Format => BinaryFormat.Pe;
     public string FormatName => "PE";
     public int Bitness => Is64Bit ? 64 : 32;
+    public Architecture Arch => Machine switch
+    {
+        0x014C => Architecture.X86,
+        0x8664 => Architecture.X64,
+        0xAA64 => Architecture.Arm64,
+        _ => throw new BinaryFormatException($"Unsupported PE machine 0x{Machine:X}."),
+    };
     public string ArchName => Machine switch { 0x014C => "x86", 0x8664 => "x64", 0xAA64 => "arm64", _ => $"0x{Machine:X}" };
     public ulong ImageBase => Is64Bit ? _f.ReadU64(OptHeader + 24) : _f.ReadU32(OptHeader + 28);
     public ulong EntryVa => ImageBase + _f.ReadU32(OptHeader + 16);
@@ -262,19 +269,20 @@ public sealed class PeImage : IBinaryImage, IDisposable
     // ---- imports (standard + delay) ----
     private void ParseImports()
     {
-        var (dirRva, _) = DataDir(1); // Import
-        ParseImportDescriptors(dirRva, descSize: 20, delay: false);
-        var (delayRva, _) = DataDir(13); // DelayImport
-        ParseImportDescriptors(delayRva, descSize: 32, delay: true);
+        var (dirRva, dirSize) = DataDir(1); // Import
+        ParseImportDescriptors(dirRva, dirSize, descSize: 20, delay: false);
+        var (delayRva, delaySize) = DataDir(13); // DelayImport
+        ParseImportDescriptors(delayRva, delaySize, descSize: 32, delay: true);
     }
 
-    private void ParseImportDescriptors(uint dirRva, int descSize, bool delay)
+    private void ParseImportDescriptors(uint dirRva, uint dirSize, int descSize, bool delay)
     {
-        if (dirRva == 0) return;
+        if (dirRva == 0 || dirSize < descSize) return;
         int descOff = RvaToOffset(dirRva);
         if (descOff < 0) return;
 
-        for (int d = 0; ; d++)
+        int maxDescriptors = (int)Math.Min(dirSize / (uint)descSize, int.MaxValue);
+        for (int d = 0; d < maxDescriptors; d++)
         {
             int b = descOff + d * descSize;
             if (b + descSize > _f.Length) break;
@@ -487,5 +495,9 @@ public sealed class PeImage : IBinaryImage, IDisposable
         ushort magic = OptMagic;
         if (magic != 0x10B && magic != 0x20B)
             throw new BinaryFormatException($"Unsupported optional header magic 0x{magic:X}.");
+        if (Machine is not (0x014C or 0x8664 or 0xAA64))
+            throw new BinaryFormatException($"Unsupported PE machine 0x{Machine:X}.");
+        if (Machine == 0xAA64 && magic != 0x20B)
+            throw new BinaryFormatException("ARM64 PE images must use the PE32+ optional header.");
     }
 }

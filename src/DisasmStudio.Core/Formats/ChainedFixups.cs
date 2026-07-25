@@ -23,6 +23,16 @@ internal static class ChainedFixups
         int blob = image.ChainedFixupsOffset;
         if (blob < 0 || image.ChainedFixupsSize < 0x1C) return;
         var f = image.File;
+        int blobSize = image.ChainedFixupsSize;
+        if (!f.InBounds(blob, blobSize)) return;
+
+        bool TryRelative(uint relative, int count, out int absolute)
+        {
+            absolute = 0;
+            if (relative > (uint)blobSize || count < 0 || (uint)count > (uint)blobSize - relative) return false;
+            absolute = blob + (int)relative;
+            return true;
+        }
 
         // dyld_chained_fixups_header
         uint startsOffset = f.ReadU32(blob + 4);
@@ -31,24 +41,39 @@ internal static class ChainedFixups
         uint importsCount = f.ReadU32(blob + 16);
         uint importsFormat = f.ReadU32(blob + 20);
 
-        var imports = new ImportTable(f, blob + (int)importsOffset, importsCount, importsFormat, blob + (int)symbolsOffset);
+        int importEntrySize = importsFormat switch { 1 => 4, 2 => 8, 3 => 16, _ => 0 };
+        if (importEntrySize == 0 || importsCount > int.MaxValue / importEntrySize) return;
+        if (!TryRelative(importsOffset, (int)importsCount * importEntrySize, out int importsBase)
+            || !TryRelative(symbolsOffset, importsCount == 0 ? 0 : 1, out int symbolsBase)
+            || !TryRelative(startsOffset, 4, out int startsBase))
+            return;
+        var imports = new ImportTable(f, importsBase, importsCount, importsFormat, symbolsBase, blob + blobSize);
 
-        int startsBase = blob + (int)startsOffset;
         uint segCount = f.ReadU32(startsBase);
+        if (segCount > 4096 || segCount > int.MaxValue / 4
+            || startsBase > blob + blobSize - 4 - (int)segCount * 4)
+            return;
         var rebases = new Dictionary<ulong, ulong>();
 
-        for (uint si = 0; si < segCount && si < 4096; si++)
+        for (uint si = 0; si < segCount; si++)
         {
             uint segInfoOff = f.ReadU32(startsBase + 4 + (int)si * 4);
             if (segInfoOff == 0) continue;                          // segment has no fixups
-            int seg = startsBase + (int)segInfoOff;
+            long segLong = (long)startsBase + segInfoOff;
+            if (segLong < blob || segLong > blob + blobSize - 22) continue;
+            int seg = (int)segLong;
 
             // dyld_chained_starts_in_segment
+            uint segSize = f.ReadU32(seg);
+            if (segSize < 22 || segSize > blob + blobSize - seg) continue;
+            int segEnd = seg + (int)segSize;
             ushort pageSize = f.ReadU16(seg + 4);
             ushort ptrFormat = f.ReadU16(seg + 6);
             ulong segOffset = f.ReadU64(seg + 8);
             ushort pageCount = f.ReadU16(seg + 20);
-            if (pageSize == 0) continue;
+            if (pageSize == 0 || ptrFormat is not (1 or 2 or 6 or 7 or 9 or 10 or 12)
+                || pageCount > (segEnd - seg - 22) / 2)
+                continue;
 
             for (int pi = 0; pi < pageCount; pi++)
             {
@@ -66,7 +91,9 @@ internal static class ChainedFixups
                 int ovf = pageStart & 0x7FFF;
                 for (int guard = 0; guard < 0x10000; guard++)
                 {
-                    ushort start = f.ReadU16(seg + 22 + ovf * 2);
+                    long startOffset = (long)seg + 22 + ovf * 2L;
+                    if (startOffset < seg || startOffset > segEnd - 2) break;
+                    ushort start = f.ReadU16((int)startOffset);
                     WalkChain(image, pageVa + (ulong)(start & 0x7FFF), ptrFormat, rebases, imports);
                     if ((start & DYLD_CHAINED_PTR_START_LAST) != 0) break;
                     ovf++;
@@ -138,12 +165,12 @@ internal static class ChainedFixups
     private sealed class ImportTable
     {
         private readonly MappedFile _f;
-        private readonly int _base, _symbols, _entSize, _shift;
+        private readonly int _base, _symbols, _end, _entSize, _shift;
         private readonly uint _count, _format;
 
-        public ImportTable(MappedFile f, int importsBase, uint count, uint format, int symbolsBase)
+        public ImportTable(MappedFile f, int importsBase, uint count, uint format, int symbolsBase, int end)
         {
-            _f = f; _base = importsBase; _count = count; _format = format; _symbols = symbolsBase;
+            _f = f; _base = importsBase; _count = count; _format = format; _symbols = symbolsBase; _end = end;
             (_entSize, _shift) = format switch
             {
                 1 => (4, 9),    // dyld_chained_import          : lib_ordinal:8, weak:1, name_offset:23
@@ -157,9 +184,14 @@ internal static class ChainedFixups
         {
             name = "";
             if (_entSize == 0 || ordinal >= _count) return false;
-            int e = _base + (int)ordinal * _entSize;
+            long entry = (long)_base + (long)ordinal * _entSize;
+            if (entry < _base || entry > _end - _entSize) return false;
+            int e = (int)entry;
             ulong nameOffset = _format == 3 ? _f.ReadU64(e) >> 32 : _f.ReadU32(e) >> _shift;
-            name = _f.ReadAsciiZ(_symbols + (int)nameOffset, 512);
+            if (nameOffset > int.MaxValue) return false;
+            long symbol = (long)_symbols + (int)nameOffset;
+            if (symbol < _symbols || symbol >= _end) return false;
+            name = _f.ReadAsciiZ((int)symbol, Math.Min(512, _end - (int)symbol));
             if (name.Length > 0 && name[0] == '_') name = name[1..];
             return name.Length > 0;
         }

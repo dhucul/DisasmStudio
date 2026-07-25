@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Text;
 using DisasmStudio.Core.Formats;
 
@@ -22,6 +21,9 @@ public sealed record FoundString(ulong Va, int Length, bool Wide, string Text)
 public static class StringScanner
 {
     private const int ScanReadChunkBytes = 1024 * 1024;
+    private const int MaxStringCharacters = 1024 * 1024;
+
+    private sealed record Candidate(FoundString Value, int ByteLength);
 
     /// <summary>Cap on bytes scanned per section when reading live process memory: a section's VirtualSize can
     /// be huge or only partly committed, so this bounds the read + buffer (ReadBytesAtVa returns the committed
@@ -34,7 +36,10 @@ public static class StringScanner
         int minLength = 4, int maxResults = 200_000, bool useVirtualSize = false, bool includeExecutable = false,
         CancellationToken token = default)
     {
+        if (minLength < 1) throw new ArgumentOutOfRangeException(nameof(minLength));
+        if (maxResults < 0) throw new ArgumentOutOfRangeException(nameof(maxResults));
         var found = new List<FoundString>();
+        if (maxResults == 0) return found;
         foreach (var s in img.Sections)
         {
             if (!s.IsReadable) continue;
@@ -57,65 +62,134 @@ public static class StringScanner
     private static bool ScanSection(IBinaryImage img, ulong start, int size, int minLength, int maxResults,
         List<FoundString> found, IReadOnlySet<ulong>? gate, CancellationToken token)
     {
-        var storage = ReadSection(img, start, size, token);
-        if (storage is null) return false;
-        ReadOnlySpan<byte> buf = storage.WrittenSpan;
+        int candidateLimit = maxResults > int.MaxValue / 2 ? int.MaxValue : Math.Max(16, maxResults * 2);
+        var candidates = new List<Candidate>(Math.Min(candidateLimit, 4096));
 
-        int i = 0;
-        while (i < buf.Length)
+        int asciiLength = 0;
+        ulong asciiStart = 0;
+        bool asciiTooLong = false;
+        var asciiText = new StringBuilder();
+
+        int[] wideLength = [0, 0];
+        ulong[] wideStart = [0, 0];
+        bool[] wideTooLong = [false, false];
+        StringBuilder[] wideText = [new(), new()];
+
+        void FinishAscii()
         {
-            if ((i & 0xFFFF) == 0 && token.IsCancellationRequested) return false;
-            if (found.Count >= maxResults) return true;
-
-            // ASCII run
-            int a = i;
-            while (a < buf.Length && IsPrintable(buf[a])) a++;
-            int asciiLen = a - i;
-
-            // UTF-16LE run (printable, low byte set, high byte zero)
-            int w = i, wchars = 0;
-            while (w + 1 < buf.Length && buf[w + 1] == 0 && IsPrintable(buf[w])) { w += 2; wchars++; }
-
-            if (wchars >= minLength && wchars * 2 >= asciiLen)
-            {
-                if (gate is null || Referenced(gate, start + (ulong)i, wchars * 2))
-                    found.Add(new FoundString(start + (ulong)i, wchars, true, DecodeAscii(buf, i, wchars * 2, wide: true)));
-                i = w;
-            }
-            else if (asciiLen >= minLength)
-            {
-                if (gate is null || Referenced(gate, start + (ulong)i, asciiLen))
-                    found.Add(new FoundString(start + (ulong)i, asciiLen, false, DecodeAscii(buf, i, asciiLen, wide: false)));
-                i = a;
-            }
-            else i++;
+            if (!asciiTooLong && asciiLength >= minLength && candidates.Count < candidateLimit
+                && (gate is null || Referenced(gate, asciiStart, asciiLength)))
+                candidates.Add(new Candidate(new FoundString(asciiStart, asciiLength, false, asciiText.ToString()), asciiLength));
+            asciiLength = 0;
+            asciiTooLong = false;
+            asciiText.Clear();
         }
-        return true;
-    }
 
-    /// <summary>Read a section incrementally so cancellation is observed between bounded reads instead of only
-    /// after one potentially multi-gigabyte allocation/copy. The growing buffer preserves strings that cross a
-    /// chunk boundary without splitting or duplicating them.</summary>
-    private static ArrayBufferWriter<byte>? ReadSection(
-        IBinaryImage img, ulong start, int size, CancellationToken token)
-    {
-        if (token.IsCancellationRequested) return null;
-        var result = new ArrayBufferWriter<byte>(Math.Min(size, ScanReadChunkBytes));
-        int read = 0;
-        while (read < size)
+        void FinishWide(int parity)
         {
-            if (token.IsCancellationRequested) return null;
+            if (!wideTooLong[parity] && wideLength[parity] >= minLength && candidates.Count < candidateLimit)
+            {
+                int byteLength = checked(wideLength[parity] * 2);
+                if (gate is null || Referenced(gate, wideStart[parity], byteLength))
+                    candidates.Add(new Candidate(
+                        new FoundString(wideStart[parity], wideLength[parity], true, wideText[parity].ToString()),
+                        byteLength));
+            }
+            wideLength[parity] = 0;
+            wideTooLong[parity] = false;
+            wideText[parity].Clear();
+        }
+
+        byte previous = 0;
+        bool havePrevious = false;
+        int read = 0;
+        while (read < size && candidates.Count < candidateLimit)
+        {
+            if (token.IsCancellationRequested) return false;
             int requested = Math.Min(ScanReadChunkBytes, size - read);
             var chunk = img.ReadBytesAtVa(start + (ulong)read, requested);
-            if (token.IsCancellationRequested) return null;
+            if (token.IsCancellationRequested) return false;
             int count = Math.Min(requested, chunk.Length);
             if (count == 0) break;
-            chunk.AsSpan(0, count).CopyTo(result.GetSpan(count));
-            result.Advance(count);
+
+            for (int i = 0; i < count; i++)
+            {
+                if ((i & 0xFFFF) == 0 && token.IsCancellationRequested) return false;
+                byte current = chunk[i];
+                ulong va = start + (ulong)read + (ulong)i;
+
+                if (IsPrintable(current))
+                {
+                    if (asciiLength == 0) asciiStart = va;
+                    asciiLength++;
+                    if (asciiLength <= MaxStringCharacters) asciiText.Append((char)current);
+                    else asciiTooLong = true;
+                }
+                else
+                {
+                    FinishAscii();
+                }
+
+                if (havePrevious)
+                {
+                    ulong pairStart = va - 1;
+                    int parity = (int)((pairStart - start) & 1);
+                    if (IsPrintable(previous) && current == 0)
+                    {
+                        if (wideLength[parity] == 0) wideStart[parity] = pairStart;
+                        wideLength[parity]++;
+                        if (wideLength[parity] <= MaxStringCharacters) wideText[parity].Append((char)previous);
+                        else wideTooLong[parity] = true;
+                    }
+                    else
+                    {
+                        FinishWide(parity);
+                    }
+                }
+                previous = current;
+                havePrevious = true;
+            }
+
             read += count;
             if (count < requested) break;
         }
-        return result;
+
+        FinishAscii();
+        FinishWide(0);
+        FinishWide(1);
+
+        candidates.Sort((x, y) =>
+        {
+            int byVa = x.Value.Va.CompareTo(y.Value.Va);
+            if (byVa != 0) return byVa;
+            if (x.Value.Wide != y.Value.Wide) return x.Value.Wide ? -1 : 1;
+            return y.ByteLength.CompareTo(x.ByteLength);
+        });
+
+        ulong skipUntil = start;
+        for (int i = 0; i < candidates.Count && found.Count < maxResults;)
+        {
+            ulong va = candidates[i].Value.Va;
+            int j = i;
+            Candidate? ascii = null, wide = null;
+            while (j < candidates.Count && candidates[j].Value.Va == va)
+            {
+                if (candidates[j].Value.Wide) wide ??= candidates[j];
+                else ascii ??= candidates[j];
+                j++;
+            }
+
+            Candidate chosen = wide is not null && (ascii is null || wide.ByteLength >= ascii.ByteLength) ? wide : ascii!;
+            if (va >= skipUntil)
+            {
+                found.Add(chosen.Value);
+                skipUntil = va > ulong.MaxValue - (ulong)chosen.ByteLength
+                    ? ulong.MaxValue
+                    : va + (ulong)chosen.ByteLength;
+            }
+            i = j;
+        }
+        return true;
     }
 
     /// <summary>True if any byte of the run is a recorded data-reference target.</summary>
@@ -128,11 +202,4 @@ public static class StringScanner
 
     private static bool IsPrintable(byte b) => b is >= 0x20 and < 0x7F or 0x09;
 
-    private static string DecodeAscii(ReadOnlySpan<byte> buf, int offset, int byteLen, bool wide)
-    {
-        var sb = new StringBuilder(byteLen);
-        for (int k = 0; k < byteLen; k += wide ? 2 : 1)
-            sb.Append((char)buf[offset + k]);
-        return sb.ToString();
-    }
 }

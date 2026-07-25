@@ -715,7 +715,9 @@ internal static class Dialogs
 
         var enabled = new CheckBox { Content = "Enabled", IsChecked = current.Enabled, Margin = new Thickness(0, 6, 0, 0), Foreground = Fg };
 
-        string kindNote = current.Hardware
+        string kindNote = current.Memory
+            ? $"Memory {current.MemAccess}/{current.MemLength}B breakpoint"
+            : current.Hardware
             ? $"Hardware {current.Kind}{(current.Kind == HwKind.Execute ? "" : "/" + current.Size + "B")} breakpoint"
             : "Software breakpoint";
 
@@ -751,6 +753,9 @@ internal static class Dialogs
             }
             result = new BpDef
             {
+                Memory = current.Memory,
+                MemLength = current.MemLength,
+                MemAccess = current.MemAccess,
                 Hardware = current.Hardware,
                 Kind = current.Kind,
                 Size = current.Size,

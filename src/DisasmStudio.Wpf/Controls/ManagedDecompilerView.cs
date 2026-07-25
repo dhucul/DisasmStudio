@@ -234,7 +234,7 @@ public sealed class ManagedDecompilerView : Grid
 
         _path.Text = "Saving C#…";
         string text = await Task.Run(() => whole ? asm.WholeModuleCSharp() : asm.CSharpText(node!));
-        try { File.WriteAllText(path, text); _path.Text = "Saved " + path; }
+        try { await Task.Run(() => AtomicFile.WriteAllText(path, text)); _path.Text = "Saved " + path; }
         catch (Exception ex) { MessageBox.Show(owner, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error); _path.Text = ""; }
     }
 
@@ -268,7 +268,9 @@ public sealed class ManagedDecompilerView : Grid
         _asm = null;
         _node = null;
         _tree.Items.Clear();
-        _lines = [new DecompLine(0, [new AsmToken(message, AsmTokenKind.Comment)], 0)];
+        _lines = [new DecompLine(0, [new AsmToken(message, AsmTokenKind.Comment)], 0, true)];
+        _map = ManagedLineMap.Empty;
+        _renderedSeq = 0;
         _path.Text = "";
         _top = 0;
         _caret = -1;
@@ -365,7 +367,9 @@ public sealed class ManagedDecompilerView : Grid
         if (_asm is not { } asm || _node is not { } node) return;
         _path.Text = (_il ? "IL — " : "C# — ") + node.Display;
         int seq = ++_buildSeq;
-        _lines = [new DecompLine(0, [new AsmToken(_il ? "// disassembling…" : "// decompiling…", AsmTokenKind.Comment)], 0)];
+        _lines = [new DecompLine(0, [new AsmToken(_il ? "// disassembling…" : "// decompiling…", AsmTokenKind.Comment)], 0, true)];
+        _map = ManagedLineMap.Empty;
+        _renderedSeq = 0;
         _top = 0; _caret = -1;
         _currentLine = -1;   // the stop highlight is only valid for the method it was set in (re-applied by ApplyPendingStop)
         ConfigureScroll();
@@ -381,7 +385,9 @@ public sealed class ManagedDecompilerView : Grid
         {
             var result = t.IsCompletedSuccessfully
                 ? t.Result
-                : (Lines: (IReadOnlyList<DecompLine>)[new DecompLine(0, [new AsmToken("// failed", AsmTokenKind.Comment)], 0)], Map: ManagedLineMap.Empty);
+                : (Lines: (IReadOnlyList<DecompLine>)[new DecompLine(0,
+                    [new AsmToken("// failed: " + (t.Exception?.GetBaseException().Message ?? "unknown error"), AsmTokenKind.Comment)],
+                    0, true)], Map: ManagedLineMap.Empty);
             Dispatcher.Invoke(() =>
             {
                 if (seq != _buildSeq || !ReferenceEquals(_asm, asm) || !ReferenceEquals(_node, node)) return;
@@ -432,7 +438,7 @@ public sealed class ManagedDecompilerView : Grid
 
     private void ScrollByLines(long delta)
     {
-        _top = Math.Clamp(_top + delta, 0, Math.Max(0, _lines.Count - 1));
+        _top = Math.Clamp(_top + delta, 0, Math.Max(0, _lines.Count - VisibleRows));
         _scroll.Value = _top;
         _surface.InvalidateVisual();
     }
@@ -443,7 +449,7 @@ public sealed class ManagedDecompilerView : Grid
         _caret = Math.Clamp(line, 0, _lines.Count - 1);
         if (_caret < _top) _top = _caret;
         else if (_caret >= _top + VisibleRows) _top = _caret - VisibleRows + 1;
-        _top = Math.Clamp(_top, 0, Math.Max(0, _lines.Count - 1));
+        _top = Math.Clamp(_top, 0, Math.Max(0, _lines.Count - VisibleRows));
         _scroll.Value = _top;
         _surface.InvalidateVisual();
     }

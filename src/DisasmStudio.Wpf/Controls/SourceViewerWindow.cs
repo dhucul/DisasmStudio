@@ -82,7 +82,7 @@ public sealed class SourceViewerWindow : Window
     {
         var lines = new List<DecompLine>();
         foreach (var raw in text.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n'))
-            lines.Add(new DecompLine(0, [new AsmToken(raw, AsmTokenKind.Text)], 0));
+            lines.Add(new DecompLine(0, [new AsmToken(raw, AsmTokenKind.Text)], 0, true));
         return lines;
     }
 
@@ -117,7 +117,7 @@ public sealed class SourceViewerWindow : Window
 
     private void ScrollByLines(long delta)
     {
-        _top = Math.Clamp(_top + delta, 0, Math.Max(0, _lines.Count - 1));
+        _top = Math.Clamp(_top + delta, 0, Math.Max(0, _lines.Count - VisibleRows));
         _scroll.Value = _top;
         _surface.InvalidateVisual();
     }
@@ -128,7 +128,7 @@ public sealed class SourceViewerWindow : Window
         _caret = Math.Clamp(line, 0, _lines.Count - 1);
         if (_caret < _top) _top = _caret;
         else if (_caret >= _top + VisibleRows) _top = _caret - VisibleRows + 1;
-        _top = Math.Clamp(_top, 0, Math.Max(0, _lines.Count - 1));
+        _top = Math.Clamp(_top, 0, Math.Max(0, _lines.Count - VisibleRows));
         _scroll.Value = _top;
         _surface.InvalidateVisual();
     }

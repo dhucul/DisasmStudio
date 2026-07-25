@@ -172,7 +172,7 @@ public sealed class MachOImage : IBinaryImage, IDisposable
         CPU_TYPE_X86 => (Architecture.X86, 32, "x86"),
         CPU_TYPE_ARM64 => (Architecture.Arm64, 64, "arm64"),
         CPU_TYPE_ARM => (Architecture.Arm, 32, "arm"),
-        _ => (is64 ? Architecture.X64 : Architecture.X86, is64 ? 64 : 32, $"cpu{cpuType:X}"),
+        _ => throw new BinaryFormatException($"Unsupported Mach-O CPU type 0x{cpuType:X}."),
     };
 
     internal static string CpuName(int cpuType) => cpuType switch

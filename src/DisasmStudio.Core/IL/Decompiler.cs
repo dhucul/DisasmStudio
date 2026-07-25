@@ -45,8 +45,7 @@ public static class Decompiler
             if (result.Image.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
                 return Note(fn.Va, $"// import slot -> {imp.Module}!{imp.Name} (data, not code)");
 
-            CfgBuilder.Build(result.Image, fn, result.JumpTables,
-                decoder is null ? null : NeutralDisasm.For(result.Image, result.Names, decoder));
+            BuildCfg(fn, result, decoder);
             if (fn.Blocks.Count == 0) return Note(fn.Va, "// no code recovered for this function");
             if (fn.Blocks.Count > MaxBlocks) return Note(fn.Va, $"// function too large to decompile ({fn.Blocks.Count} blocks)");
 
@@ -78,8 +77,7 @@ public static class Decompiler
     public static EmulationResult Emulate(Function fn, AnalysisResult result, EmulationOptions? opts = null,
         IInstructionDecoder? decoder = null)
     {
-        CfgBuilder.Build(result.Image, fn, result.JumpTables,
-            decoder is null ? null : NeutralDisasm.For(result.Image, result.Names, decoder));
+        BuildCfg(fn, result, decoder);
         if (fn.Blocks.Count == 0) return new EmulationResult { Status = EmuStatus.NoCode };
         if (fn.Blocks.Count > MaxBlocks) return new EmulationResult { Status = EmuStatus.NoCode };
         var low = LiftLow(fn, result, decoder);
@@ -96,7 +94,7 @@ public static class Decompiler
     {
         var w = new IlWriter();
         w.T(msg, AsmTokenKind.Comment);
-        w.Flush(va, 0);
+        w.Flush(va, 0, isSynthetic: true);
         return w.Lines;
     }
 
@@ -111,8 +109,7 @@ public static class Decompiler
             if (result.Image.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
                 return NoteLines(fn.Va, $"/* import slot -> {imp.Module}!{imp.Name} (data, not code) */");
 
-            CfgBuilder.Build(result.Image, fn, result.JumpTables,
-                decoder is null ? null : NeutralDisasm.For(result.Image, result.Names, decoder));
+            BuildCfg(fn, result, decoder);
             if (fn.Blocks.Count == 0) return NoteLines(fn.Va, "/* no code recovered */");
             if (fn.Blocks.Count > MaxBlocks) return NoteLines(fn.Va, $"/* function too large to decompile ({fn.Blocks.Count} blocks) */");
 
@@ -126,5 +123,17 @@ public static class Decompiler
         {
             return NoteLines(fn.Va, "/* decompilation error: " + ex.Message.Replace("*/", "* /") + " */");
         }
+    }
+
+    private static void BuildCfg(Function fn, AnalysisResult result, IInstructionDecoder? decoder)
+    {
+        if (decoder is null)
+        {
+            CfgBuilder.Build(result.Image, fn, result.JumpTables);
+            return;
+        }
+
+        using var dis = NeutralDisasm.For(result.Image, result.Names, decoder);
+        CfgBuilder.Build(result.Image, fn, result.JumpTables, dis);
     }
 }

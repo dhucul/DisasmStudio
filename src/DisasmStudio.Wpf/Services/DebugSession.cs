@@ -190,14 +190,18 @@ public sealed class DebugSession
         // Data tables / pointer-scan false positives satisfy none of these, so they stay excluded. (A byte-
         // level "looks like code" heuristic was tried and removed: common opcodes are common byte values, so
         // table data decodes to a plausible first instruction and slipped through, re-corrupting the image.)
-        ulong slide = LiveResult.Image.ImageBase - baseStatic.Image.ImageBase;
+        ulong liveBase = LiveResult.Image.ImageBase;
+        ulong staticBase = baseStatic.Image.ImageBase;
+        ulong ToStatic(ulong live) => liveBase >= staticBase
+            ? checked(live - (liveBase - staticBase))
+            : checked(live + (staticBase - liveBase));
         var xrefs = baseStatic.Xrefs;
         var symVas = new HashSet<ulong>();
         foreach (var s in LiveResult.Image.Symbols) symVas.Add(s.Va);
         var pdata = new HashSet<ulong>(LiveResult.Image.FunctionStarts);
         ulong entryVa = LiveResult.Image.EntryVa;
         bool isReachable(ulong va) => va == entryVa || pdata.Contains(va) || symVas.Contains(va)
-            || xrefs.To(va - slide).Any(x => x.Kind == XrefKind.Call);
+            || xrefs.To(ToStatic(va)).Any(x => x.Kind == XrefKind.Call);
         var cap = new FunctionCapture(Engine, deref, LiveResult.Functions.Select(f => (f.Va, f.Name)), captureOnce, argsOnly, annotate, isCodeStart, isReachable);
         if (logPath is not null) cap.SetLogFile(logPath);
         Capture = cap;

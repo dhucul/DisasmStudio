@@ -20,8 +20,7 @@ public static class SourceExporter
     /// handles both x86/x64 (Iced) and ARM/Thumb/AArch64 (Capstone) images with identical output.</summary>
     public static void WriteAsm(TextWriter w, AnalysisResult r, IProgress<int>? progress = null, CancellationToken ct = default)
     {
-        var dis = NeutralDisasm.For(r.Image, r.Names);
-        try
+        using var dis = NeutralDisasm.For(r.Image, r.Names);
         {
             int digits = AddrDigits(r);
             WriteAsmHeader(w, r);
@@ -35,14 +34,12 @@ public static class SourceExporter
                 WriteAsmLine(w, r, dis, i, va, digits);
             }
         }
-        finally { (dis as IDisposable)?.Dispose(); }   // the ARM (Capstone) decoder is disposable; the Iced one is not
     }
 
     /// <summary>Write only the instructions belonging to one function (up to the next function start).</summary>
     public static void WriteAsmFunction(TextWriter w, AnalysisResult r, Function fn)
     {
-        var dis = NeutralDisasm.For(r.Image, r.Names);
-        try
+        using var dis = NeutralDisasm.For(r.Image, r.Names);
         {
             int digits = AddrDigits(r);
 
@@ -63,7 +60,6 @@ public static class SourceExporter
                 WriteAsmLine(w, r, dis, i, va, digits);
             }
         }
-        finally { (dis as IDisposable)?.Dispose(); }
     }
 
     private static void WriteAsmHeader(TextWriter w, AnalysisResult r)

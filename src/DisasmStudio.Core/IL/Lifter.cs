@@ -213,7 +213,7 @@ public sealed class Lifter : ILifter
             }
 
             case Mnemonic.Ret or Mnemonic.Retf:
-                Emit(new ReturnStmt { Value = null });
+                Emit(new ReturnStmt { Value = R(Ax) });
                 break;
 
             case Mnemonic.Jmp:

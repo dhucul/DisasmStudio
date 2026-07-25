@@ -23,7 +23,7 @@ public static class CodeTokenizer
         {
             var toks = new List<AsmToken>();
             LexLine(raw, keywords, il, toks, ref inBlockComment, ref inVerbatim);
-            lines.Add(new DecompLine(0, toks, 0));
+            lines.Add(new DecompLine(0, toks, 0, true));
         }
         return lines;
     }

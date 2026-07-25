@@ -23,7 +23,7 @@ public static class I8051Analyzer
         CancellationToken token = default)
     {
         var warnings = new List<string>();
-        var dis = NeutralDisasm.For(image, null);   // -> I8051Disassembler (flow-only; no name substitution)
+        using var dis = NeutralDisasm.For(image, null);   // -> I8051Disassembler (flow-only; no name substitution)
         var code = new CodeBitmap(image);
         var xrefs = new XrefDatabase();
         var callTargets = new HashSet<ulong>();

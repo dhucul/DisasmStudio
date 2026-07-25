@@ -23,7 +23,12 @@ internal sealed class IlWriter
     public void Txt(string s) => T(s, AsmTokenKind.Text);
     public void Sp() => T(" ", AsmTokenKind.Text);
 
-    public void Flush(ulong va, int indent) { Lines.Add(new DecompLine(va, _cur, indent)); _cur = []; }
+    public void Flush(ulong va, int indent, bool isSynthetic = false)
+    {
+        Lines.Add(new DecompLine(va, _cur, indent, isSynthetic));
+        _cur = [];
+    }
+    public void FlushSynthetic(int indent) { Lines.Add(new DecompLine(0, _cur, indent, true)); _cur = []; }
     public bool Pending => _cur.Count > 0;
 }
 
@@ -248,7 +253,7 @@ internal sealed class StructEmitter
         var e = new StructEmitter(fn, labels, pseudoC, compilable, comments, model);
         e.Signature();
         e.EmitStmt(root, 1);
-        e._w.Op("}"); e._w.Flush(0, 0);
+        e._w.Op("}"); e._w.FlushSynthetic(0);
         return e._w.Lines;
     }
 
@@ -272,7 +277,7 @@ internal sealed class StructEmitter
 
         if (_c)
             foreach (var v in _fn.Variables.Where(v => _comp || v.Class == VarClass.Local))
-            { _w.Type(v.CType); _w.Sp(); _w.Var(v.Name); _w.Op(";"); _w.Flush(0, 1); }
+            { _w.Type(v.CType); _w.Sp(); _w.Var(v.Name); _w.Op(";"); _w.FlushSynthetic(1); }
     }
 
     private void EmitStmt(Stmt s, int indent)
@@ -294,10 +299,10 @@ internal sealed class StructEmitter
                 EmitStmt(iff.Then, indent + 1);
                 if (iff.Else is not null && !IsEmpty(iff.Else))
                 {
-                    _w.Op("}"); _w.Sp(); _w.Kw("else"); _w.Sp(); _w.Op("{"); _w.Flush(0, indent);
+                    _w.Op("}"); _w.Sp(); _w.Kw("else"); _w.Sp(); _w.Op("{"); _w.FlushSynthetic(indent);
                     EmitStmt(iff.Else, indent + 1);
                 }
-                _w.Op("}"); _w.Flush(0, indent);
+                _w.Op("}"); _w.FlushSynthetic(indent);
                 break;
 
             case WhileStmt wh:
@@ -305,7 +310,7 @@ internal sealed class StructEmitter
                 if (wh.Cond is Const { Value: 1 }) _w.Kw("true"); else ExprWriter.Write(_w, wh.Cond, _c, _comp);
                 _w.Op(")"); _w.Sp(); _w.Op("{"); _w.Flush(wh.Va, indent);
                 EmitStmt(wh.Body, indent + 1);
-                _w.Op("}"); _w.Flush(0, indent);
+                _w.Op("}"); _w.FlushSynthetic(indent);
                 break;
 
             case StructSwitchStmt sw:
@@ -313,19 +318,19 @@ internal sealed class StructEmitter
                 _w.Flush(sw.Va, indent);
                 foreach (var cse in sw.Cases)
                 {
-                    if (cse.Values.Count == 0) { _w.Kw("default"); _w.Op(_comp ? ": ;" : ":"); _w.Flush(0, indent + 1); }
+                    if (cse.Values.Count == 0) { _w.Kw("default"); _w.Op(_comp ? ": ;" : ":"); _w.FlushSynthetic(indent + 1); }
                     foreach (var v in cse.Values)   // stack one `case N:` label per selector value
                     {
                         _w.Kw("case"); _w.Sp(); var (t, _) = ExprWriter.Num(v); _w.Num(t); _w.Op(_comp ? ": ;" : ":");
-                        _w.Flush(0, indent + 1);
+                        _w.FlushSynthetic(indent + 1);
                     }
                     EmitStmt(cse.Body, indent + 2);
                 }
-                _w.Op("}"); _w.Flush(0, indent);
+                _w.Op("}"); _w.FlushSynthetic(indent);
                 break;
 
-            case BreakStmt: _w.Kw("break"); Semi(); _w.Flush(0, indent); break;
-            case ContinueStmt: _w.Kw("continue"); Semi(); _w.Flush(0, indent); break;
+            case BreakStmt: _w.Kw("break"); Semi(); _w.FlushSynthetic(indent); break;
+            case ContinueStmt: _w.Kw("continue"); Semi(); _w.FlushSynthetic(indent); break;
             case NopStmt: break;
 
             default:

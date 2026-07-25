@@ -7,4 +7,7 @@
     <Project Path="src/DisasmStudio.ManagedDbgHost/DisasmStudio.ManagedDbgHost.csproj" />
     <Project Path="src/DisasmStudio.Wpf/DisasmStudio.Wpf.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DisasmStudio.Core.Tests/DisasmStudio.Core.Tests.csproj" />
+  </Folder>
 </Solution>

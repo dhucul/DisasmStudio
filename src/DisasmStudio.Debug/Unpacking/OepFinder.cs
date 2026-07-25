@@ -79,7 +79,8 @@ public sealed class OepFinder
                 _log.Append($"Manual OEP {moep:X} is the entry point — already there.\n");
                 return moep;
             }
-            eng.SetBreakpoint(moep);
+            if (!eng.TrySetBreakpoint(moep))
+                throw new InvalidOperationException($"Could not arm manual OEP breakpoint at {moep:X}.");
             _phase = Phase.WaitManual;
             _log.Append($"Manual OEP: breakpoint at {moep:X}.\n");
             eng.Go();
@@ -196,9 +197,9 @@ public sealed class OepFinder
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
                 if (size == 0 || lo == _entrySectionLo) continue;   // never guard the stub's own section
-                eng.GuardRegion(lo, size);
-                guarded++;
+                if (eng.TryGuardRegion(lo, size)) guarded++;
             }
+            if (guarded == 0) throw new InvalidOperationException("No OEP section guard could be armed.");
             _log.Append($"Section guard: guarded {guarded} non-stub section(s).\n");
         }
         else _log.Append("Section guard: could not parse the image headers.\n");
@@ -220,9 +221,11 @@ public sealed class OepFinder
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
                 if (size == 0 || lo == _entrySectionLo) continue;   // never break on the stub's own section
-                eng.SetMemoryBreakpoint(lo, size, MemAccess.Execute);
-                _execBpStarts.Add(lo);
+                if (eng.TrySetMemoryBreakpoint(lo, size, MemAccess.Execute))
+                    _execBpStarts.Add(lo);
             }
+            if (_execBpStarts.Count == 0)
+                throw new InvalidOperationException("No OEP execute breakpoint could be armed.");
             _log.Append($"Section execute-bp: armed execute memory breakpoints on {_execBpStarts.Count} non-stub section(s).\n");
         }
         else _log.Append("Section execute-bp: could not parse the image headers.\n");

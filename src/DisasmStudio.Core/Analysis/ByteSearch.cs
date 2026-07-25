@@ -69,6 +69,8 @@ public static class ByteSearch
                               bool forward, CancellationToken token = default)
     {
         if (pattern.Length == 0) return null;
+        if (mask is not null && mask.Length != pattern.Length)
+            throw new ArgumentException("Mask length must equal pattern length.", nameof(mask));
         ulong min = img.MinVa, max = img.MaxVa;
         if (max < min || (ulong)pattern.Length > max - min) return null;
         if (start < min) start = min;

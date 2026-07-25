@@ -26,6 +26,10 @@ public sealed class I8051Disassembler : INeutralDisassembler
         _nameSet = names is null ? [] : [.. names.Values];
     }
 
+    public void Dispose()
+    {
+    }
+
     public bool TryDecode(ulong va, out NeutralInsn insn)
     {
         var d = Decode(va);
@@ -107,11 +111,13 @@ public sealed class I8051Disassembler : INeutralDisassembler
         ulong? target = null;
 
         // PC-relative target = next-VA + signed disp (a true VA — resolves at any load base).
-        ulong Rel(byte rb) => unchecked((ushort)((ushort)va + len + (sbyte)rb));
+        ushort Pc16(ulong absolute) => unchecked((ushort)(absolute - _image.ImageBase));
+        ulong Va(ushort code) => _image.ImageBase + code;
+        ulong Rel(byte rb) => Va(unchecked((ushort)(Pc16(va) + len + (sbyte)rb)));
         // Absolute (LJMP/LCALL) and 11-bit page (AJMP/ACALL) targets are 16-bit CPU code addresses;
         // they resolve directly when the image is loaded at its natural base (16-bit code space, base 0).
-        ulong Abs() => (uint)((b1 << 8) | b2);
-        ulong A11() => ((va + 2) & 0xF800) | (uint)(((op & 0xE0) << 3) | b1);
+        ulong Abs() => Va((ushort)((b1 << 8) | b2));
+        ulong A11() => Va((ushort)(((Pc16(va) + 2) & 0xF800) | ((op & 0xE0) << 3) | b1));
 
         switch (op)
         {

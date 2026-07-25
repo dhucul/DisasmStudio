@@ -96,7 +96,19 @@ public sealed class PeMemoryImage : IBinaryImage
     public BinaryFormat Format => BinaryFormat.Pe;
     public string FormatName => "PE memory";
     public int Bitness => _view.Is64 ? 64 : 32;
-    public string ArchName => Bitness == 64 ? "x64" : "x86";
+    public Architecture Arch => _view.Machine switch
+    {
+        0xAA64 => Architecture.Arm64,
+        0x8664 => Architecture.X64,
+        0x014C => Architecture.X86,
+        _ => Bitness == 64 ? Architecture.X64 : Architecture.X86,
+    };
+    public string ArchName => Arch switch
+    {
+        Architecture.Arm64 => "arm64",
+        Architecture.X64 => "x64",
+        _ => "x86",
+    };
     public ulong ImageBase { get; }
     public ulong EntryVa => _view.EntryRva != 0 ? ImageBase + _view.EntryRva : 0;
     public bool IsDll => (_view.Characteristics & 0x2000) != 0;
@@ -126,7 +138,7 @@ public sealed class PeMemoryImage : IBinaryImage
     public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes)
     {
         int off = VaToOffset(va);
-        if (off < 0) return false;
+        if (off < 0 || bytes.Length > _bytes.Length - off) return false;
         Patch(off, bytes);
         return true;
     }

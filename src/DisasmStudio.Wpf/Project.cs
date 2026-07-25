@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
 
 namespace DisasmStudio.Wpf;
@@ -47,7 +48,7 @@ public sealed record ProjectFile
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public void Save(string path) => File.WriteAllText(path, JsonSerializer.Serialize(this, Opts));
+    public void Save(string path) => AtomicFile.WriteAllText(path, JsonSerializer.Serialize(this, Opts));
 
     public static ProjectFile Load(string path) =>
         JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path), Opts)

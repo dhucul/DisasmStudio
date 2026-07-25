@@ -80,6 +80,9 @@ public sealed class UnpackSession
         return _tcs.Task;
     }
 
+    /// <summary>Cancel an in-flight unpack and stop the debug target. Safe to call more than once.</summary>
+    public void Cancel() => Fail("Cancelled.");
+
     private void OnResumed()
     {
         if (_opt.Strategy != OepMethod.RunFree) return;

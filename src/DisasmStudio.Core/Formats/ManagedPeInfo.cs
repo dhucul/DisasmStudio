@@ -73,7 +73,7 @@ public sealed record ManagedPeInfo(
         byte[] head = img.ReadBytesAtVa(img.ImageBase + mdRva, 20);
         if (head.Length < 20 || BitConverter.ToUInt32(head, 0) != 0x424A5342) return null;  // 'BSJB' little-endian
         int verLen = BitConverter.ToInt32(head, 12);
-        if (verLen <= 0 || verLen > 255) return null;
+        if (verLen <= 0 || verLen > 255 || (uint)verLen > mdSize - 16) return null;
         byte[] verBytes = img.ReadBytesAtVa(img.ImageBase + mdRva + 16, verLen);
         if (verBytes.Length == 0) return null;
         int z = Array.IndexOf(verBytes, (byte)0);

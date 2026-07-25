@@ -239,10 +239,12 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
         private readonly byte[] _s = src;
         public int GetBit()
         {
-            _bb = (_bb & 0x7f) != 0 ? _bb << 1 : (uint)((Ip < _s.Length ? _s[Ip++] : 0) << 1) | 1;
+            if ((_bb & 0x7f) == 0 && Ip >= _s.Length)
+                throw new EndOfStreamException("Truncated NRV stream.");
+            _bb = (_bb & 0x7f) != 0 ? _bb << 1 : (uint)(_s[Ip++] << 1) | 1;
             return (int)((_bb >> 8) & 1);
         }
-        public byte NextByte() => Ip < _s.Length ? _s[Ip++] : (byte)0;
+        public byte NextByte() => Ip < _s.Length ? _s[Ip++] : throw new EndOfStreamException("Truncated NRV stream.");
         public bool AtEnd => Ip >= _s.Length;
     }
 
@@ -352,9 +354,10 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
 
     private static bool CopyMatch(byte[] dst, ref int op, uint mOff, uint count, int uLen)
     {
+        if (count > (uint)(uLen - op)) return false;
         int mPos = op - (int)mOff;
         if (mPos < 0) return false;
-        for (uint i = 0; i < count && op < uLen; i++) dst[op++] = dst[mPos++];
+        for (uint i = 0; i < count; i++) dst[op++] = dst[mPos++];
         return true;
     }
 

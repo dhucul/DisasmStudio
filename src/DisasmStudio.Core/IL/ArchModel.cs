@@ -34,6 +34,9 @@ public abstract class ArchModel
     /// <summary>The integer return register (rax / x0 / r0).</summary>
     public abstract RegId ReturnReg { get; }
 
+    /// <summary>Registers whose values cannot be assumed to survive an ordinary call.</summary>
+    public abstract IReadOnlySet<RegId> CallerSaved { get; }
+
     /// <summary>Is a <c>[base + disp]</c> slot an incoming stack argument (vs. a local)? x86: <c>rbp</c>
     /// with a positive displacement.</summary>
     public abstract bool IsArgSlot(RegId baseCanon, long disp);
@@ -42,12 +45,12 @@ public abstract class ArchModel
     {
         Architecture.Arm64 => new Arm64Model(),
         Architecture.Arm or Architecture.Thumb => new Arm32Model(),
-        _ => new X86Model(image.Bitness == 64),
+        _ => new X86Model(image.Bitness == 64, image.Format is BinaryFormat.Elf or BinaryFormat.MachO),
     };
 
     /// <summary>A safe default (x86-64) for code paths that build an <c>IlWriter</c> without a specific
     /// model (e.g. error notes) and never emit register/return tokens through it.</summary>
-    public static readonly ArchModel Default = new X86Model(true);
+    public static readonly ArchModel Default = new X86Model(true, false);
 }
 
 /// <summary>The x86/x64 model — a behaviour-preserving wrapper over the values that used to be hard-coded
@@ -56,7 +59,8 @@ public abstract class ArchModel
 public sealed class X86Model : ArchModel
 {
     private readonly bool _is64;
-    public X86Model(bool is64) => _is64 = is64;
+    private readonly bool _sysv;
+    public X86Model(bool is64, bool sysv) { _is64 = is64; _sysv = sysv; }
 
     /// <summary>The single Iced→neutral bridge: name (lowercased, as the emitter used to print),
     /// byte width, and the Iced enum value as the opaque tag.</summary>
@@ -73,17 +77,37 @@ public sealed class X86Model : ArchModel
 
     public override bool IsFrameBase(RegId canon) => Iced(canon) is Register.RSP or Register.RBP;
 
-    public override bool IsCalleeSaved(RegId canon) => Iced(canon) is
-        Register.RBX or Register.RBP or Register.RSI or Register.RDI or Register.RSP
-        or Register.R12 or Register.R13 or Register.R14 or Register.R15;
+    public override bool IsCalleeSaved(RegId canon)
+    {
+        Register register = Iced(canon);
+        if (_is64 && _sysv)
+            return register is Register.RBX or Register.RBP or Register.RSP
+                or Register.R12 or Register.R13 or Register.R14 or Register.R15;
+        return register is Register.RBX or Register.RBP or Register.RSI or Register.RDI or Register.RSP
+            or Register.R12 or Register.R13 or Register.R14 or Register.R15;
+    }
 
     public override bool IsFullDef(Expr dest) => dest is VarExpr || (dest is RegExpr re && re.Reg.Width >= 4);
 
-    private static readonly RegId[] _args =
+    private static readonly RegId[] _winArgs =
         [FromIced(Register.RCX), FromIced(Register.RDX), FromIced(Register.R8), FromIced(Register.R9)];
-    public override IReadOnlyList<RegId> ArgRegs => _args;
+    private static readonly RegId[] _sysvArgs =
+        [FromIced(Register.RDI), FromIced(Register.RSI), FromIced(Register.RDX),
+         FromIced(Register.RCX), FromIced(Register.R8), FromIced(Register.R9)];
+    public override IReadOnlyList<RegId> ArgRegs => !_is64 ? [] : _sysv ? _sysvArgs : _winArgs;
 
     public override RegId ReturnReg => FromIced(Register.RAX);
+
+    private static readonly HashSet<RegId> _winCallerSaved =
+        [FromIced(Register.RAX), FromIced(Register.RCX), FromIced(Register.RDX),
+         FromIced(Register.R8), FromIced(Register.R9), FromIced(Register.R10), FromIced(Register.R11)];
+    private static readonly HashSet<RegId> _sysvCallerSaved =
+        [FromIced(Register.RAX), FromIced(Register.RCX), FromIced(Register.RDX),
+         FromIced(Register.RSI), FromIced(Register.RDI), FromIced(Register.R8),
+         FromIced(Register.R9), FromIced(Register.R10), FromIced(Register.R11)];
+    private static readonly HashSet<RegId> _x86CallerSaved =
+        [FromIced(Register.RAX), FromIced(Register.RCX), FromIced(Register.RDX)];
+    public override IReadOnlySet<RegId> CallerSaved => !_is64 ? _x86CallerSaved : _sysv ? _sysvCallerSaved : _winCallerSaved;
 
     public override bool IsArgSlot(RegId baseCanon, long disp) => Iced(baseCanon) == Register.RBP && disp > 0;
 }
@@ -125,6 +149,13 @@ public sealed class Arm64Model : ArchModel
 
     public override RegId ReturnReg => new("x0", 8);
 
+    private static readonly HashSet<RegId> _callerSaved =
+        [new("x0", 8), new("x1", 8), new("x2", 8), new("x3", 8), new("x4", 8),
+         new("x5", 8), new("x6", 8), new("x7", 8), new("x8", 8), new("x9", 8),
+         new("x10", 8), new("x11", 8), new("x12", 8), new("x13", 8), new("x14", 8),
+         new("x15", 8), new("x16", 8), new("x17", 8), new("x18", 8), new("x30", 8)];
+    public override IReadOnlySet<RegId> CallerSaved => _callerSaved;
+
     // Conservative for the first slice: recover register args (x0–x7); leave stack slots as locals.
     public override bool IsArgSlot(RegId baseCanon, long disp) => false;
 }
@@ -148,6 +179,10 @@ public sealed class Arm32Model : ArchModel
     public override IReadOnlyList<RegId> ArgRegs => _args;
 
     public override RegId ReturnReg => new("r0", 4);
+
+    private static readonly HashSet<RegId> _callerSaved =
+        [new("r0", 4), new("r1", 4), new("r2", 4), new("r3", 4), new("r12", 4), new("lr", 4)];
+    public override IReadOnlySet<RegId> CallerSaved => _callerSaved;
 
     public override bool IsArgSlot(RegId baseCanon, long disp) => false;
 }

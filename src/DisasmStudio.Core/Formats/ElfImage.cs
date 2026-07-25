@@ -45,7 +45,7 @@ public sealed class ElfImage : IBinaryImage, IDisposable
         _f = f;
         FilePath = path;
 
-        if (_f.Length < 0x40 || _f.ReadByte(0) != 0x7F || _f.ReadByte(1) != (byte)'E'
+        if (_f.Length < 0x10 || _f.ReadByte(0) != 0x7F || _f.ReadByte(1) != (byte)'E'
             || _f.ReadByte(2) != (byte)'L' || _f.ReadByte(3) != (byte)'F')
             throw new BinaryFormatException("Not a valid ELF image.");
 
@@ -54,6 +54,12 @@ public sealed class ElfImage : IBinaryImage, IDisposable
         if (cls is not (1 or 2)) throw new BinaryFormatException("Unknown ELF class.");
         if (data != 1) throw new BinaryFormatException("Only little-endian ELF is supported.");
         _is64 = cls == 2;
+        int requiredHeader = _is64 ? 0x40 : 0x34;
+        if (_f.Length < requiredHeader)
+            throw new BinaryFormatException("Truncated ELF header.");
+        ushort headerSize = _f.ReadU16(_is64 ? 0x34 : 0x28);
+        if (headerSize < requiredHeader)
+            throw new BinaryFormatException("Invalid ELF header size.");
 
         ushort machine = _f.ReadU16(0x12);   // e_machine: 0x03 x86, 0x3E x64, 0x28 ARM, 0xB7 AArch64
         (_arch, ArchName) = machine switch
@@ -293,7 +299,8 @@ public sealed class ElfImage : IBinaryImage, IDisposable
                 FileOffset = (int)off,
                 FileSize = (int)filesz,
                 IsExecutable = (flags & 0x1) != 0,   // PF_X
-                IsReadable = (flags & 0x4) != 0,      // PF_R
+                // Execute-only PT_LOAD segments are still mapped and must be readable by the analyzer.
+                IsReadable = (flags & (0x4 | 0x1)) != 0,      // PF_R | PF_X
                 IsWritable = (flags & 0x2) != 0,      // PF_W
             });
         }

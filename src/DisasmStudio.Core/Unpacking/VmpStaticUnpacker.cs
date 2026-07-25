@@ -98,10 +98,7 @@ public static class VmpStaticUnpacker
             long srcEnd = (long)s.PointerToRawData + s.SizeOfRawData;
             long dstEnd = (long)s.VirtualAddress + s.SizeOfRawData;
             if (srcEnd > file.Length || dstEnd > image.Length)
-            {
-                log.AppendLine($"  Warning: section '{s.Name}' raw data out of bounds — skipped.");
-                continue;
-            }
+                throw new InvalidDataException($"Section '{s.Name}' raw data is out of bounds.");
             Array.Copy(file, (int)s.PointerToRawData, image, (int)s.VirtualAddress, (int)s.SizeOfRawData);
         }
 
@@ -159,7 +156,9 @@ public static class VmpStaticUnpacker
             byte[] decompressed = LzmaCodec.Decode(props, file, (int)compRaw, file.Length - (int)compRaw, outHint);
 
             int avail = image.Length - (int)dst;
-            int n = Math.Min(decompressed.Length, avail);
+            if (decompressed.Length > avail)
+                throw new InvalidDataException($"Block {i} overruns the destination image.");
+            int n = decompressed.Length;
             Array.Copy(decompressed, 0, image, (int)dst, n);
             decoded++;
             log.AppendLine($"  Block {i}: Src RVA 0x{src:X8} → Dst RVA 0x{dst:X8}, {n} bytes decompressed.");

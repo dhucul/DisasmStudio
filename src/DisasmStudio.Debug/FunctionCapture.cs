@@ -31,7 +31,9 @@ public sealed class FunctionCapture
     private readonly Dictionary<ulong, string> _names;     // entry VA -> function name
     private readonly ulong[] _sorted;                      // entry VAs sorted, for caller lookup
     private readonly object _lock = new();
-    private readonly HashSet<ulong> _entries = [];          // function-entry breakpoints we set
+    private readonly HashSet<ulong> _entries = [];          // function entries captured (owned or shared)
+    private readonly HashSet<ulong> _ownedEntries = [];     // function-entry breakpoints planted by capture
+    private readonly HashSet<ulong> _sharedEntries = [];    // pre-existing user breakpoints; never auto-resume/remove
     private readonly HashSet<ulong> _retBps = [];           // return-address breakpoints we added
     private readonly Dictionary<(uint Tid, ulong Ret), Stack<CaptureRecord>> _pending = [];   // (thread, retAddr) -> calls awaiting return
     private readonly Dictionary<uint, int> _depthByTid = [];   // per-thread live nesting depth (sum of _pending stack counts) — maintained on push/pop instead of re-summed every hit
@@ -206,10 +208,20 @@ public sealed class FunctionCapture
                 if (!IsCode(va)) { SkippedNonCode++; continue; }
                 if (IsDenselyPacked(va)) { SkippedDense++; continue; }
                 if (requireReachable && !_isReachable!(va)) { SkippedUnreachable++; continue; }
-                if (_entries.Add(va)) toArm.Add(va);
+                if (_eng.HasBreakpoint(va))
+                {
+                    _entries.Add(va);
+                    _sharedEntries.Add(va);
+                }
+                else toArm.Add(va);
             }
-        ArmedCount = toArm.Count;
-        try { _eng.SetBreakpoints(toArm); } catch { }   // page-batched arming (fast for thousands of bps)
+        var armed = _eng.SetBreakpoints(toArm);
+        lock (_lock)
+        {
+            _entries.UnionWith(armed);
+            _ownedEntries.UnionWith(armed);
+            ArmedCount = _entries.Count;
+        }
         _eng.PassFirstChanceExceptions = true;          // don't stop on the program's own exceptions
         Active = true;
     }
@@ -219,7 +231,20 @@ public sealed class FunctionCapture
     {
         lock (_lock)
         {
-            if (_eng.IsExecutable(va) && IsCode(va) && _entries.Add(va)) { try { _eng.SetBreakpoint(va); } catch { } }
+            if (_eng.IsExecutable(va) && IsCode(va))
+            {
+                if (_eng.HasBreakpoint(va))
+                {
+                    _entries.Add(va);
+                    _sharedEntries.Add(va);
+                }
+                else if (_eng.TrySetBreakpoint(va))
+                {
+                    _entries.Add(va);
+                    _ownedEntries.Add(va);
+                }
+                ArmedCount = _entries.Count;
+            }
             Active = true;
         }
         _eng.PassFirstChanceExceptions = true;
@@ -238,9 +263,10 @@ public sealed class FunctionCapture
         lock (_lock)
         {
             Active = false; Draining = false;
-            foreach (var va in _entries) { try { _eng.RemoveBreakpoint(va); } catch { } }
+            foreach (var va in _ownedEntries) { try { _eng.RemoveBreakpoint(va); } catch { } }
             foreach (var va in _retBps) { try { _eng.RemoveBreakpoint(va); } catch { } }
-            _entries.Clear(); _retBps.Clear(); _pending.Clear(); _depthByTid.Clear();
+            _entries.Clear(); _ownedEntries.Clear(); _sharedEntries.Clear();
+            _retBps.Clear(); _pending.Clear(); _depthByTid.Clear();
         }
         _eng.PassFirstChanceExceptions = false;   // restore normal stop-on-exception behavior
         lock (_logLock) { try { _log?.Flush(); _log?.Dispose(); } catch { } _log = null; }
@@ -256,7 +282,12 @@ public sealed class FunctionCapture
         ulong ea = s.Address;
         uint tid = s.ThreadId;
         bool isEntry, isRet, ours;
-        lock (_lock) { isEntry = _entries.Contains(ea); isRet = _pending.ContainsKey((tid, ea)); ours = isEntry || _retBps.Contains(ea); }
+        lock (_lock)
+        {
+            isEntry = _entries.Contains(ea);
+            isRet = _pending.ContainsKey((tid, ea));
+            ours = isEntry && !_sharedEntries.Contains(ea) || _retBps.Contains(ea);
+        }
         if (!isEntry && !isRet) return false;
 
         var regs = _eng.GetRegisters();
@@ -295,11 +326,15 @@ public sealed class FunctionCapture
             rec.Depth = _depthByTid.GetValueOrDefault(tid);   // this thread's nesting depth (maintained on push/pop below)
             if (captureReturn)
             {
-                if (!_pending.TryGetValue((tid, retAddr), out var stack)) { stack = new Stack<CaptureRecord>(); _pending[(tid, retAddr)] = stack; }
-                stack.Push(rec);
-                _depthByTid[tid] = _depthByTid.GetValueOrDefault(tid) + 1;   // one more call in flight on this thread
-                // Own the return breakpoint only if we set it; never touch a pre-existing (user/entry) one.
-                if (!_eng.HasBreakpoint(retAddr)) { try { _eng.SetBreakpoint(retAddr); _retBps.Add(retAddr); } catch { } }
+                bool preExisting = _eng.HasBreakpoint(retAddr);
+                bool available = preExisting || _eng.TrySetBreakpoint(retAddr);
+                if (available)
+                {
+                    if (!_pending.TryGetValue((tid, retAddr), out var stack)) { stack = new Stack<CaptureRecord>(); _pending[(tid, retAddr)] = stack; }
+                    stack.Push(rec);
+                    _depthByTid[tid] = _depthByTid.GetValueOrDefault(tid) + 1;
+                    if (!preExisting) _retBps.Add(retAddr);
+                }
             }
             if (callerFunc != 0)
             {
@@ -308,7 +343,11 @@ public sealed class FunctionCapture
             }
             // Capture-once: drop this function's entry breakpoint now (we are frozen, so removal is safe).
             // Hot functions then run at full speed, and this resume needs no single-step re-arm.
-            if (_once && _entries.Remove(ea)) { try { _eng.RemoveBreakpoint(ea); } catch { } }
+            if (_once && _entries.Remove(ea))
+            {
+                _sharedEntries.Remove(ea);
+                if (_ownedEntries.Remove(ea)) { try { _eng.RemoveBreakpoint(ea); } catch { } }
+            }
             EnqueueForUi(rec);
         }
         WriteLog(rec);

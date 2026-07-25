@@ -128,6 +128,9 @@ public static class ImportRebuilder
                 return ins.NearBranchTarget;                       // jmp rel → target is the API
             if (ins.Op0Kind == OpKind.Memory)                      // jmp [ptr] → read the pointer
             {
+                if (!ins.IsIPRelativeMemoryOperand
+                    && (ins.MemoryBase != Register.None || ins.MemoryIndex != Register.None))
+                    return 0;
                 ulong memAddr = ins.IsIPRelativeMemoryOperand ? ins.IPRelativeMemoryAddress : ins.MemoryDisplacement64;
                 if (memAddr == 0) return 0;
                 var p = mem(memAddr, is64 ? 8 : 4);
@@ -148,7 +151,9 @@ public static class ImportRebuilder
         {
             ulong t = ins.Op1Kind == OpKind.Immediate64 ? ins.Immediate64 : ins.Immediate32;
             dec.Decode(out var next);
-            if (next.FlowControl == FlowControl.IndirectBranch && next.Op0Kind == OpKind.Register) return t;
+            if (next.FlowControl == FlowControl.IndirectBranch && next.Op0Kind == OpKind.Register
+                && next.Op0Register.GetFullRegister() == ins.Op0Register.GetFullRegister())
+                return t;
         }
         return 0;
     }

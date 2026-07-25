@@ -128,8 +128,8 @@ public sealed partial class DebuggerEngine
         {
             if (!_codeGuards.TryGetValue(page, out var g)) return;
             if (g.Breakpoints.Count > 0) return;
-            Native.VirtualProtectEx(_proc, page, (nuint)0x1000, g.OriginalProtect, out _);
-            _codeGuards.Remove(page);
+            if (Native.VirtualProtectEx(_proc, page, (nuint)0x1000, g.OriginalProtect, out _))
+                _codeGuards.Remove(page);
         }
     }
 
@@ -153,7 +153,8 @@ public sealed partial class DebuggerEngine
     // supersedes the first's trap, so we drain the pending re-eval in SmcHandleWriteFault.
 
     // Pending re-evaluation: thread id -> page that had its write access temporarily restored.
-    private readonly Dictionary<uint, ulong> _pendingGuardReeval = [];
+    private readonly record struct SmcStepState(ulong Page, IntPtr[] SuspendedPeers);
+    private readonly Dictionary<uint, SmcStepState> _pendingGuardReeval = [];
 
     /// <summary>Handle a write access violation on a page we write-protected (called when code==AV, Info0==1).
     /// Restores write, disarms the page's breakpoints, and single-steps so the write completes; the resulting
@@ -175,16 +176,34 @@ public sealed partial class DebuggerEngine
         // _pendingGuardReeval[tid] is overwritten below.
         ulong[]? prevModified = null;
         ulong prevPage = 0;
+        IntPtr[]? suspended = null;
         lock (_lock)
         {
-            if (_pendingGuardReeval.Remove(tid, out prevPage))
-                prevModified = RearmAndReprotect(prevPage);
+            if (_pendingGuardReeval.Remove(tid, out var previous))
+            {
+                prevPage = previous.Page;
+                var result = RearmAndReprotect(prevPage);
+                if (!result.Ok)
+                {
+                    ResumeThreads(previous.SuspendedPeers);
+                    return false;
+                }
+                prevModified = result.Modified;
+                suspended = previous.SuspendedPeers;
+            }
         }
         if (prevModified is not null && prevModified.Length > 0)
             CodeModified?.Invoke(prevPage, prevModified);
 
+        suspended ??= SuspendPeerThreads(tid);
+        if (suspended is null) return false;
+
         // 1. Restore write access so the faulting instruction can complete on the retry.
-        Native.VirtualProtectEx(_proc, page, (nuint)0x1000, prot.OriginalProtect, out _);
+        if (!Native.VirtualProtectEx(_proc, page, (nuint)0x1000, prot.OriginalProtect, out _))
+        {
+            ResumeThreads(suspended);
+            return false;
+        }
 
         // 2. Temporarily disarm every breakpoint on this page so (a) the single-step raises EXCEPTION_SINGLE_STEP
         //    rather than hitting a 0xCC, and (b) the post-write re-eval reads the program's real bytes, not ours.
@@ -194,24 +213,40 @@ public sealed partial class DebuggerEngine
             foreach (ulong va in prot.Breakpoints)
             {
                 if (!_swBps.TryGetValue(va, out var bp) || !bp.Armed) continue;
-                WriteCodeNoLock(va, [bp.Original]);
+                if (!WriteCodeNoLock(va, [bp.Original]))
+                {
+                    foreach (ulong prior in disarmed ?? [])
+                        if (_swBps.TryGetValue(prior, out var priorBp) && WriteCodeNoLock(prior, [0xCC]))
+                            priorBp.Armed = true;
+                    Native.VirtualProtectEx(_proc, page, (nuint)0x1000, prot.ProtectedProtect, out _);
+                    ResumeThreads(suspended);
+                    return false;
+                }
                 bp.Armed = false;
                 (disarmed ??= []).Add(va);
             }
             if (disarmed is not null)
                 _guardDisarmedByPage[page] = disarmed;
-            _pendingGuardReeval[tid] = page;
         }
 
         // 3. Single-step so the write instruction executes (its access is now permitted).
         using (var c = new Ctx(Is32))
         {
-            if (c.Get(hThread))
+            if (!c.Get(hThread))
             {
-                c.TrapFlag = true;
-                c.Set(hThread);
+                lock (_lock) RearmAndReprotect(page);
+                ResumeThreads(suspended);
+                return false;
+            }
+            c.TrapFlag = true;
+            if (!c.Set(hThread))
+            {
+                lock (_lock) RearmAndReprotect(page);
+                ResumeThreads(suspended);
+                return false;
             }
         }
+        lock (_lock) _pendingGuardReeval[tid] = new SmcStepState(page, suspended);
 
         cont = Native.DBG_CONTINUE;
         return true;
@@ -223,16 +258,23 @@ public sealed partial class DebuggerEngine
     /// <summary>Finish the single-step armed by <see cref="SmcHandleWriteFault"/>: re-arm the page's
     /// breakpoints (replanting over any new code) and re-protect it. A no-op (returns false) when this thread
     /// has no pending write-fault re-eval, so it is safe to consult on every single-step event.</summary>
-    internal bool SmcHandleWriteStep(uint tid, out ulong page)
+    internal bool SmcHandleWriteStep(uint tid, out ulong page, out bool success)
     {
         page = 0;
+        success = true;
         ulong[] modified;
+        IntPtr[] peers;
         lock (_lock)
         {
-            if (!_pendingGuardReeval.Remove(tid, out page))
+            if (!_pendingGuardReeval.Remove(tid, out var step))
                 return false;
-            modified = RearmAndReprotect(page);
+            page = step.Page;
+            peers = step.SuspendedPeers;
+            var result = RearmAndReprotect(page);
+            success = result.Ok;
+            modified = result.Modified;
         }
+        ResumeThreads(peers);
         // Notify (outside the lock so handlers can call back into the engine).
         if (modified.Length > 0)
             CodeModified?.Invoke(page, modified);
@@ -241,30 +283,31 @@ public sealed partial class DebuggerEngine
 
     /// <summary>Re-arm every breakpoint disarmed on <paramref name="page"/> for a write-step, re-apply
     /// write-protection, and return the VAs whose byte was changed by the write. Called under _lock.</summary>
-    private ulong[] RearmAndReprotect(ulong page)
+    private (bool Ok, ulong[] Modified) RearmAndReprotect(ulong page)
     {
         var modified = new List<ulong>();
+        bool ok = true;
         if (_guardDisarmedByPage.Remove(page, out var disarmed))
         {
             foreach (ulong va in disarmed)
             {
                 if (!_swBps.TryGetValue(va, out var bp)) continue;
                 var live = ReadMemory(va, 1);
-                if (live.Length != 1) continue;
+                if (live.Length != 1) { ok = false; continue; }
                 // The write clobbered our breakpoint if the live byte differs from the original we
                 // restored before the step (an untouched address still holds bp.Original).
                 bool clobbered = live[0] != bp.Original;
                 bp.Original = live[0];
-                WriteCodeNoLock(va, [0xCC]);
-                bp.Armed = true;
+                if (WriteCodeNoLock(va, [0xCC])) bp.Armed = true;
+                else ok = false;
                 if (clobbered)
                     modified.Add(va);
             }
         }
         // Re-apply write-protection.
         if (_codeGuards.TryGetValue(page, out var prot))
-            Native.VirtualProtectEx(_proc, page, (nuint)0x1000, prot.ProtectedProtect, out _);
-        return modified.ToArray();
+            ok &= Native.VirtualProtectEx(_proc, page, (nuint)0x1000, prot.ProtectedProtect, out _);
+        return (ok, modified.ToArray());
     }
 
     /// <summary>Write bytes and flush the instruction cache, without the protect-toggling <see cref="WriteCode"/>
@@ -273,8 +316,9 @@ public sealed partial class DebuggerEngine
     private bool WriteCodeNoLock(ulong addr, byte[] bytes)
     {
         if (_proc == IntPtr.Zero) return false;
-        bool ok = Native.WriteProcessMemory(_proc, addr, bytes, (nuint)bytes.Length, out _);
-        Native.FlushInstructionCache(_proc, addr, (nuint)bytes.Length);
+        bool ok = Native.WriteProcessMemory(_proc, addr, bytes, (nuint)bytes.Length, out nuint written)
+                  && written == (nuint)bytes.Length;
+        if (ok) Native.FlushInstructionCache(_proc, addr, (nuint)bytes.Length);
         return ok;
     }
 
@@ -285,6 +329,7 @@ public sealed partial class DebuggerEngine
             foreach (var (page, g) in _codeGuards)
                 if (_proc != IntPtr.Zero)
                     Native.VirtualProtectEx(_proc, page, (nuint)0x1000, g.OriginalProtect, out _);
+            foreach (var step in _pendingGuardReeval.Values) ResumeThreads(step.SuspendedPeers);
             _codeGuards.Clear();
             _guardDisarmedByPage.Clear();
             _pendingGuardReeval.Clear();

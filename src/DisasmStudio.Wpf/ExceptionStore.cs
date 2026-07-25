@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using DisasmStudio.Debug;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf;
 
@@ -43,7 +44,7 @@ internal static class ExceptionStore
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(filter, Opts));
+            AtomicFile.WriteAllText(FilePath, JsonSerializer.Serialize(filter, Opts));
         }
         catch { }
     }

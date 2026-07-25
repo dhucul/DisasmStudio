@@ -34,6 +34,7 @@ internal sealed class ManagedDebugEngine
     private readonly Dictionary<string, CorDebugModule> _modules = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<BpLoc> _pending = [];                          // breakpoints not yet armed (module not loaded)
     private readonly Dictionary<int, CorDebugFunctionBreakpoint> _armed = [];   // id -> live breakpoint
+    private readonly HashSet<int> _cancelledBpIds = [];
 
     public ManagedDebugEngine(Action<MdbgEvent> emit)
     {
@@ -122,11 +123,19 @@ internal sealed class ManagedDebugEngine
 
         if (_stopRequested) { KillTarget(); return; }
         if (_detachRequested) return;   // target was resumed, but the user cancelled attachment
-        _cordebug = cordebug;
-        _cb = BuildCallback();
-        cordebug.Initialize();
-        cordebug.SetManagedHandler(_cb);
-        _process = cordebug.DebugActiveProcess(proc.ProcessId, false);
+        try
+        {
+            _cordebug = cordebug;
+            _cb = BuildCallback();
+            cordebug.Initialize();
+            cordebug.SetManagedHandler(_cb);
+            _process = cordebug.DebugActiveProcess(proc.ProcessId, false);
+        }
+        catch
+        {
+            KillTarget();
+            throw;
+        }
         if (_stopRequested)
         {
             try { _process.Terminate(0); } catch { }
@@ -269,6 +278,11 @@ internal sealed class ManagedDebugEngine
             var fbp = code.CreateBreakpoint(bp.IlOffset);
             lock (_gate)
             {
+                if (_cancelledBpIds.Remove(bp.Id))
+                {
+                    try { fbp.Raw.Activate(false); } catch { }
+                    return false;
+                }
                 if (_armed.Remove(bp.Id, out var old)) { try { old.Raw.Activate(false); } catch { } }   // id reused → drop the old bp
                 _armed[bp.Id] = fbp;
             }
@@ -477,6 +491,7 @@ internal sealed class ManagedDebugEngine
         CorDebugModule? module;
         lock (_gate)
         {
+            _cancelledBpIds.Remove(bp.Id);
             // Check-and-add atomically vs OnModule's publish-and-take, so this bp can't be lost to a race with a
             // module load happening on the callback thread at the same instant.
             if (!_modules.TryGetValue(bp.Module, out module)) { _pending.Add(bp); return; }
@@ -489,6 +504,7 @@ internal sealed class ManagedDebugEngine
         CorDebugFunctionBreakpoint? fbp;
         lock (_gate)
         {
+            _cancelledBpIds.Add(id);
             _pending.RemoveAll(b => b.Id == id);
             _armed.Remove(id, out fbp);
         }
@@ -662,8 +678,11 @@ internal sealed class ManagedDebugEngine
     /// shown text. An empty string is returned directly (GetString(0) would return E_INVALIDARG and throw).</summary>
     private static string ReadCorString(CorDebugStringValue s)
     {
+        const int MaxInspectableString = 64 * 1024;
         int len = Math.Max(s.Length, 0);
-        return len == 0 ? "" : Truncate(s.GetString(len));
+        if (len == 0) return "";
+        if (len > MaxInspectableString) return $"<string length {len:N0}; preview suppressed>";
+        return Truncate(s.GetString(len));
     }
 
     // ---- helpers ----

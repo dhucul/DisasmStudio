@@ -54,14 +54,25 @@ public sealed class MappedFile : IDisposable
     {
         long length = new FileInfo(path).Length;
         if (length <= 0) throw new BinaryFormatException("File is empty.");
+        if (length > int.MaxValue) throw new BinaryFormatException("Files larger than 2 GiB are not supported.");
 
         // Share read/write/delete so we never lock the target while it is open.
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete);
-        var mmf = MemoryMappedFile.CreateFromFile(stream, mapName: null, capacity: 0,
-            MemoryMappedFileAccess.Read, HandleInheritability.None, leaveOpen: false);
-        var view = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
-        return new MappedFile(mmf, view, (int)Math.Min(length, int.MaxValue), path);
+        MemoryMappedFile? mmf = null;
+        try
+        {
+            mmf = MemoryMappedFile.CreateFromFile(stream, mapName: null, capacity: 0,
+                MemoryMappedFileAccess.Read, HandleInheritability.None, leaveOpen: false);
+            var view = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+            return new MappedFile(mmf, view, checked((int)length), path);
+        }
+        catch
+        {
+            if (mmf is not null) mmf.Dispose();
+            else stream.Dispose();
+            throw;
+        }
     }
 
     public bool InBounds(int offset, int count) =>
@@ -139,11 +150,11 @@ public sealed class MappedFile : IDisposable
     /// Recorded as one undo step.</summary>
     public void Patch(int offset, ReadOnlySpan<byte> bytes)
     {
+        if (bytes.Length == 0 || !InBounds(offset, bytes.Length)) return;
         var group = new Dictionary<int, (bool, byte)>(bytes.Length);
         for (int i = 0; i < bytes.Length; i++)
         {
             int o = offset + i;
-            if ((uint)o >= (uint)Length) continue;
             bool hadPatch = _patches.TryGetValue(o, out var prev);
             group[o] = hadPatch ? (true, prev) : (false, (byte)0);
             _patches[o] = bytes[i];

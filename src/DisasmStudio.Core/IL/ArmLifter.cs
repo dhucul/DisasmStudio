@@ -91,7 +91,7 @@ public sealed class ArmLifter : ILifter, IDisposable
         // ---- control flow ----
         switch (m)
         {
-            case "ret": Emit(new ReturnStmt { Value = null }); return;
+            case "ret": Emit(new ReturnStmt { Value = X0 }); return;
             case "nop": Emit(new NopStmt()); return;
             case "b" when ops.Length >= 1 && ops[0].Type == Arm64OperandType.Immediate:
                 Emit(new GotoStmt { Target = (ulong)ops[0].Immediate }); return;
@@ -156,7 +156,12 @@ public sealed class ArmLifter : ILifter, IDisposable
             {
                 int w = W(ops[0]);
                 var d = RegE(ops[0].Register);
-                Emit(Assign(d, new BinExpr(BinOp.Or, d, Val(ops[1], w), w))); return;   // approximate: insert without mask
+                int shift = ops[1].ShiftOperation == Arm64ShiftOperation.Invalid ? 0 : ops[1].ShiftValue;
+                ulong field = 0xFFFFUL << shift;
+                if (w < 8) field &= (1UL << (w * 8)) - 1;
+                var cleared = new BinExpr(BinOp.And, d, new Const(unchecked((long)~field), w), w);
+                var inserted = new BinExpr(BinOp.And, Val(ops[1], w), new Const(unchecked((long)field), w), w);
+                Emit(Assign(d, new BinExpr(BinOp.Or, cleared, inserted, w))); return;
             }
             case "adr" or "adrp" when ops.Length >= 2 && ops[0].Type == Arm64OperandType.Register:
             {
@@ -512,7 +517,7 @@ public sealed class ArmLifter : ILifter, IDisposable
                     Emit(Assign(RegEA(ops[k]), new LoadExpr(SpPlus(4 * k), 4)));
                 }
                 Emit(Assign(SpA, new BinExpr(BinOp.Add, SpA, new Const(4L * n, 4), 4)));
-                if (hasPc) Emit(new ReturnStmt { Value = null });
+                if (hasPc) Emit(new ReturnStmt { Value = R0 });
                 return;
             }
 
@@ -541,7 +546,7 @@ public sealed class ArmLifter : ILifter, IDisposable
             }
 
             case ArmInstructionId.ARM_INS_BX when ops.Length >= 1:
-                if (ops[0].Type == ArmOperandType.Register && ops[0].Register.Name == "lr") Emit(new ReturnStmt { Value = null });
+                if (ops[0].Type == ArmOperandType.Register && ops[0].Register.Name == "lr") Emit(new ReturnStmt { Value = R0 });
                 else Emit(new AsmStmt { Text = TextA(ins) });
                 return;
 

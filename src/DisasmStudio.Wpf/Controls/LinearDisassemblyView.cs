@@ -24,7 +24,7 @@ public sealed class LinearDisassemblyView : Grid
 
     private AnalysisResult? _result;
     private INeutralDisassembler? _dis;
-    private ulong _ipVa;   // debuggee's current instruction (0 = not debugging)
+    private ulong? _ipVa;  // debuggee's current instruction, or null when not debugging
 
     // Label lines (function starts + named locs), as parallel sorted arrays.
     private long[] _labelInstrLines = [];
@@ -91,10 +91,15 @@ public sealed class LinearDisassemblyView : Grid
     /// <summary>A transient one-line status message (e.g. why "Follow target" did nothing).</summary>
     public event Action<string>? StatusRequested;
 
-    /// <summary>Set the debuggee's current instruction (highlighted + centred); 0 clears it. Does not take
+    /// <summary>Set the debuggee's current instruction (highlighted + centred); null clears it. Does not take
     /// keyboard focus — this fires on every debugger stop/step, and stealing focus here would yank it away
     /// from whatever pane the user is typing in (e.g. the memory dump's address box).</summary>
-    public void SetCurrentIp(ulong va) { _ipVa = va; if (va != 0) GoToVa(va, focus: false); else _surface.InvalidateVisual(); }
+    public void SetCurrentIp(ulong? va)
+    {
+        _ipVa = va;
+        if (va is { } current) GoToVa(current, focus: false);
+        else _surface.InvalidateVisual();
+    }
     /// <summary>Predicate the gutter uses to mark addresses that have a breakpoint.</summary>
     public Func<ulong, bool>? IsBreakpointAt { get; set; }
     /// <summary>Predicate the gutter uses to colour a hardware breakpoint's dot differently from a software one.</summary>
@@ -150,11 +155,13 @@ public sealed class LinearDisassemblyView : Grid
         // Collapse state is per-document: drop it when the image changes (a new file / the debug swap), but
         // keep it across a same-image re-analysis (loading or unloading a section) so folds aren't lost.
         if (!ReferenceEquals(result?.Image, _result?.Image)) _collapsed.Clear();
+        _dis?.Dispose();
+        _dis = null;
         _result = result;
         _caretInstr = -1;
         _selAnchor = -1;
         _topDisplay = 0;
-        if (result is null) { _dis = null; _labelInstrLines = []; _labelVa = []; }
+        if (result is null) { _labelInstrLines = []; _labelVa = []; }
         else
         {
             _dis = NeutralDisasm.For(result.Image, result.Names, decoder);
@@ -377,7 +384,7 @@ public sealed class LinearDisassemblyView : Grid
 
     private void ScrollByLines(long delta)
     {
-        _topDisplay = Math.Clamp(_topDisplay + delta, 0, Math.Max(0, VisibleCount - 1));
+        _topDisplay = Math.Clamp(_topDisplay + delta, 0, Math.Max(0, VisibleCount - VisibleRows));
         SyncScrollValue();
         _surface.InvalidateVisual();
     }
@@ -431,7 +438,7 @@ public sealed class LinearDisassemblyView : Grid
         }
         if (caretVis < _topDisplay) _topDisplay = caretVis;
         else if (caretVis >= _topDisplay + VisibleRows) _topDisplay = caretVis - VisibleRows + 1;
-        _topDisplay = Math.Clamp(_topDisplay, 0, Math.Max(0, VisibleCount - 1));
+        _topDisplay = Math.Clamp(_topDisplay, 0, Math.Max(0, VisibleCount - VisibleRows));
         SyncScrollValue();
     }
 
@@ -467,6 +474,7 @@ public sealed class LinearDisassemblyView : Grid
     /// <summary>VA of the instruction under the caret (the highlighted line), or 0 when nothing is selected.
     /// The host reads this to sync the other views (graph/decompiler) to whatever the user has highlighted.</summary>
     public ulong CaretVa => _result is not null && _caretInstr >= 0 ? _result.Linear.VaAt(_caretInstr) : 0;
+    public bool HasCaretAddress => _result is not null && _caretInstr >= 0 && _caretInstr < _result.Linear.Count;
 
     /// <summary>True when the instruction at <paramref name="va"/> is a conditional jump — the only kind whose
     /// line the "Toggle jump" colour mark applies to.</summary>
@@ -614,7 +622,7 @@ public sealed class LinearDisassemblyView : Grid
             // Coverage tint first, so the current-IP amber and the selection paint on top of it.
             if (IsInstrHit?.Invoke(va) == true)
                 dc.DrawRectangle(SyntaxTheme.CoveredInstr, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
-            if (_ipVa != 0 && va == _ipVa)
+            if (_ipVa is { } ip && va == ip)
                 dc.DrawRectangle(SyntaxTheme.CurrentIp, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
             if (IsBreakpointAt?.Invoke(va) == true)
             {
@@ -903,39 +911,39 @@ public sealed class LinearDisassemblyView : Grid
         var selectAll = new MenuItem { Header = "Select all", InputGestureText = "Ctrl+A" };
         selectAll.Click += (_, _) => SelectAll();
         var xref = new MenuItem { Header = "Show xrefs to this address" };
-        xref.Click += (_, _) => { if (CaretVa != 0) ShowXrefsRequested?.Invoke(CaretVa); };
+        xref.Click += (_, _) => { if (HasCaretAddress) ShowXrefsRequested?.Invoke(CaretVa); };
         var graph = new MenuItem { Header = "Open function in graph" };
-        graph.Click += (_, _) => { if (CaretVa != 0) OpenInGraphRequested?.Invoke(CaretVa); };
+        graph.Click += (_, _) => { if (HasCaretAddress) OpenInGraphRequested?.Invoke(CaretVa); };
         var callGraph = new MenuItem { Header = "Show in call graph" };
-        callGraph.Click += (_, _) => { if (CaretVa != 0) ShowInCallGraphRequested?.Invoke(CaretVa); };
+        callGraph.Click += (_, _) => { if (HasCaretAddress) ShowInCallGraphRequested?.Invoke(CaretVa); };
         var createFn = new MenuItem { Header = "Create function here", InputGestureText = "C" };
-        createFn.Click += (_, _) => { if (CaretVa != 0) CreateFunctionRequested?.Invoke(CaretVa); };
+        createFn.Click += (_, _) => { if (HasCaretAddress) CreateFunctionRequested?.Invoke(CaretVa); };
         var decompile = new MenuItem { Header = "Decompile function" };
-        decompile.Click += (_, _) => { if (CaretVa != 0) OpenInDecompilerRequested?.Invoke(CaretVa); };
+        decompile.Click += (_, _) => { if (HasCaretAddress) OpenInDecompilerRequested?.Invoke(CaretVa); };
         var emulate = new MenuItem { Header = "Emulate function (deobfuscate)…" };
-        emulate.Click += (_, _) => { if (CaretVa != 0) EmulateFunctionRequested?.Invoke(CaretVa); };
+        emulate.Click += (_, _) => { if (HasCaretAddress) EmulateFunctionRequested?.Invoke(CaretVa); };
         var saveAsm = new MenuItem { Header = "Save function as ASM…" };
-        saveAsm.Click += (_, _) => { if (CaretVa != 0) SaveAsmRequested?.Invoke(CaretVa); };
+        saveAsm.Click += (_, _) => { if (HasCaretAddress) SaveAsmRequested?.Invoke(CaretVa); };
         var rename = new MenuItem { Header = "Rename…", InputGestureText = "N" };
-        rename.Click += (_, _) => { if (CaretVa != 0) RenameRequested?.Invoke(CaretVa); };
+        rename.Click += (_, _) => { if (HasCaretAddress) RenameRequested?.Invoke(CaretVa); };
         var comment = new MenuItem { Header = "Set comment…", InputGestureText = ";" };
-        comment.Click += (_, _) => { if (CaretVa != 0) CommentRequested?.Invoke(CaretVa); };
+        comment.Click += (_, _) => { if (HasCaretAddress) CommentRequested?.Invoke(CaretVa); };
         var bookmark = new MenuItem { Header = "Toggle bookmark" };
-        bookmark.Click += (_, _) => { if (CaretVa != 0) BookmarkToggleRequested?.Invoke(CaretVa); };
+        bookmark.Click += (_, _) => { if (HasCaretAddress) BookmarkToggleRequested?.Invoke(CaretVa); };
         var follow = new MenuItem { Header = "Follow target", InputGestureText = "Enter" };
         follow.Click += (_, _) => FollowCaret();
         // Reflect the caret's actual target each time the menu opens: show where Follow goes, and grey it
         // out when there's nothing to follow — so it's clear up front whether the action will do anything.
         var patch = new MenuItem { Header = "Patch instruction…" };
-        patch.Click += (_, _) => { if (CaretVa != 0) PatchRequested?.Invoke(CaretVa); };
+        patch.Click += (_, _) => { if (HasCaretAddress) PatchRequested?.Invoke(CaretVa); };
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2 / F9" };
-        toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
+        toggleBp.Click += (_, _) => { if (HasCaretAddress) BreakpointToggleRequested?.Invoke(CaretVa); };
         var toggleJump = new MenuItem { Header = "Toggle jump", InputGestureText = "Space" };
-        toggleJump.Click += (_, _) => { if (CaretVa != 0 && IsCondJumpAt(CaretVa)) ToggleJumpRequested?.Invoke(CaretVa); };
+        toggleJump.Click += (_, _) => { if (HasCaretAddress && IsCondJumpAt(CaretVa)) ToggleJumpRequested?.Invoke(CaretVa); };
         var hwBp = new MenuItem { Header = "Hardware breakpoint…" };
-        hwBp.Click += (_, _) => { if (CaretVa != 0) HardwareBreakpointRequested?.Invoke(CaretVa); };
+        hwBp.Click += (_, _) => { if (HasCaretAddress) HardwareBreakpointRequested?.Invoke(CaretVa); };
         var editBp = new MenuItem { Header = "Edit breakpoint…" };
-        editBp.Click += (_, _) => { if (CaretVa != 0) EditBreakpointRequested?.Invoke(CaretVa); };
+        editBp.Click += (_, _) => { if (HasCaretAddress) EditBreakpointRequested?.Invoke(CaretVa); };
         // Reflect the caret's actual target each time the menu opens: show where Follow goes, grey it out when
         // there's nothing to follow, and enable "Edit breakpoint…" only when a breakpoint exists at the caret.
         menu.Opened += (_, _) =>
@@ -943,22 +951,22 @@ public sealed class LinearDisassemblyView : Grid
             ulong? t = CaretFollowTarget();
             follow.IsEnabled = t is not null;
             follow.Header = t is ulong tt ? $"Follow target → {NameOrAddr(tt)}" : "Follow target";
-            editBp.IsEnabled = CaretVa != 0 && IsBreakpointAt?.Invoke(CaretVa) == true;
-            rename.Header = CaretVa != 0 ? $"Rename {NameOrAddr(CaretVa)}…" : "Rename…";
-            bookmark.Header = CaretVa != 0 && IsBookmarkAt?.Invoke(CaretVa) == true ? "Remove bookmark" : "Toggle bookmark";
-            bool alreadyFn = CaretVa != 0 && IsFunctionStart?.Invoke(CaretVa) == true;
-            createFn.IsEnabled = CaretVa != 0 && !alreadyFn;
+            editBp.IsEnabled = HasCaretAddress && IsBreakpointAt?.Invoke(CaretVa) == true;
+            rename.Header = HasCaretAddress ? $"Rename {NameOrAddr(CaretVa)}…" : "Rename…";
+            bookmark.Header = HasCaretAddress && IsBookmarkAt?.Invoke(CaretVa) == true ? "Remove bookmark" : "Toggle bookmark";
+            bool alreadyFn = HasCaretAddress && IsFunctionStart?.Invoke(CaretVa) == true;
+            createFn.IsEnabled = HasCaretAddress && !alreadyFn;
             createFn.Header = alreadyFn ? "Create function here (already a function)" : "Create function here";
             // "Toggle jump" flips a conditional jump's line colour between green and red; enabled on any
             // conditional jump (a stable item you click repeatedly to toggle back and forth).
-            toggleJump.IsEnabled = CaretVa != 0 && IsCondJumpAt(CaretVa);
+            toggleJump.IsEnabled = HasCaretAddress && IsCondJumpAt(CaretVa);
         };
         var runTo = new MenuItem { Header = "Run to cursor" };
-        runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
+        runTo.Click += (_, _) => { if (HasCaretAddress) RunToCursorRequested?.Invoke(CaretVa); };
         var runToRet = new MenuItem { Header = "Continue to return", InputGestureText = "Ctrl+F9" };
         runToRet.Click += (_, _) => RunToReturnRequested?.Invoke();
         var captureFn = new MenuItem { Header = "Capture this function" };
-        captureFn.Click += (_, _) => { if (CaretVa != 0) CaptureFunctionRequested?.Invoke(CaretVa); };
+        captureFn.Click += (_, _) => { if (HasCaretAddress) CaptureFunctionRequested?.Invoke(CaretVa); };
         menu.Items.Add(copy);
         menu.Items.Add(selectAll);
         menu.Items.Add(new Separator());
@@ -1063,13 +1071,13 @@ public sealed class LinearDisassemblyView : Grid
                 case Key.End: _owner.MoveCaret(_owner._result.Linear.Count - 1, ext); break;
                 case Key.Enter: _owner.FollowCaret(); break;
                 case Key.C when ctrl: _owner.CopySelection(); break;
-                case Key.C when !ctrl: if (_owner.CaretVa != 0) _owner.CreateFunctionRequested?.Invoke(_owner.CaretVa); break;
+                case Key.C when !ctrl: if (_owner.HasCaretAddress) _owner.CreateFunctionRequested?.Invoke(_owner.CaretVa); break;
                 case Key.A when ctrl: _owner.SelectAll(); break;
                 case Key.G when ctrl: _owner.GoToRequested?.Invoke(); break;
-                case Key.F2 or Key.F9: if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
-                case Key.Space: if (_owner.CaretVa != 0 && _owner.IsCondJumpAt(_owner.CaretVa)) _owner.ToggleJumpRequested?.Invoke(_owner.CaretVa); break;
-                case Key.N when !ctrl: if (_owner.CaretVa != 0) _owner.RenameRequested?.Invoke(_owner.CaretVa); break;
-                case Key.OemSemicolon: if (_owner.CaretVa != 0) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
+                case Key.F2 or Key.F9: if (_owner.HasCaretAddress) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
+                case Key.Space: if (_owner.HasCaretAddress && _owner.IsCondJumpAt(_owner.CaretVa)) _owner.ToggleJumpRequested?.Invoke(_owner.CaretVa); break;
+                case Key.N when !ctrl: if (_owner.HasCaretAddress) _owner.RenameRequested?.Invoke(_owner.CaretVa); break;
+                case Key.OemSemicolon: if (_owner.HasCaretAddress) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
                 default: return;
             }
             e.Handled = true;

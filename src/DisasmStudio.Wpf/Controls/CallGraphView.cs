@@ -22,10 +22,10 @@ public sealed class CallGraphView : DockPanel
 
     private AnalysisResult? _result;
     private CallGraph? _graph;
-    private ulong _root;
+    private ulong? _root;
 
     /// <summary>Supplies the address currently being viewed (for the "root here" button / follow mode). Set by the host.</summary>
-    public Func<ulong>? CurrentVa { get; set; }
+    public Func<ulong?>? CurrentVa { get; set; }
 
     /// <summary>When true, navigating the disassembly re-roots the graph at the new location (host-driven via
     /// <see cref="NavigatedTo"/>).</summary>
@@ -86,7 +86,7 @@ public sealed class CallGraphView : DockPanel
         _tree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(OnItemExpanded));
         _tree.MouseDoubleClick += (_, _) =>
         {
-            if (_tree.SelectedItem is TreeViewItem it && it.Tag is ulong va && va != 0) NavigateRequested?.Invoke(va);
+            if (_tree.SelectedItem is TreeViewItem it && it.Tag is ulong va) NavigateRequested?.Invoke(va);
         };
         Children.Add(_tree);
     }
@@ -99,27 +99,27 @@ public sealed class CallGraphView : DockPanel
         if (ReferenceEquals(result, _result) && ReferenceEquals(graph, _graph)) return;
         _result = result;
         _graph = graph;
-        _root = 0;
+        _root = null;
         Rebuild();
     }
 
     /// <summary>Re-root at the address currently being viewed (the "⌖ Here" button).</summary>
     private void RootAtCurrent()
     {
-        if (CurrentVa?.Invoke() is ulong va && va != 0) SetRoot(va);
+        if (CurrentVa?.Invoke() is ulong va) SetRoot(va);
     }
 
     /// <summary>The host calls this when the disassembly navigates; re-roots the graph when Follow is on.</summary>
     public void NavigatedTo(ulong va)
     {
-        if (Follow && va != 0 && _graph is not null) SetRoot(va);
+        if (Follow && _graph is not null) SetRoot(va);
     }
 
     public void Clear()
     {
         _result = null;
         _graph = null;
-        _root = 0;
+        _root = null;
         _tree.Items.Clear();
         _paths.Clear();
         _header.Text = "Open a binary to see the call graph.";
@@ -129,8 +129,7 @@ public sealed class CallGraphView : DockPanel
     public void SetRoot(ulong va)
     {
         if (_graph is null) return;
-        ulong fn = _graph.ContainingFunction(va);
-        _root = fn != 0 ? fn : va;
+        _root = _graph.ContainingFunction(va) ?? va;
         Rebuild();
     }
 
@@ -140,14 +139,14 @@ public sealed class CallGraphView : DockPanel
         _paths.Clear();
         if (_result is null || _graph is null) { _header.Text = "Open a binary to see the call graph."; return; }
 
-        if (_root == 0 || !_result.Image.IsExecutableVa(_root))
-            _root = _result.Image.EntryVa != 0 && _result.Image.IsExecutableVa(_result.Image.EntryVa)
+        if (_root is not ulong root || !_result.Image.IsExecutableVa(root))
+            _root = _result.Image.IsExecutableVa(_result.Image.EntryVa)
                 ? _result.Image.EntryVa
-                : _result.Functions.Count > 0 ? _result.Functions[0].Va : 0;
-        if (_root == 0) { _header.Text = "No functions."; return; }
+                : _result.Functions.Count > 0 ? _result.Functions[0].Va : null;
+        if (_root is not ulong resolvedRoot) { _header.Text = "No functions."; return; }
 
-        _header.Text = $"{(Callees ? "Callees of" : "Callers of")} {NameOf(_root)}   ·   {_graph.EdgeCount:N0} call edges";
-        var rootItem = MakeNode(_root, []);
+        _header.Text = $"{(Callees ? "Callees of" : "Callers of")} {NameOf(resolvedRoot)}   ·   {_graph.EdgeCount:N0} call edges";
+        var rootItem = MakeNode(resolvedRoot, []);
         _tree.Items.Add(rootItem);
         Populate(rootItem);            // populate the root directly (don't depend on the Expanded event firing)
         rootItem.IsExpanded = true;

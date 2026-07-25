@@ -89,7 +89,7 @@ internal sealed class DevirtReportDialog : Window
             FileName = "devirt_report.txt",
         };
         if (dlg.ShowDialog(this) != true) return;
-        try { File.WriteAllText(dlg.FileName, _report); }
+        try { AtomicFile.WriteAllText(dlg.FileName, _report); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
@@ -274,10 +274,21 @@ internal sealed class DevirtReportDialog : Window
             return 0;
         }
 
-        var probes = Directory.GetFiles(dir, "*_runfree_*.bin")
-            .OrderBy(File.GetLastWriteTimeUtc)
-            .Take(16)
-            .ToArray();
+        string[] probes;
+        try
+        {
+            probes = Directory.EnumerateFiles(dir, "*_runfree_*.bin")
+                .Select(path => (Path: path, Time: SafeLastWriteUtc(path)))
+                .OrderBy(probe => probe.Time)
+                .Take(16)
+                .Select(probe => probe.Path)
+                .ToArray();
+        }
+        catch
+        {
+            sb.AppendLine("  Run-free probe files: could not inspect this dump's directory.");
+            return 0;
+        }
         if (probes.Length == 0)
         {
             sb.AppendLine($"  Run-free probe files: none found in {dir}.");
@@ -302,6 +313,12 @@ internal sealed class DevirtReportDialog : Window
                 sb.AppendLine("  All valid probes are still high-entropy; none exposes a clearly decrypted VM body.");
         }
         return probes.Length;
+    }
+
+    private static DateTime SafeLastWriteUtc(string path)
+    {
+        try { return File.GetLastWriteTimeUtc(path); }
+        catch { return DateTime.MinValue; }
     }
 
     private static bool IsRunFreeEntryProbe(string imagePath) =>

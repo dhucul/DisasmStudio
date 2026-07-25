@@ -173,8 +173,16 @@ public static class Headless
             w.WriteLine(JsonSerializer.Serialize(new { edgeCount = g.EdgeCount, functions = edges }, new JsonSerializerOptions { WriteIndented = true }));
             return 0;
         }
-        ulong root = opt.Func ?? (r.Image.EntryVa != 0 ? r.Image.EntryVa : r.Functions.Count > 0 ? r.Functions[0].Va : 0);
-        root = g.ContainingFunction(root) is var c && c != 0 ? c : root;
+        ulong? requestedRoot = opt.Func
+            ?? (r.Image.IsExecutableVa(r.Image.EntryVa)
+                ? r.Image.EntryVa
+                : r.Functions.Count > 0 ? r.Functions[0].Va : null);
+        if (requestedRoot is not ulong requested)
+        {
+            Console.Error.WriteLine("callgraph: no functions were discovered.");
+            return 2;
+        }
+        ulong root = g.ContainingFunction(requested) ?? requested;
         int depth = opt.Depth > 0 ? opt.Depth : 8;
         w.WriteLine($"{(callers ? "callers" : "callees")} of {NameFor(r, root)} ({g.EdgeCount:N0} edges)");
         PrintTree(w, r, g, root, callers, depth, 0, []);

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Windows;
@@ -43,11 +44,20 @@ internal sealed class UnpackerDialog : Window
     private readonly Button _verify;
     private UnpackResult? _lastResult;
     private bool _running;
+    private CancellationTokenSource? _cts;
+    private UnpackSession? _session;
     private readonly int _staticIndex;
     private byte[]? _fileBytes;
 
     /// <summary>Set to the rebuilt file's path when the user chooses to reopen it; null otherwise.</summary>
     public string? OpenPath { get; private set; }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        _cts?.Cancel();
+        _session?.Cancel();
+        base.OnClosing(e);
+    }
 
     public UnpackerDialog(Window owner, string targetPath, int bitness, ulong imageBase, PackerVerdict verdict)
     {
@@ -216,6 +226,15 @@ internal sealed class UnpackerDialog : Window
         if (_running) return;
         string outPath = _output.Text.Trim();
         if (outPath.Length == 0) { Append("Choose an output path first."); return; }
+        try
+        {
+            if (string.Equals(Path.GetFullPath(outPath), Path.GetFullPath(_target), StringComparison.OrdinalIgnoreCase))
+            {
+                Append("Choose an output path different from the input file.");
+                return;
+            }
+        }
+        catch (Exception ex) { Append("Invalid output path: " + ex.Message); return; }
 
         // Static VMProtect "Pack the Output File" unpack: no process, no debugger — handled entirely in Core.
         if (_strategy.SelectedIndex == _staticIndex)
@@ -227,10 +246,18 @@ internal sealed class UnpackerDialog : Window
             _devirt.IsEnabled = false;
             _devirtProbe.IsEnabled = false;
             _verify.IsEnabled = false;
-            bool okStatic = await RunStaticAsync(outPath);
-            _running = false;
-            SetInputsEnabled(true);
-            _start.IsEnabled = !okStatic;
+            _cts = new CancellationTokenSource();
+            bool okStatic = false;
+            try { okStatic = await RunStaticAsync(outPath, _cts.Token); }
+            catch (OperationCanceledException) { Append("Static unpack cancelled."); }
+            finally
+            {
+                _cts.Dispose();
+                _cts = null;
+                _running = false;
+                SetInputsEnabled(true);
+                _start.IsEnabled = !okStatic;
+            }
             return;
         }
 
@@ -262,11 +289,27 @@ internal sealed class UnpackerDialog : Window
         var options = new UnpackOptions(method, manualOep, _sandbox.IsChecked == true, outPath, _imageBase,
             UseApiHooks: _apiHooks.IsChecked == true, InterceptRdtsc: _rdtsc.IsChecked == true);
         var session = new UnpackSession(_target, options);
+        _session = session;
+        _cts = new CancellationTokenSource();
         session.Progress += line => Dispatcher.BeginInvoke(() => Append(line));
 
         UnpackResult result;
-        try { result = await session.RunAsync(); }
+        try { result = await session.RunAsync().WaitAsync(_cts.Token); }
+        catch (OperationCanceledException)
+        {
+            session.Cancel();
+            Append("Unpack cancelled.");
+            _running = false;
+            SetInputsEnabled(true);
+            return;
+        }
         catch (Exception ex) { Append("ERROR: " + ex.Message); _running = false; SetInputsEnabled(true); return; }
+        finally
+        {
+            _session = null;
+            _cts.Dispose();
+            _cts = null;
+        }
 
         if (result.Ok)
         {
@@ -319,11 +362,12 @@ internal sealed class UnpackerDialog : Window
     }
 
     /// <summary>Run the static VMProtect output-decompression in Core (no debugger). Returns true on success.</summary>
-    private async Task<bool> RunStaticAsync(string outPath)
+    private async Task<bool> RunStaticAsync(string outPath, CancellationToken cancellationToken)
     {
         Append("Static unpack — reversing the packer without launching the target (no debugger)…");
         byte[] file;
-        try { file = await Task.Run(EnsureFileBytes); }
+        try { file = await Task.Run(EnsureFileBytes, cancellationToken); }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { Append("ERROR reading input file: " + ex.Message); return false; }
 
         var unpacker = StaticUnpackerRegistry.FindApplicable(file);
@@ -339,7 +383,8 @@ internal sealed class UnpackerDialog : Window
 
         Append($"Static unpacker: {unpacker.Name}.");
         StaticUnpackResult result;
-        try { result = await Task.Run(() => unpacker.Unpack(file)); }
+        try { result = await Task.Run(() => unpacker.Unpack(file), cancellationToken); }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { Append("ERROR: " + ex.Message); return false; }
 
         foreach (var line in result.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -360,7 +405,8 @@ internal sealed class UnpackerDialog : Window
             return false;
         }
 
-        try { File.WriteAllBytes(outPath, result.Image); }
+        cancellationToken.ThrowIfCancellationRequested();
+        try { AtomicFile.WriteAllBytes(outPath, result.Image); }
         catch (Exception ex) { Append("Failed to write output file: " + ex.Message); return false; }
 
         Append("");

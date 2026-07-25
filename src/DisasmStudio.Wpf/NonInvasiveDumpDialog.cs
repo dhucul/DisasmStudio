@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
@@ -50,6 +51,12 @@ internal sealed class NonInvasiveDumpDialog : Window
 
     /// <summary>Set to the dumped file's path when the user chooses to reopen it; null otherwise.</summary>
     public string? OpenPath { get; private set; }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        _cts?.Cancel();
+        base.OnClosing(e);
+    }
 
     private sealed record ProcItem(int Pid, string Name)
     {

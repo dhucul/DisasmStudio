@@ -26,7 +26,7 @@ public readonly record struct NeutralInsn(int Length, FlowKind Flow, ulong? Dire
 /// <c>Iced.Intel.Instruction</c> directly. <see cref="IcedNeutral"/> wraps the existing x86/x64 Iced
 /// decoder (behavior-preserving); <see cref="ArmDisassembler"/> wraps Capstone for ARM/Thumb/AArch64.
 /// </summary>
-public interface INeutralDisassembler
+public interface INeutralDisassembler : IDisposable
 {
     /// <summary>Decode length + flow at <paramref name="va"/>; false if unmapped/undecodable.</summary>
     bool TryDecode(ulong va, out NeutralInsn insn);

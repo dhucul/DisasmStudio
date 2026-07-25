@@ -136,7 +136,9 @@ public static class PeBuilder
 
         var plan = new List<(SectionHeader Src, string Name, uint Chars)>();
         var dropped = new List<(uint Va, uint Size)>();
-        for (int i = 0; i < numSec; i++)
+        if (view.Sections.Count != numSec)
+            throw new InvalidDataException("Truncated PE section table.");
+        for (int i = 0; i < view.Sections.Count; i++)
         {
             var s = view.Sections[i];
             bool hasOep = SecHas(s, oepRva);
@@ -146,8 +148,7 @@ public static class PeBuilder
             // Never drop the first (lowest-VA) section: contiguity is restored by growing the *preceding*
             // section over the gap, and there is none before section 0 — dropping it would leave a gap between
             // the headers and the first section, which the loader rejects. (UPX's stub is never section 0.)
-            bool isStub = addSection && i != 0 && s.IsExecutable && SecHas(s, origEpRva) && !hasOep
-                          && !protectedRvas.Any(r => SecHas(s, r));
+            bool isStub = false;
             if (isStub) { dropped.Add((s.VirtualAddress, Math.Max(s.VirtualSize, s.SizeOfRawData))); continue; }
 
             string name = hasOep ? ".text"

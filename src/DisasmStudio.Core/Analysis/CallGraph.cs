@@ -29,11 +29,11 @@ public sealed class CallGraph
     /// <summary>The number of recorded call edges (for the header / diagnostics).</summary>
     public int EdgeCount { get; private set; }
 
-    /// <summary>The function whose actual CFG contains <paramref name="va"/>, or 0 when the address is padding,
-    /// data, or otherwise outside every discovered function.</summary>
-    public ulong ContainingFunction(ulong va)
+    /// <summary>The function whose actual CFG contains <paramref name="va"/>, or <see langword="null"/> when the
+    /// address is padding, data, or otherwise outside every discovered function.</summary>
+    public ulong? ContainingFunction(ulong va)
     {
-        return _result.FunctionContaining(va)?.Va ?? 0;
+        return _result.FunctionContaining(va)?.Va;
     }
 
     public static CallGraph Build(AnalysisResult result)
@@ -42,8 +42,7 @@ public sealed class CallGraph
 
         foreach (var x in result.Xrefs.AllOfKind(XrefKind.Call))
         {
-            ulong caller = result.FunctionContaining(x.From)?.Va ?? 0;
-            if (caller == 0) continue;              // a call from outside any known function
+            if (result.FunctionContaining(x.From)?.Va is not ulong caller) continue;
             g.Add(caller, x.To);
         }
         return g;

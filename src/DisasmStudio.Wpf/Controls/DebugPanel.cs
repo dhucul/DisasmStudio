@@ -89,9 +89,9 @@ public sealed class DebugPanel : Grid
         _calls = MonoList(); _calls.MouseDoubleClick += (_, _) => NavTo(_callVas, _calls.SelectedIndex);
         _threads = MonoList(); _threads.MouseDoubleClick += OnThreadActivate;
         _modules = MonoList(); _modules.MouseDoubleClick += (_, _) => NavTo(_moduleVas, _modules.SelectedIndex);
-        _capture = MonoList(); _capture.MouseDoubleClick += (_, _) => { if (_capture.SelectedItem is CaptureItem ci && ci.Va != 0) NavigateRequested?.Invoke(ci.Va); };
+        _capture = MonoList(); _capture.MouseDoubleClick += (_, _) => { if (_capture.SelectedItem is CaptureItem ci) NavigateRequested?.Invoke(ci.Va); };
         _callGraph = new TreeView { FontFamily = Mono, FontSize = 12, Background = (Brush)Application.Current.Resources["Surface"], BorderThickness = new Thickness(0) };
-        _callGraph.MouseDoubleClick += (_, _) => { if (_callGraph.SelectedItem is TreeViewItem ti && ti.Tag is ulong va && va != 0) NavigateRequested?.Invoke(va); };
+        _callGraph.MouseDoubleClick += (_, _) => { if (_callGraph.SelectedItem is TreeViewItem ti && ti.Tag is ulong va) NavigateRequested?.Invoke(va); };
 
         var memPanel = new DockPanel();
         _dump = new HexView();   // editable hex view over the whole live address space

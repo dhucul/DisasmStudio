@@ -22,9 +22,9 @@ internal sealed class InPlacePatchMap
 
     public void Patch(int offset, ReadOnlySpan<byte> bytes)
     {
-        if (offset < 0 || offset >= _backing.Length || bytes.Length == 0) return;
+        if (bytes.Length == 0 || offset < 0 || offset > _backing.Length - bytes.Length) return;
 
-        int count = Math.Min(bytes.Length, _backing.Length - offset);
+        int count = bytes.Length;
         var transaction = new Dictionary<int, UndoByte>(count);
         for (int i = 0; i < count; i++)
         {

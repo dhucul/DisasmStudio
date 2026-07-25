@@ -55,42 +55,44 @@ public static class ImportWrapperTracer
         int ptr = is64 ? 8 : 4;
         var regs = new Dictionary<Register, ulong>();
         var stack = new Stack<ulong>();
+        var infoFactory = new InstructionInfoFactory();
 
         for (int n = 0; n < MaxInsPerBlock && dec.IP < end; n++)
         {
             dec.Decode(out var ins);
             if (ins.IsInvalid) return 0;
 
+            bool tracked = true;
             switch (ins.Mnemonic)
             {
                 case Mnemonic.Mov when ins.Op0Kind == OpKind.Register:
                     if (IsImm(ins.Op1Kind))
-                        regs[ins.Op0Register] = ins.GetImmediate(1);
-                    else if (ins.Op1Kind == OpKind.Register && regs.TryGetValue(ins.Op1Register, out var rv))
-                        regs[ins.Op0Register] = rv;
+                        regs[ins.Op0Register.GetFullRegister()] = ins.GetImmediate(1);
+                    else if (ins.Op1Kind == OpKind.Register && regs.TryGetValue(ins.Op1Register.GetFullRegister(), out var rv))
+                        regs[ins.Op0Register.GetFullRegister()] = rv;
                     else if (ins.Op1Kind == OpKind.Memory && TryMemAddr(ins, regs, out var ma))
                         SetFromMem(mem, regs, ins.Op0Register, ma, ptr);
-                    else regs.Remove(ins.Op0Register);
+                    else regs.Remove(ins.Op0Register.GetFullRegister());
                     break;
 
                 case Mnemonic.Lea when ins.Op0Kind == OpKind.Register && ins.Op1Kind == OpKind.Memory:
-                    if (TryMemAddr(ins, regs, out var lea)) regs[ins.Op0Register] = lea;
-                    else regs.Remove(ins.Op0Register);
+                    if (TryMemAddr(ins, regs, out var lea)) regs[ins.Op0Register.GetFullRegister()] = lea;
+                    else regs.Remove(ins.Op0Register.GetFullRegister());
                     break;
 
-                case Mnemonic.Add when ins.Op0Kind == OpKind.Register && IsImm(ins.Op1Kind) && regs.TryGetValue(ins.Op0Register, out var av):
-                    regs[ins.Op0Register] = av + ins.GetImmediate(1); break;
-                case Mnemonic.Sub when ins.Op0Kind == OpKind.Register && IsImm(ins.Op1Kind) && regs.TryGetValue(ins.Op0Register, out var sv):
-                    regs[ins.Op0Register] = sv - ins.GetImmediate(1); break;
+                case Mnemonic.Add when ins.Op0Kind == OpKind.Register && IsImm(ins.Op1Kind) && regs.TryGetValue(ins.Op0Register.GetFullRegister(), out var av):
+                    regs[ins.Op0Register.GetFullRegister()] = av + ins.GetImmediate(1); break;
+                case Mnemonic.Sub when ins.Op0Kind == OpKind.Register && IsImm(ins.Op1Kind) && regs.TryGetValue(ins.Op0Register.GetFullRegister(), out var sv):
+                    regs[ins.Op0Register.GetFullRegister()] = sv - ins.GetImmediate(1); break;
                 case Mnemonic.Xor when ins.Op0Kind == OpKind.Register && ins.Op1Kind == OpKind.Register && ins.Op0Register == ins.Op1Register:
-                    regs[ins.Op0Register] = 0; break;
+                    regs[ins.Op0Register.GetFullRegister()] = 0; break;
 
                 case Mnemonic.Push when IsImm(ins.Op0Kind):
                     stack.Push(ins.GetImmediate(0)); break;
                 case Mnemonic.Push when ins.Op0Kind == OpKind.Register:
-                    stack.Push(regs.GetValueOrDefault(ins.Op0Register)); break;
+                    stack.Push(regs.GetValueOrDefault(ins.Op0Register.GetFullRegister())); break;
                 case Mnemonic.Pop when ins.Op0Kind == OpKind.Register:
-                    if (stack.Count > 0) regs[ins.Op0Register] = stack.Pop(); else regs.Remove(ins.Op0Register);
+                    if (stack.Count > 0) regs[ins.Op0Register.GetFullRegister()] = stack.Pop(); else regs.Remove(ins.Op0Register.GetFullRegister());
                     break;
 
                 case Mnemonic.Jmp:
@@ -99,6 +101,22 @@ public static class ImportWrapperTracer
 
                 case Mnemonic.Ret:
                     return stack.Count > 0 ? stack.Pop() : 0;   // push X; ret
+
+                default:
+                    tracked = false;
+                    break;
+            }
+            if (!tracked)
+            {
+                var info = infoFactory.GetInfo(in ins);
+                foreach (var used in info.GetUsedRegisters())
+                {
+                    if (used.Access is not (OpAccess.Write or OpAccess.ReadWrite or OpAccess.CondWrite or OpAccess.ReadCondWrite))
+                        continue;
+                    Register reg = used.Register.GetFullRegister();
+                    regs.Remove(reg);
+                    if (reg is Register.RSP or Register.ESP) stack.Clear();
+                }
             }
             // Untracked instructions are skipped — wrappers interleave junk that doesn't move our target.
         }
@@ -108,6 +126,7 @@ public static class ImportWrapperTracer
     private static void SetFromMem(MemReader mem, Dictionary<Register, ulong> regs, Register reg, ulong addr, int ptr)
     {
         var pb = mem(addr, ptr);
+        reg = reg.GetFullRegister();
         if (pb.Length >= ptr) regs[reg] = ptr == 8 ? BitConverter.ToUInt64(pb, 0) : BitConverter.ToUInt32(pb, 0);
         else regs.Remove(reg);
     }
@@ -119,7 +138,7 @@ public static class ImportWrapperTracer
             case OpKind.NearBranch16 or OpKind.NearBranch32 or OpKind.NearBranch64:
                 return ins.NearBranchTarget;
             case OpKind.Register:
-                return regs.GetValueOrDefault(ins.Op0Register);
+                return regs.GetValueOrDefault(ins.Op0Register.GetFullRegister());
             case OpKind.Memory:
                 if (!TryMemAddr(ins, regs, out var ma)) return 0;
                 var pb = mem(ma, ptr);
@@ -138,7 +157,7 @@ public static class ImportWrapperTracer
         if (ins.IsIPRelativeMemoryOperand) { addr = ins.IPRelativeMemoryAddress; return true; }
         if (ins.MemoryIndex != Register.None) return false;
         if (ins.MemoryBase == Register.None) { addr = ins.MemoryDisplacement64; return addr != 0; }
-        if (regs.TryGetValue(ins.MemoryBase, out var b)) { addr = b + ins.MemoryDisplacement64; return true; }
+        if (regs.TryGetValue(ins.MemoryBase.GetFullRegister(), out var b)) { addr = b + ins.MemoryDisplacement64; return true; }
         return false;
     }
 

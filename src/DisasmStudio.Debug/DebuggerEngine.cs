@@ -208,6 +208,7 @@ public sealed partial class DebuggerEngine
         }
         _pid = pi.dwProcessId;
         Native.CloseHandle(pi.hThread);
+        Native.CloseHandle(pi.hProcess);
         return true;
     }
 
@@ -359,7 +360,12 @@ public sealed partial class DebuggerEngine
         if (code is Native.EXCEPTION_BREAKPOINT or Native.STATUS_WX86_BREAKPOINT)
         {
             // anti-anti-debug return-patch landing (scrub Dr regs from a NtGetContextThread result) — silent
-            if (_pendingReturns.ContainsKey(addr)) { HandleReturnHook(addr, hThread); return false; }
+            if (_pendingReturns.ContainsKey(addr))
+            {
+                if (HandleReturnHook(addr, ev.dwThreadId, hThread)) return false;
+                cont = Native.DBG_EXCEPTION_NOT_HANDLED;
+                return false;
+            }
             // internal anti-anti-debug hook (ntdll query emulation) — handled silently, never surfaced
             if (_internalBps.ContainsKey(addr)) { HandleAntiDebugHook(addr, ev.dwThreadId, hThread); return false; }
             // instruction-trace run-through: the return from foreign (system-DLL) code we ran at full speed.
@@ -479,7 +485,12 @@ public sealed partial class DebuggerEngine
             // the page disarmed, the page never re-protected, and _pendingGuardReeval/_guardDisarmedByPage leaked.
             // SmcHandleWriteStep is a no-op (returns false) when this thread has no pending write-fault re-eval,
             // so it is safe to consult first on every single-step event.
-            bool smcStep = SmcHandleWriteStep(ev.dwThreadId, out _);
+            bool smcStep = SmcHandleWriteStep(ev.dwThreadId, out _, out bool smcRecovered);
+            if (smcStep && !smcRecovered)
+            {
+                Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, CurrentIp(hThread), code));
+                return true;
+            }
 
             // Software memory-breakpoint trap-step: the faulting access has now completed, so re-protect its
             // page and, if it was a real hit, stop at the accessing instruction. Like the SMC guard-step this is
@@ -495,6 +506,16 @@ public sealed partial class DebuggerEngine
                     return true;
                 }
                 return false;   // an unrelated access on a watched page — re-protected, keep running
+            }
+
+            if (_returnStep.ContainsKey(ev.dwThreadId))
+            {
+                if (!CompleteReturnStep(ev.dwThreadId))
+                {
+                    Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, CurrentIp(hThread), code));
+                    return true;
+                }
+                if (!_stepping.ContainsKey(ev.dwThreadId)) return false;
             }
 
             // A step armed only to run one instruction off an internal anti-debug hook, then re-arm it.
@@ -538,7 +559,8 @@ public sealed partial class DebuggerEngine
                 // ICEBP/int1 (or a debuggee-set trap flag) anti-debug: when hiding, deliver to the program's
                 // handler instead of swallowing, so its single-step SEH fires as if undebugged.
                 if (HideFromDebugger && IsProgramDebugInstruction(addr, step: true)) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
-                return false;   // a single-step we didn't arm for this thread (e.g. debuggee set TF) — keep running
+                cont = Native.DBG_EXCEPTION_NOT_HANDLED;
+                return false;
             }
             if (tracing) return HandleTraceStep(ev, hThread, ref cont);   // continuous instruction trace: record + re-step
             _stepping.Remove(ev.dwThreadId);
@@ -748,7 +770,13 @@ public sealed partial class DebuggerEngine
         lock (_lock) _runToAnyTargets.Enqueue(copy);
         _resume.Add((ResumeMode.RunToAny, 0));
     }
-    public void Pause() { _pauseRequested = true; if (_proc != IntPtr.Zero) { _breakinPending = true; Native.DebugBreakProcess(_proc); } }
+    public void Pause()
+    {
+        _pauseRequested = true;
+        if (_proc == IntPtr.Zero) return;
+        if (Native.DebugBreakProcess(_proc)) _breakinPending = true;
+        else _pauseRequested = false;
+    }
 
     public void Stop()
     {
@@ -816,8 +844,10 @@ public sealed partial class DebuggerEngine
             _coveredPoints.Clear();
             foreach (var (va, bp) in _internalBps) WriteCode(va, [bp.Original]);
             _internalBps.Clear();
-            foreach (var (va, pend) in _pendingReturns) WriteCode(va, [pend.Orig]);
+            foreach (var (va, site) in _pendingReturns) if (site.Armed) WriteCode(va, [site.Original]);
             _pendingReturns.Clear();
+            foreach (var step in _returnStep.Values) ResumeThreads(step.SuspendedPeers);
+            _returnStep.Clear();
             _hwBps.Clear();
         }
         ProgramHwAllThreads();   // _hwBps now empty -> writes a zeroed Dr0-3/Dr7 to each thread
@@ -884,14 +914,25 @@ public sealed partial class DebuggerEngine
 
     // ---- breakpoints ----
     public void SetBreakpoint(ulong va)
+        => TrySetBreakpoint(va);
+
+    public bool TrySetBreakpoint(ulong va)
     {
         lock (_lock)
         {
-            if (_swBps.ContainsKey(va)) return;
+            if (_swBps.TryGetValue(va, out var existing)) return existing.Armed;
             var bp = new Breakpoint { Address = va };
             _swBps[va] = bp;
             ArmAddr(va);
+            if (!bp.Armed) _swBps.Remove(va);
+            return bp.Armed;
         }
+    }
+
+    public bool WaitForCompletion(int millisecondsTimeout)
+    {
+        Thread? thread = _thread;
+        return thread is null || thread == Thread.CurrentThread || thread.Join(millisecondsTimeout);
     }
 
     /// <summary>
@@ -900,9 +941,10 @@ public sealed partial class DebuggerEngine
     /// of per byte (≈5 syscalls per page vs per breakpoint). Must be called while the debuggee is frozen,
     /// as all breakpoint changes must. Addresses already set are skipped.
     /// </summary>
-    public void SetBreakpoints(IReadOnlyCollection<ulong> addresses)
+    public IReadOnlyCollection<ulong> SetBreakpoints(IReadOnlyCollection<ulong> addresses)
     {
-        if (_proc == IntPtr.Zero || addresses.Count == 0) return;
+        if (_proc == IntPtr.Zero || addresses.Count == 0) return [];
+        var armed = new List<ulong>();
 
         // Register the new breakpoints (skip duplicates) and group them by 4 KiB page.
         var byPage = new Dictionary<ulong, List<ulong>>();
@@ -919,11 +961,19 @@ public sealed partial class DebuggerEngine
         var buf = new byte[PageSize];
         foreach (var (page, vas) in byPage)
         {
-            Native.ReadProcessMemory(_proc, page, buf, (nuint)PageSize, out var read);
+            if (!Native.ReadProcessMemory(_proc, page, buf, (nuint)PageSize, out var read))
+            {
+                lock (_lock) foreach (var va in vas) _swBps.Remove(va);
+                continue;
+            }
             int n = (int)read;
             if (n == 0) { lock (_lock) foreach (var va in vas) _swBps.Remove(va); continue; }
 
-            Native.VirtualProtectEx(_proc, page, (nuint)n, Native.PAGE_EXECUTE_READWRITE, out uint old);
+            if (!Native.VirtualProtectEx(_proc, page, (nuint)n, Native.PAGE_EXECUTE_READWRITE, out uint old))
+            {
+                lock (_lock) foreach (var va in vas) _swBps.Remove(va);
+                continue;
+            }
             var originals = new List<(ulong Va, byte Orig)>(vas.Count);
             List<ulong>? tail = null;
             foreach (var va in vas)
@@ -935,26 +985,42 @@ public sealed partial class DebuggerEngine
             }
             // Don't leave breakpoints we couldn't arm registered as phantoms (listed but never fire).
             if (tail is not null) lock (_lock) foreach (var va in tail) _swBps.Remove(va);
-            Native.WriteProcessMemory(_proc, page, buf, (nuint)n, out _);
-            Native.VirtualProtectEx(_proc, page, (nuint)n, old, out _);
-            Native.FlushInstructionCache(_proc, page, (nuint)n);
+            bool wrote = Native.WriteProcessMemory(_proc, page, buf, (nuint)n, out nuint written)
+                         && written == (nuint)n;
+            if (!Native.VirtualProtectEx(_proc, page, (nuint)n, old, out _))
+                Output?.Invoke($"Failed to restore protection for breakpoint page 0x{page:X}.");
+            if (wrote) Native.FlushInstructionCache(_proc, page, (nuint)n);
+            else
+            {
+                lock (_lock) foreach (var va in vas) _swBps.Remove(va);
+                continue;
+            }
 
             lock (_lock)
                 foreach (var (va, orig) in originals)
-                    if (_swBps.TryGetValue(va, out var bp)) { bp.Original = orig; bp.Armed = true; }
+                    if (_swBps.TryGetValue(va, out var bp))
+                    {
+                        bp.Original = orig;
+                        bp.Armed = true;
+                        armed.Add(va);
+                    }
 
             // SMC: write-protect all pages that now carry armed breakpoints.
             if (SmcTrackingEnabled)
                 lock (_lock) foreach (var (va, _) in originals) ProtectPageForBreakpoint(va);
         }
+        return armed;
     }
 
     public void RemoveBreakpoint(ulong va)
     {
         lock (_lock)
         {
-            // Restore the byte using the removed entry (DisarmAddr re-looks-up _swBps, which is now empty).
-            if (_swBps.Remove(va, out var bp) && bp.Armed) WriteCode(va, [bp.Original]);
+            if (_swBps.TryGetValue(va, out var bp))
+            {
+                if (bp.Armed && !WriteCode(va, [bp.Original])) return;
+                _swBps.Remove(va);
+            }
             var hw = _hwBps.FirstOrDefault(b => b.Address == va);
             if (hw is not null) { _hwBps.Remove(hw); ProgramHwAllThreads(); }
         }
@@ -1071,7 +1137,7 @@ public sealed partial class DebuggerEngine
     private void DisarmAddr(ulong va)
     {
         Breakpoint? bp; lock (_lock) _swBps.TryGetValue(va, out bp);
-        if (bp is { Armed: true }) { WriteCode(va, [bp.Original]); bp.Armed = false; }
+        if (bp is { Armed: true } && WriteCode(va, [bp.Original])) bp.Armed = false;
     }
 
     private bool AddTempBp(ulong va)
@@ -1081,18 +1147,23 @@ public sealed partial class DebuggerEngine
             if (_tempBps.ContainsKey(va) || _swBps.ContainsKey(va)) return false;
             var o = ReadMemory(va, 1);
             if (o.Length < 1) return false;
+            if (!WriteCode(va, [0xCC])) return false;
             _tempBps[va] = o[0];
+            return true;
         }
-        return WriteCode(va, [0xCC]);
     }
 
     public bool SetTemporaryBreakpoint(ulong va) => AddTempBp(va);
 
     private bool RemoveTempBpIfPresent(ulong va)
     {
-        byte orig; lock (_lock) { if (!_tempBps.Remove(va, out orig)) return false; }
-        WriteCode(va, [orig]);
-        return true;
+        lock (_lock)
+        {
+            if (!_tempBps.TryGetValue(va, out byte orig)) return false;
+            if (!WriteCode(va, [orig])) return false;
+            _tempBps.Remove(va);
+            return true;
+        }
     }
 
     private void RemoveAllTempBps()
@@ -1102,10 +1173,14 @@ public sealed partial class DebuggerEngine
         {
             if (_tempBps.Count == 0) return;
             bps = _tempBps.ToArray();
-            _tempBps.Clear();
         }
         foreach (var (va, orig) in bps)
-            WriteCode(va, [orig]);
+        {
+            if (!WriteCode(va, [orig])) continue;
+            lock (_lock)
+                if (_tempBps.TryGetValue(va, out byte current) && current == orig)
+                    _tempBps.Remove(va);
+        }
     }
 
     // ---- execution coverage (silent one-shot breakpoints at basic-block leaders) ----
@@ -1366,7 +1441,7 @@ public sealed partial class DebuggerEngine
                     if (_coverageBps.TryGetValue(a, out var cb)) buf[i] = cb;
                     if (_traceResumeBps.TryGetValue(a, out var tr)) buf[i] = tr;
                     if (_internalBps.TryGetValue(a, out var ib) && ib.Armed) buf[i] = ib.Original;
-                    if (_pendingReturns.TryGetValue(a, out var pr)) buf[i] = pr.Orig;
+                    if (_pendingReturns.TryGetValue(a, out var pr) && pr.Armed) buf[i] = pr.Original;
                 }
                 return;
             }
@@ -1382,7 +1457,7 @@ public sealed partial class DebuggerEngine
             foreach (var kv in _internalBps)
                 if (kv.Value.Armed && kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value.Original;
             foreach (var kv in _pendingReturns)
-                if (kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value.Orig;
+                if (kv.Value.Armed && kv.Key >= addr && kv.Key < end) buf[kv.Key - addr] = kv.Value.Original;
         }
     }
 
@@ -1391,10 +1466,21 @@ public sealed partial class DebuggerEngine
     private bool WriteCode(ulong addr, byte[] bytes)
     {
         if (_proc == IntPtr.Zero) return false;
-        Native.VirtualProtectEx(_proc, addr, (nuint)bytes.Length, Native.PAGE_EXECUTE_READWRITE, out uint old);
-        bool ok = Native.WriteProcessMemory(_proc, addr, bytes, (nuint)bytes.Length, out _);
-        Native.VirtualProtectEx(_proc, addr, (nuint)bytes.Length, old, out _);
-        Native.FlushInstructionCache(_proc, addr, (nuint)bytes.Length);
+        if (bytes.Length == 0) return true;
+        if (!Native.VirtualProtectEx(_proc, addr, (nuint)bytes.Length, Native.PAGE_EXECUTE_READWRITE, out uint old))
+            return false;
+        bool ok;
+        try
+        {
+            ok = Native.WriteProcessMemory(_proc, addr, bytes, (nuint)bytes.Length, out nuint written)
+                 && written == (nuint)bytes.Length;
+            if (ok) Native.FlushInstructionCache(_proc, addr, (nuint)bytes.Length);
+        }
+        finally
+        {
+            if (!Native.VirtualProtectEx(_proc, addr, (nuint)bytes.Length, old, out _))
+                Output?.Invoke($"Failed to restore protection after writing code at 0x{addr:X}.");
+        }
         return ok;
     }
 
@@ -1514,13 +1600,15 @@ public sealed partial class DebuggerEngine
     /// target section without a per-write fault storm (which made multi-MB sections like UPX0 appear to hang).
     /// Pages that are already non-executable are tracked but left untouched — they DEP-fault on execution on
     /// their own. Original protections are restored by <see cref="ClearGuards"/>. Call while frozen at a stop.</summary>
-    public void GuardRegion(ulong va, ulong size)
+    public void GuardRegion(ulong va, ulong size) => TryGuardRegion(va, size);
+
+    public bool TryGuardRegion(ulong va, ulong size)
     {
-        if (_proc == IntPtr.Zero || size == 0) return;
-        ulong start = va & ~0xFFFUL;
-        ulong end = (va + size + 0xFFF) & ~0xFFFUL;
+        if (_proc == IntPtr.Zero || size == 0 || va > ulong.MaxValue - size) return false;
+        ulong end = va + size;
+        bool guarded = false;
         int mbiSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
-        for (ulong p = start; p < end; p += 0x1000)
+        foreach (ulong p in PageStarts(va, end))
         {
             if (Native.VirtualQueryEx(_proc, p, out var mbi, (nuint)mbiSize) == 0) continue;
             if (mbi.State != Native.MEM_COMMIT) continue;
@@ -1533,11 +1621,19 @@ public sealed partial class DebuggerEngine
             if (nx != prot)
             {
                 if (Native.VirtualProtectEx(_proc, p, 0x1000, nx, out _))
+                {
                     lock (_lock) _guarded[p] = prot;
+                    guarded = true;
+                }
             }
-            else lock (_lock) _guarded[p] = prot;
+            else
+            {
+                lock (_lock) _guarded[p] = prot;
+                guarded = true;
+            }
         }
         ClearExecCache();   // we stripped execute from pages — cached executability for them is now stale
+        return guarded;
     }
 
     /// <summary>Map an executable page protection to its non-executable equivalent, preserving read/write
@@ -1683,9 +1779,11 @@ public sealed partial class DebuggerEngine
     private bool PathMatchesTarget(string modulePath)
     {
         if (_targetDllPath is null) return false;
-        if (string.Equals(SafeFullPath(modulePath), _targetDllPath, StringComparison.OrdinalIgnoreCase)) return true;
+        string? got = SafeFullPath(modulePath);
+        if (got is not null)
+            return string.Equals(got, _targetDllPath, StringComparison.OrdinalIgnoreCase);
         return string.Equals(System.IO.Path.GetFileName(modulePath), System.IO.Path.GetFileName(_targetDllPath),
-                             StringComparison.OrdinalIgnoreCase);
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static (uint Vol, uint Hi, uint Lo)? FileIdentity(IntPtr hFile)

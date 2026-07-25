@@ -49,12 +49,13 @@ public sealed class ManagedAssembly : IDisposable
     {
         asm = null;
         if (ManagedPeInfo.TryRead(img) is not { } net) return false;
+        PEFile? pe = null;
         try
         {
             // Load from a copy of the on-disk bytes (not by locking the path), then let the whole image prefetch
             // so the decompiler doesn't hold the file open.
             byte[] bytes = File.ReadAllBytes(img.FilePath);
-            var pe = new PEFile(img.FilePath, new MemoryStream(bytes, writable: false), PEStreamOptions.PrefetchEntireImage);
+            pe = new PEFile(img.FilePath, new MemoryStream(bytes, writable: false), PEStreamOptions.PrefetchEntireImage);
 
             string tfm = "";
             try { tfm = pe.DetectTargetFrameworkId() ?? ""; } catch { /* best-effort */ }
@@ -68,12 +69,17 @@ public sealed class ManagedAssembly : IDisposable
             var meta = BuildMetadata(pe, net, tfm);
             var resources = ManagedResourceExtractor.Enumerate(pe);
             asm = new ManagedAssembly(pe, decompiler, settings, meta, resources);
+            pe = null;
             return true;
         }
         catch { asm = null; return false; }
+        finally { pe?.Dispose(); }
     }
 
-    public ManagedTypeNode Root => _root ??= BuildTree();
+    public ManagedTypeNode Root
+    {
+        get { lock (_gate) return _root ??= BuildTree(); }
+    }
 
     /// <summary>A readable label for a method metadata token (for the managed call stack), or its hex token
     /// if not found in the tree.</summary>
@@ -219,7 +225,7 @@ public sealed class ManagedAssembly : IDisposable
     }
 
     private static IReadOnlyList<DecompLine> Hint(string text) =>
-        [new DecompLine(0, [new AsmToken(text, AsmTokenKind.Comment)], 0)];
+        [new DecompLine(0, [new AsmToken(text, AsmTokenKind.Comment)], 0, true)];
 
     // ---- tree ----
 
@@ -289,7 +295,10 @@ public sealed class ManagedAssembly : IDisposable
         return new AssemblyMetadata(name, version, string.IsNullOrEmpty(tfm) ? net.RuntimeVersion : tfm, net.IsILOnly, refs);
     }
 
-    public void Dispose() => (_pe as IDisposable)?.Dispose();
+    public void Dispose()
+    {
+        lock (_gate) (_pe as IDisposable)?.Dispose();
+    }
 }
 
 /// <summary>One statement's mapping: an IL range [<see cref="IlOffset"/>, <see cref="IlEndOffset"/>) inside a

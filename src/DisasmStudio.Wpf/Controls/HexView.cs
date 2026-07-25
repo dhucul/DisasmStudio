@@ -214,8 +214,16 @@ public sealed class HexView : Grid
     public void GoTo(ulong address, bool select = false, int length = 1, bool atTop = false)
     {
         if (_image is null) return;
+        if (_image.MaxVa <= _image.MinVa)
+        {
+            _topAddress = _image.MinVa;
+            _hasSelection = false;
+            SyncScrollValue();
+            _surface.InvalidateVisual();
+            return;
+        }
         if (address < _image.MinVa) address = _image.MinVa;
-        if (address > _image.MaxVa) address = _image.MaxVa;
+        if (address >= _image.MaxVa) address = _image.MaxVa - 1;
 
         // Highlight the target so navigation is visible even between two addresses in the same 16-byte row
         // (e.g. rsp+4 vs rsp+8, which otherwise render identically and look like nothing happened), and so a
@@ -223,18 +231,20 @@ public sealed class HexView : Grid
         // (all its opcode bytes), not just the first — the caller passes the instruction's byte count.
         if (select)
         {
-            ulong end = address + (ulong)(Math.Max(1, length) - 1);
-            if (end >= _image.MaxVa) end = _image.MaxVa > _image.MinVa ? _image.MaxVa - 1 : address;
+            ulong extra = (ulong)(Math.Max(1, length) - 1);
+            ulong last = _image.MaxVa - 1;
+            ulong end = extra > last - address ? last : address + extra;
             _selAnchor = address;
             _selCaret = end;
             _hasSelection = true;
             _editNibble = 0;
         }
 
-        ulong aligned = address - (address % BytesPerRow);
+        ulong aligned = RowStart(address);
         // Normally centre the target; atTop puts it on the first row (used by the debugger's "follow writes").
         ulong back = atTop ? 0UL : (ulong)(Math.Max(0, VisibleRows / 2) * BytesPerRow);
-        _topAddress = aligned > _image.MinVa + back ? aligned - back : _image.MinVa;
+        _topAddress = aligned - _image.MinVa > back ? aligned - back : _image.MinVa;
+        _topAddress = Math.Min(_topAddress, MaxTopAddress());
 
         SyncScrollValue();
         _surface.InvalidateVisual();
@@ -297,9 +307,10 @@ public sealed class HexView : Grid
         _editNibble = 0;
 
         // Centre the match's first byte, reusing GoTo's row alignment.
-        ulong aligned = lo - (lo % BytesPerRow);
+        ulong aligned = RowStart(lo);
         ulong back = (ulong)(Math.Max(0, VisibleRows / 2) * BytesPerRow);
-        _topAddress = aligned > _image.MinVa + back ? aligned - back : _image.MinVa;
+        _topAddress = aligned - _image.MinVa > back ? aligned - back : _image.MinVa;
+        _topAddress = Math.Min(_topAddress, MaxTopAddress());
 
         SyncScrollValue();
         _surface.InvalidateVisual();
@@ -327,6 +338,12 @@ public sealed class HexView : Grid
         SyncScrollValue();
     }
 
+    private ulong RowStart(ulong address)
+    {
+        if (_image is null || address <= _image.MinVa) return _image?.MinVa ?? 0;
+        return _image.MinVa + (address - _image.MinVa) / BytesPerRow * BytesPerRow;
+    }
+
     private void SyncScrollValue()
     {
         if (_image is null) return;
@@ -336,7 +353,9 @@ public sealed class HexView : Grid
     private void OnScroll(object sender, ScrollEventArgs e)
     {
         if (_image is null) return;
-        ulong row = (ulong)Math.Max(0, e.NewValue);
+        ulong maxTop = MaxTopAddress();
+        ulong maxRows = (maxTop - _image.MinVa) / BytesPerRow;
+        ulong row = (ulong)Math.Clamp(e.NewValue, 0, (double)maxRows);
         _topAddress = _image.MinVa + row * BytesPerRow;
         _surface.InvalidateVisual();
     }
@@ -344,12 +363,23 @@ public sealed class HexView : Grid
     private void ScrollByRows(int rows)
     {
         if (_image is null) return;
-        long delta = (long)rows * BytesPerRow;
-        long next = (long)_topAddress + delta;
-        if (next < (long)_image.MinVa) next = (long)_image.MinVa;
-        _topAddress = (ulong)next;
+        ulong amount = checked((ulong)Math.Abs((long)rows) * BytesPerRow);
+        ulong maxTop = MaxTopAddress();
+        if (rows < 0)
+            _topAddress -= Math.Min(_topAddress - _image.MinVa, amount);
+        else
+            _topAddress += Math.Min(maxTop - _topAddress, amount);
         SyncScrollValue();
         _surface.InvalidateVisual();
+    }
+
+    private ulong MaxTopAddress()
+    {
+        if (_image is null) return 0;
+        ulong span = checked((ulong)VisibleRows * BytesPerRow);
+        if (_image.MaxVa <= _image.MinVa || _image.MaxVa - _image.MinVa <= span) return _image.MinVa;
+        ulong top = _image.MaxVa - span;
+        return _image.MinVa + (top - _image.MinVa) / BytesPerRow * BytesPerRow;
     }
 
     private int AddrDigits => _image is { Bitness: 64 } ? 12 : 8;
@@ -394,9 +424,19 @@ public sealed class HexView : Grid
     private void MoveCaret(long delta, bool extend = false)
     {
         if (_image is null) return;
+        if (_image.MaxVa <= _image.MinVa) return;
         if (!_hasSelection) { _selAnchor = _selCaret = _topAddress; _hasSelection = true; }
-        long n = Math.Clamp((long)_selCaret + delta, (long)_image.MinVa, (long)_image.MaxVa - 1);
-        _selCaret = (ulong)n;
+        if (delta < 0)
+        {
+            ulong amount = (ulong)(-(delta + 1)) + 1;
+            _selCaret -= Math.Min(_selCaret - _image.MinVa, amount);
+        }
+        else
+        {
+            ulong amount = (ulong)delta;
+            ulong last = _image.MaxVa - 1;
+            _selCaret += Math.Min(last - _selCaret, amount);
+        }
         if (!extend) _selAnchor = _selCaret;
         _editNibble = 0;
         EnsureCaretVisible();
@@ -408,17 +448,20 @@ public sealed class HexView : Grid
     {
         if (_image is null) return;
         if (_selCaret < _topAddress)
-            _topAddress = _selCaret - _selCaret % BytesPerRow;
+            _topAddress = RowStart(_selCaret);
         else
         {
-            ulong lastVisible = _topAddress + (ulong)(VisibleRows * BytesPerRow) - 1;
+            ulong visibleSpan = checked((ulong)VisibleRows * BytesPerRow) - 1;
+            ulong last = _image.MaxVa > _image.MinVa ? _image.MaxVa - 1 : _image.MinVa;
+            ulong lastVisible = visibleSpan > last - _topAddress ? last : _topAddress + visibleSpan;
             if (_selCaret > lastVisible)
             {
-                ulong caretRow = _selCaret - _selCaret % BytesPerRow;
+                ulong caretRow = RowStart(_selCaret);
                 ulong span = (ulong)((VisibleRows - 1) * BytesPerRow);
-                _topAddress = caretRow > _image.MinVa + span ? caretRow - span : _image.MinVa;
+                _topAddress = caretRow - _image.MinVa > span ? caretRow - span : _image.MinVa;
             }
         }
+        _topAddress = Math.Min(_topAddress, MaxTopAddress());
         SyncScrollValue();
     }
 

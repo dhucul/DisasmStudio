@@ -96,13 +96,19 @@ internal sealed class RangeDecoder
     public uint Code;
     public Stream Stream;
 
+    public byte ReadRequiredByte()
+    {
+        int value = Stream.ReadByte();
+        return value < 0 ? throw new EndOfStreamException("Truncated LZMA stream.") : (byte)value;
+    }
+
     public void Init(Stream stream)
     {
         Stream = stream;
         Code = 0;
         Range = 0xFFFFFFFF;
         for (int i = 0; i < 5; i++)
-            Code = (Code << 8) | (byte)Stream.ReadByte();
+            Code = (Code << 8) | ReadRequiredByte();
     }
 
     public void ReleaseStream() => Stream = null;
@@ -120,7 +126,7 @@ internal sealed class RangeDecoder
             result = (result << 1) | (1 - t);
             if (range < kTopValue)
             {
-                code = (code << 8) | (byte)Stream.ReadByte();
+                code = (code << 8) | ReadRequiredByte();
                 range <<= 8;
             }
         }
@@ -148,7 +154,7 @@ internal struct BitDecoder
             Prob += (kBitModelTotal - Prob) >> kNumMoveBits;
             if (rangeDecoder.Range < RangeDecoder.kTopValue)
             {
-                rangeDecoder.Code = (rangeDecoder.Code << 8) | (byte)rangeDecoder.Stream.ReadByte();
+                rangeDecoder.Code = (rangeDecoder.Code << 8) | rangeDecoder.ReadRequiredByte();
                 rangeDecoder.Range <<= 8;
             }
             return 0;
@@ -158,7 +164,7 @@ internal struct BitDecoder
         Prob -= Prob >> kNumMoveBits;
         if (rangeDecoder.Range < RangeDecoder.kTopValue)
         {
-            rangeDecoder.Code = (rangeDecoder.Code << 8) | (byte)rangeDecoder.Stream.ReadByte();
+            rangeDecoder.Code = (rangeDecoder.Code << 8) | rangeDecoder.ReadRequiredByte();
             rangeDecoder.Range <<= 8;
         }
         return 1;
@@ -294,6 +300,9 @@ internal sealed class OutWindow
 
 internal sealed class LzmaDecoder
 {
+    private const uint MaxDictionarySize = 256u * 1024 * 1024;
+    private const ulong MaxUnknownOutputSize = 512UL * 1024 * 1024;
+
     private sealed class LenDecoder
     {
         private BitDecoder m_Choice = new();
@@ -447,6 +456,8 @@ internal sealed class LzmaDecoder
 
     private void SetDictionarySize(uint dictionarySize)
     {
+        if (dictionarySize > MaxDictionarySize)
+            throw new InvalidDataException($"LZMA dictionary exceeds the {MaxDictionarySize >> 20} MiB safety limit.");
         if (m_DictionarySize != dictionarySize)
         {
             m_DictionarySize = dictionarySize;
@@ -512,7 +523,8 @@ internal sealed class LzmaDecoder
         uint rep0 = 0, rep1 = 0, rep2 = 0, rep3 = 0;
 
         ulong nowPos64 = 0;
-        ulong outSize64 = (ulong)outSize;
+        bool sizeKnown = outSize >= 0;
+        ulong outSize64 = sizeKnown ? (ulong)outSize : MaxUnknownOutputSize;
         if (nowPos64 < outSize64)
         {
             if (m_IsMatchDecoders[state.Index << LzmaBase.kNumPosStatesBitsMax].Decode(m_RangeDecoder) != 0)
@@ -603,10 +615,14 @@ internal sealed class LzmaDecoder
                         break;   // end-of-stream marker
                     throw new InvalidDataException("LZMA: corrupt stream (distance out of range).");
                 }
+                if (sizeKnown && len > outSize64 - nowPos64)
+                    throw new InvalidDataException("LZMA output exceeds its declared size.");
                 m_OutWindow.CopyBlock(rep0, len);
                 nowPos64 += len;
             }
         }
+        if (!sizeKnown && nowPos64 == MaxUnknownOutputSize)
+            throw new InvalidDataException($"LZMA output exceeds the {MaxUnknownOutputSize >> 20} MiB safety limit or has no end marker.");
         m_OutWindow.Flush();
         m_OutWindow.ReleaseStream();
         m_RangeDecoder.ReleaseStream();

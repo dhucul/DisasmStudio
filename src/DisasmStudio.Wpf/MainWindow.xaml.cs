@@ -184,7 +184,7 @@ public partial class MainWindow : Window
         Linear.IsFunctionStart = va => _result?.FunctionByVa.ContainsKey(va) == true;
         // Bookmarks are static-VA markup; show them even while the live view is up (read-only). `va - LiveSlide`
         // maps the shown (possibly live) address back to static space, where the session markup is keyed.
-        Linear.IsBookmarkAt = va => _markup.Bookmarks.Contains(va - LiveSlide);
+        Linear.IsBookmarkAt = va => _markup.Bookmarks.Contains(ToStatic(va));
         Hex.Edited += OnHexEdited;
         Hex.RenameRequested += OnRename;
         Hex.CommentRequested += OnSetComment;
@@ -235,11 +235,11 @@ public partial class MainWindow : Window
         // Gutter dots come from the user breakpoint set (not the raw engine list, which during a capture also
         // holds internal capture breakpoints). `va - LiveSlide` maps the shown address back to its static VA —
         // LiveSlide is 0 unless the listing is showing live addresses — so this is correct before and during a run.
-        Linear.IsBreakpointAt = va => _pendingBreakpoints.ContainsKey(va - LiveSlide);
-        Linear.IsHardwareBreakpointAt = va => _pendingBreakpoints.TryGetValue(va - LiveSlide, out var def) && def.Hardware;
+        Linear.IsBreakpointAt = va => _pendingBreakpoints.ContainsKey(ToStatic(va));
+        Linear.IsHardwareBreakpointAt = va => _pendingBreakpoints.TryGetValue(ToStatic(va), out var def) && def.Hardware;
         // Coverage tint: _coveredInstrs holds executed instruction VAs in static space (like the breakpoint set),
         // so `va - LiveSlide` maps the shown (live) address back to it during a run and matches directly after.
-        Linear.IsInstrHit = va => _coveredInstrs.Count > 0 && _coveredInstrs.Contains(va - LiveSlide);
+        Linear.IsInstrHit = va => _coveredInstrs.Count > 0 && _coveredInstrs.Contains(ToStatic(va));
         Graph.IsInstrHit = Linear.IsInstrHit;   // the graph shares the same trace overlay (same VA space)
         // The graph shares the linear view's breakpoint handler and predicates (same VA space), so a breakpoint
         // set from either view shows in both.
@@ -508,7 +508,25 @@ public partial class MainWindow : Window
 
     /// <summary>ASLR slide of the live debuggee relative to the static image (live base − static base), or 0
     /// when the view isn't showing live addresses.</summary>
-    private ulong LiveSlide => _dbgViewLive && _dbg?.LiveResult is { } lr && _image is not null ? lr.Image.ImageBase - _image.ImageBase : 0;
+    private long LiveSlide
+    {
+        get
+        {
+            if (!_dbgViewLive || _dbg?.LiveResult is not { } lr || _image is null) return 0;
+            ulong live = lr.Image.ImageBase, stat = _image.ImageBase;
+            if (live >= stat) return checked((long)(live - stat));
+            ulong delta = stat - live;
+            return delta == 1UL << 63 ? long.MinValue : checked(-(long)delta);
+        }
+    }
+
+    private ulong ToStatic(ulong live) => LiveSlide >= 0
+        ? checked(live - (ulong)LiveSlide)
+        : checked(live + (ulong)(-(LiveSlide + 1)) + 1);
+
+    private ulong ToLive(ulong stat) => LiveSlide >= 0
+        ? checked(stat + (ulong)LiveSlide)
+        : checked(stat - ((ulong)(-(LiveSlide + 1)) + 1));
 
     /// <summary>The decoder to lift/emulate/export with: the live one while the view shows a running process
     /// (reads its memory), else null so the default file-backed decoder is used. Same rule as the decompiler view.</summary>
@@ -521,7 +539,7 @@ public partial class MainWindow : Window
     {
         // A software memory (range) breakpoint isn't a single-VA int3 — remove it through its own engine path
         // (the Delete key / gutter toggle both route here). Keyed by static VA like the rest of the set.
-        ulong memSva = va - LiveSlide;
+        ulong memSva = ToStatic(va);
         if (_pendingBreakpoints.TryGetValue(memSva, out var memDef) && memDef.Memory)
         {
             _pendingBreakpoints.Remove(memSva);
@@ -537,7 +555,7 @@ public partial class MainWindow : Window
         if (_dbgViewLive && _dbg is { } d)
         {
             d.ToggleBreakpoint(va);                       // va is a live, rebased VA (plain software bp)
-            ulong sva = va - LiveSlide;                   // mirror as a static VA so it persists across runs
+            ulong sva = ToStatic(va);                   // mirror as a static VA so it persists across runs
             if (d.HasBreakpoint(va)) _pendingBreakpoints[sva] = new BpDef(); else _pendingBreakpoints.Remove(sva);
         }
         else if (!_pendingBreakpoints.Remove(va))         // pre-run / before the first stop: va is a static VA
@@ -556,9 +574,9 @@ public partial class MainWindow : Window
     private void OnHardwareBreakpointRequest(ulong va)
     {
         if (Dialogs.AskHardwareBreakpoint(this) is not { } hw) return;
-        ulong sva = va - LiveSlide;
+        ulong sva = ToStatic(va);
         var def = _pendingBreakpoints.TryGetValue(sva, out var existing) ? existing : new BpDef();
-        def.Hardware = true; def.Kind = hw.Kind; def.Size = hw.Size;
+        def.Memory = false; def.Hardware = true; def.Kind = hw.Kind; def.Size = hw.Size;
         _pendingBreakpoints[sva] = def;
         MarkSessionDirty();
         if (_dbgViewLive && _dbg is { } d)
@@ -579,14 +597,21 @@ public partial class MainWindow : Window
     /// module address) and, if a session is live, arms it on the process now via page protection.</summary>
     private void OnMemoryBreakpointRequested((ulong Lo, ulong Hi, MemAccess Access) w)
     {
-        ulong start = w.Lo, len = w.Hi - w.Lo + 1;
-        ulong sva = start - LiveSlide;
+        ulong start = w.Lo;
+        if (w.Hi < w.Lo || w.Hi - w.Lo >= int.MaxValue)
+        {
+            MessageBox.Show(this, "The memory breakpoint range is too large.", "Memory breakpoint",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        ulong len = w.Hi - w.Lo + 1;
+        ulong sva = ToStatic(start);
         var def = _pendingBreakpoints.TryGetValue(sva, out var existing) ? existing : new BpDef();
-        def.Memory = true; def.Hardware = false; def.MemAccess = w.Access; def.MemLength = (int)len;
+        def.Memory = true; def.Hardware = false; def.MemAccess = w.Access; def.MemLength = checked((int)len);
         _pendingBreakpoints[sva] = def;
         MarkSessionDirty();
         if (_dbgViewLive && _dbg is { } d)
-            d.Engine.SetMemoryBreakpoint(start, len, w.Access);
+            d.Engine.TrySetMemoryBreakpoint(start, len, w.Access);
         Linear.Refresh();
         Graph.Refresh();
         Decompiler.Refresh();
@@ -600,7 +625,7 @@ public partial class MainWindow : Window
     /// (right-click → Edit breakpoint…, or the side list's Edit menu). No-op if there is no breakpoint there.</summary>
     private void OnEditBreakpointRequest(ulong va)
     {
-        ulong sva = va - LiveSlide;
+        ulong sva = ToStatic(va);
         if (!_pendingBreakpoints.TryGetValue(sva, out var def)) return;
         if (Dialogs.AskBreakpointEdit(this, def) is not { } updated) return;
         _pendingBreakpoints[sva] = updated;
@@ -620,13 +645,13 @@ public partial class MainWindow : Window
     private void ApplyPendingBreakpoints()
     {
         if (_dbg is null || _pendingBreakpoints.Count == 0) return;
-        ulong slide = LiveSlide;
         foreach (var (sva, def) in _pendingBreakpoints)
         {
-            ulong va = sva + slide;
+            ulong va = ToLive(sva);
             if (def.Memory)   // software memory (range) breakpoint — page protection, no int3 / condition
             {
-                if (def.Enabled) _dbg.Engine.SetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
+                if (def.Enabled && def.MemLength > 0)
+                    _dbg.Engine.TrySetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
                 continue;
             }
             if (def.Hardware) _dbg.Engine.SetHardwareBreakpoint(va, def.Kind, def.Size);
@@ -644,13 +669,12 @@ public partial class MainWindow : Window
     private void RefreshBreakpointList()
     {
         if (BreakpointList is null) return;   // not yet built (called during construction)
-        ulong slide = LiveSlide;              // 0 unless the listing is showing live addresses
         var names = _dbgViewLive ? _dbg?.LiveResult : _result;
         BreakpointList.ItemsSource = _pendingBreakpoints
             .OrderBy(kv => kv.Key)
             .Select(kv =>
             {
-                ulong va = kv.Key + slide;
+                ulong va = ToLive(kv.Key);
                 string name = names?.NameFor(va) ?? "";
                 string extra = kv.Value.Describe();
                 string label = extra.Length == 0 ? name
@@ -673,36 +697,35 @@ public partial class MainWindow : Window
     /// <summary>Rename the symbol at <paramref name="va"/> (blank resets it to the machine name).</summary>
     private void OnRename(ulong va)
     {
-        if (_result is null || va == 0) return;
+        if (_result is null) return;
         string current = _result.NameFor(va) ?? "";
         string? name = Dialogs.AskText(this, "Rename symbol", $"New name for {va:X} (blank to reset):", current);
         if (name is null) return;   // cancelled
         _result.SetName(va, name);   // update the displayed result (static or live) immediately
-        MirrorToStaticMarkup(m => { ulong sva = va - LiveSlide; if (name.Length == 0) m.Names.Remove(sva); else m.Names[sva] = name; });
+        MirrorToStaticMarkup(m => { ulong sva = ToStatic(va); if (name.Length == 0) m.Names.Remove(sva); else m.Names[sva] = name; });
         MarkSessionDirty();
         RefreshAfterMarkup(namesChanged: true);
-        StatusText.Text = name.Length == 0 ? $"Reset name at {va - LiveSlide:X}" : $"Renamed {va - LiveSlide:X} → {name}";
+        StatusText.Text = name.Length == 0 ? $"Reset name at {ToStatic(va):X}" : $"Renamed {ToStatic(va):X} → {name}";
     }
 
     /// <summary>Set (or, when blank, clear) an inline comment at <paramref name="va"/>.</summary>
     private void OnSetComment(ulong va)
     {
-        if (_result is null || va == 0) return;
+        if (_result is null) return;
         string current = _result.Comments.TryGetValue(va, out var c) ? c : "";
         string? text = Dialogs.AskText(this, "Set comment", $"Comment at {va:X} (blank to clear):", current, multiline: true);
         if (text is null) return;
         _result.SetComment(va, text);
-        MirrorToStaticMarkup(m => { ulong sva = va - LiveSlide; if (text.Length == 0) m.Comments.Remove(sva); else m.Comments[sva] = text; });
+        MirrorToStaticMarkup(m => { ulong sva = ToStatic(va); if (text.Length == 0) m.Comments.Remove(sva); else m.Comments[sva] = text; });
         MarkSessionDirty();
         RefreshAfterMarkup(namesChanged: false);
-        StatusText.Text = text.Length == 0 ? $"Cleared comment at {va - LiveSlide:X}" : $"Commented {va - LiveSlide:X}";
+        StatusText.Text = text.Length == 0 ? $"Cleared comment at {ToStatic(va):X}" : $"Commented {ToStatic(va):X}";
     }
 
     /// <summary>Toggle a bookmark at <paramref name="va"/> (keyed in static space so it persists across runs).</summary>
     private void OnToggleBookmark(ulong va)
     {
-        if (va == 0) return;
-        ulong sva = va - LiveSlide;
+        ulong sva = ToStatic(va);
         bool now = _markup.Bookmarks.Add(sva) || !_markup.Bookmarks.Remove(sva);
         MarkSessionDirty();
         RefreshBookmarkList();
@@ -717,7 +740,7 @@ public partial class MainWindow : Window
     private bool? JumpMarkAt(ulong va)
     {
         if (_curJump is { } cj && cj.Va == va) return cj.Taken;                 // real flags win at the current IP
-        return _jumpAssume.TryGetValue(va - LiveSlide, out var v) ? v : (bool?)null;
+        return _jumpAssume.TryGetValue(ToStatic(va), out var v) ? v : (bool?)null;
     }
 
     /// <summary>Re-evaluate, from the real live flags, whether the conditional jump at the current IP will be taken,
@@ -737,7 +760,6 @@ public partial class MainWindow : Window
     /// a static what-if assumption. Either way the branch line recolours green (taken) / red (not-taken).</summary>
     private void OnToggleJump(ulong va)
     {
-        if (va == 0) return;
         // Real flag flip — only valid on the instruction we're stopped at (the one whose flags are live).
         if (_dbg is { IsStopped: true } && va == _dbg.CurrentIp && _dbg.LiveDecoder is { } dec
             && dec.TryDecodeAt(va, out var i) && JccEval.CanToggle(i.ConditionCode)
@@ -751,7 +773,7 @@ public partial class MainWindow : Window
             return;
         }
         // Static what-if: flip this jump's assumed direction (first toggle → taken/green).
-        ulong sva = va - LiveSlide;
+        ulong sva = ToStatic(va);
         bool taken = _jumpAssume.TryGetValue(sva, out var cur) ? !cur : true;
         _jumpAssume[sva] = taken;
         MarkSessionDirty();
@@ -765,10 +787,10 @@ public partial class MainWindow : Window
     /// the undo stack so Ctrl+Z / ↶ Undo removes it. Then opens the decompiler on the new function.</summary>
     private void OnCreateFunction(ulong va)
     {
-        if (_result is null || va == 0) return;
-        if (_result.FunctionByVa.ContainsKey(va)) { StatusText.Text = $"{va - LiveSlide:X} is already a function"; return; }
+        if (_result is null) return;
+        if (_result.FunctionByVa.ContainsKey(va)) { StatusText.Text = $"{ToStatic(va):X} is already a function"; return; }
         var (fn, addedName) = _result.AddFunction(va);
-        ulong sva = va - LiveSlide;                                     // markup is keyed in static space (like bookmarks)
+        ulong sva = ToStatic(va);                                     // markup is keyed in static space (like bookmarks)
         _markup.Functions.Add(sva);
         _funcStarts = _result.Functions.Select(f => f.Va).ToArray();    // AddFunction inserts sorted, so this stays ordered
         RefreshAfterMarkup(namesChanged: true);                        // rebuild label lines, function rows, search index, decompiler cache
@@ -817,13 +839,12 @@ public partial class MainWindow : Window
     private void RefreshBookmarkList()
     {
         if (BookmarkList is null) return;   // not yet built (called during construction)
-        ulong slide = LiveSlide;
         var names = _dbgViewLive ? _dbg?.LiveResult : _result;
         BookmarkList.ItemsSource = _markup.Bookmarks
             .OrderBy(v => v)
             .Select(sva =>
             {
-                ulong va = sva + slide;
+                ulong va = ToLive(sva);
                 string name = names?.NameFor(va) ?? "";
                 string cmt = _markup.Comments.TryGetValue(sva, out var c) ? c : "";
                 string label = name.Length > 0 && cmt.Length > 0 ? $"{name}   ; {cmt}" : name.Length > 0 ? name : cmt;
@@ -881,7 +902,7 @@ public partial class MainWindow : Window
     private void ApplyEmulationComments(EmulationResult er)
     {
         if (_result is null) return;
-        void Set(ulong v, string text) { _result!.SetComment(v, text); MirrorToStaticMarkup(m => m.Comments[v - LiveSlide] = text); }
+        void Set(ulong v, string text) { _result!.SetComment(v, text); MirrorToStaticMarkup(m => m.Comments[ToStatic(v)] = text); }
         foreach (var v in er.Values.Values) Set(v.Va, $"= 0x{(ulong)v.Value:X} (emulated)");
         foreach (var b in er.Branches.DistinctBy(b => b.Va))
             Set(b.Va, b.Taken ? "opaque: always taken (emulated)" : "opaque: never taken (emulated)");
@@ -1329,7 +1350,7 @@ public partial class MainWindow : Window
     /// context-menu "Enable / disable".</summary>
     private void ToggleBreakpointEnabled(ulong va)
     {
-        if (_pendingBreakpoints.TryGetValue(va - LiveSlide, out var def)) SetBreakpointEnabled(va, !def.Enabled);
+        if (_pendingBreakpoints.TryGetValue(ToStatic(va), out var def)) SetBreakpointEnabled(va, !def.Enabled);
     }
 
     /// <summary>Enable / disable the breakpoint at <paramref name="va"/> (a live VA while debugging, else static)
@@ -1338,7 +1359,7 @@ public partial class MainWindow : Window
     /// <c>ConfigureBreakpoint</c> (ArmAddr / DisarmAddr / Dr reprogram).</summary>
     private void SetBreakpointEnabled(ulong va, bool enabled)
     {
-        ulong sva = va - LiveSlide;
+        ulong sva = ToStatic(va);
         if (!_pendingBreakpoints.TryGetValue(sva, out var def)) return;
         def.Enabled = enabled;
         MarkSessionDirty();
@@ -1346,7 +1367,8 @@ public partial class MainWindow : Window
         {
             if (def.Memory)
             {
-                if (enabled) d.Engine.SetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
+                if (enabled && def.MemLength > 0)
+                    d.Engine.TrySetMemoryBreakpoint(va, (ulong)def.MemLength, def.MemAccess);
                 else d.Engine.RemoveMemoryBreakpoint(va);
             }
             else d.Engine.ConfigureBreakpoint(va, def.Condition, def.HitMode, def.HitTarget, enabled);
@@ -1404,7 +1426,12 @@ public partial class MainWindow : Window
         var fn = FindFunction(ip);
         if (fn is not null)
         {
-            try { CfgBuilder.Build(_result.Image, fn, null, NeutralDisasm.For(_result.Image, _result.Names, _dbg.LiveDecoder)); } catch { /* fall through to Step Out */ }
+            try
+            {
+                using var cfgDis = NeutralDisasm.For(_result.Image, _result.Names, _dbg.LiveDecoder);
+                CfgBuilder.Build(_result.Image, fn, null, cfgDis);
+            }
+            catch { /* fall through to Step Out */ }
             // FindFunction returns the nearest preceding function start; only trust it if the IP is actually
             // inside one of its blocks — otherwise (an unanalyzed gap) we'd run to an unrelated function's rets.
             bool inFn = fn.Blocks.Any(b => ip >= b.Start && ip < b.End);
@@ -1443,7 +1470,7 @@ public partial class MainWindow : Window
             _dbg.StartTrace(live.Image.MinVa, live.Image.MaxVa);
             // Seed with the instruction we're stopped on so it lights up immediately (it shows amber as the
             // current IP until we step off it).
-            if (_coveredInstrs.Add(_dbg.CurrentIp - LiveSlide))
+            if (_coveredInstrs.Add(ToStatic(_dbg.CurrentIp)))
             {
                 ClearCoverageBtn.IsEnabled = true;
                 MarkSessionDirty();
@@ -1488,9 +1515,8 @@ public partial class MainWindow : Window
     private void HarvestCoverage()
     {
         if (_dbg is null) return;
-        ulong slide = LiveSlide;
         int before = _coveredInstrs.Count;
-        foreach (ulong liveVa in _dbg.CoveredPoints()) _coveredInstrs.Add(liveVa - slide);
+        foreach (ulong liveVa in _dbg.CoveredPoints()) _coveredInstrs.Add(ToStatic(liveVa));
         if (_coveredInstrs.Count != before)
         {
             MarkSessionDirty();
@@ -2104,7 +2130,7 @@ public partial class MainWindow : Window
         {
             // Record the instruction we stopped on, so a Step (Into/Over/Out) or a breakpoint stop contributes to
             // the trace too — not only the continuous single-step a Continue drives. Stored in static space.
-            bool added = _coveredInstrs.Add(_dbg.CurrentIp - LiveSlide);
+            bool added = _coveredInstrs.Add(ToStatic(_dbg.CurrentIp));
             if (added) MarkSessionDirty();
             HarvestCoverage();   // repaints (Refresh) when it adds anything
             if (added) { ClearCoverageBtn.IsEnabled = true; Linear.Refresh(); Decompiler.Refresh(); }   // ensure the stepped row paints
@@ -2146,8 +2172,8 @@ public partial class MainWindow : Window
         _coverageEnabled = false;
         CoverageToggle.IsEnabled = false;
         if (CoverageToggle.IsChecked == true) CoverageToggle.IsChecked = false;   // programmatic: does not fire Click
-        Linear.SetCurrentIp(0);
-        Decompiler.SetCurrentIp(0);   // clear the decompiler's amber IP band too
+        Linear.SetCurrentIp(null);
+        Decompiler.SetCurrentIp(null);   // clear the decompiler's amber IP band too
         Decompiler.LiveDecoder = null;   // back to the static file image; the next decompile uses the file decoder
         _curJump = null;   // no live flags now — drop the current-IP jump colour (static what-if marks persist)
         Hex.WriteByteAt = null;
@@ -2213,6 +2239,12 @@ public partial class MainWindow : Window
     private void OnPatchInstruction(ulong va)
     {
         if (_image is null) return;
+        if (_image.IsArm || _image.Is8051)
+        {
+            MessageBox.Show(this, "Instruction assembly and patching is currently available only for x86/x64.",
+                "Patch instruction", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         var dis = new Disassembler(_image);
         if (!dis.TryDecodeAt(va, out var ins) || ins.Length == 0) return;
 
@@ -2316,6 +2348,7 @@ public partial class MainWindow : Window
     private void RepairIndex(ulong changeStart, ulong changeEnd)
     {
         if (_result is null || _image is null) return;
+        if (_image.IsArm || _image.Is8051) { Linear.Refresh(); Hex.InvalidateView(); return; }
         var idx = _result.Linear;
         long line = idx.IndexOf(changeStart);
         if (idx.VaAt(line) > changeStart && line > 0) line--;
@@ -2371,7 +2404,7 @@ public partial class MainWindow : Window
                 _changeStack.Pop();
                 // Remove from the displayed result at its shown VA — the static VA rebased by the current slide,
                 // so this is correct whether or not a debug session is active now vs. when it was created.
-                _result?.RemoveFunction(c.StaticVa + LiveSlide, c.AddedName);
+                _result?.RemoveFunction(ToLive(c.StaticVa), c.AddedName);
                 _markup.Functions.Remove(c.StaticVa);
                 if (c.AddedName) _markup.Names.Remove(c.StaticVa);   // drop any rename left on the address we created
                 if (_result is not null) _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
@@ -2584,7 +2617,8 @@ public partial class MainWindow : Window
     {
         _pendingBreakpoints.Clear();
         if (proj.Breakpoints is { Count: > 0 })
-            foreach (var (va, def) in proj.Breakpoints) _pendingBreakpoints[va] = def;
+            foreach (var (va, def) in proj.Breakpoints)
+                if (!def.Memory || def.MemLength > 0) _pendingBreakpoints[va] = def;
 
         _coveredInstrs.Clear();
         if (proj.Trace is { Count: > 0 })
@@ -2737,8 +2771,7 @@ public partial class MainWindow : Window
         {
             await Task.Run(() =>
             {
-                using var sw = new StreamWriter(path);
-                body(sw, prog, CancellationToken.None);
+                AtomicFile.WriteText(path, sw => body(sw, prog, CancellationToken.None));
             });
             StatusText.Text = $"Saved {what} to {path}";
         }
@@ -2759,8 +2792,7 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog(this) != true) return;
         try
         {
-            using var sw = new StreamWriter(dlg.FileName);
-            SourceExporter.WriteAsmFunction(sw, _result, fn);
+            AtomicFile.WriteText(dlg.FileName, sw => SourceExporter.WriteAsmFunction(sw, _result, fn));
             StatusText.Text = $"Saved {fn.Name} to {dlg.FileName}";
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error); }
@@ -2779,9 +2811,11 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog(this) != true) return;
         try
         {
-            using var sw = new StreamWriter(dlg.FileName);
-            if (dlg.FilterIndex == 2) SourceExporter.WriteCompilableCFunction(sw, _result, fn, AnalysisDecoder);
-            else SourceExporter.WriteCFunction(sw, _result, fn, AnalysisDecoder);
+            AtomicFile.WriteText(dlg.FileName, sw =>
+            {
+                if (dlg.FilterIndex == 2) SourceExporter.WriteCompilableCFunction(sw, _result, fn, AnalysisDecoder);
+                else SourceExporter.WriteCFunction(sw, _result, fn, AnalysisDecoder);
+            });
             StatusText.Text = $"Saved {fn.Name} to {dlg.FileName}";
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error); }
@@ -3049,6 +3083,12 @@ public partial class MainWindow : Window
         base.OnClosed(e);
         CancelStaticStringRefresh();
         _cts?.Cancel();
+        try
+        {
+            _dbg?.Engine.Stop();
+            _dbg?.Engine.WaitForCompletion(3000);
+        }
+        catch { }
         try { _mdbg?.Dispose(); } catch { }   // stop the out-of-process managed-debug host (+ its debuggee) cleanly
         _managed?.Dispose();
         (_image as IDisposable)?.Dispose();
@@ -3356,8 +3396,8 @@ public partial class MainWindow : Window
         // Land on whatever instruction is highlighted in the linear listing (its caret), falling back to the
         // navigation address — so switching to Graph/Decompiler syncs to your current selection, and (for the
         // graph) scrolls it into view, not just to the last explicit jump.
-        ulong va = Linear.CaretVa != 0 ? Linear.CaretVa : _nav.Current ?? 0;
-        if (va == 0) return;
+        ulong? target = Linear.HasCaretAddress ? Linear.CaretVa : _nav.Current;
+        if (target is not ulong va) return;
         if (CenterTabs.SelectedIndex == 1) OpenGraph(va, center: true);
         else if (CenterTabs.SelectedIndex == 2) HexGoTo(va);   // land on the current caret, whole instruction highlighted
         else if (CenterTabs.SelectedIndex == 3) { OpenDecompiler(va); if (_dbg is { IsStopped: true }) Decompiler.SetCurrentIp(_dbg.CurrentIp); }
@@ -3367,14 +3407,7 @@ public partial class MainWindow : Window
     {
         if (_result is null || _funcStarts.Length == 0) return null;
         if (va < _result.Image.MinVa || va >= _result.Image.MaxVa) return null;   // outside the analyzed image (e.g. a foreign module during debug)
-        int lo = 0, hi = _funcStarts.Length - 1, best = -1;
-        while (lo <= hi)
-        {
-            int mid = (lo + hi) >> 1;
-            if (_funcStarts[mid] <= va) { best = mid; lo = mid + 1; }
-            else hi = mid - 1;
-        }
-        return best < 0 ? null : _result.FunctionByVa[_funcStarts[best]];
+        return _result.FunctionContaining(va);
     }
 
     // ---- toolbar ----
@@ -3702,6 +3735,16 @@ public partial class MainWindow : Window
             UpdateFindHits();   // reflect any sites already recorded by a running/earlier trace
         }
         catch (OperationCanceledException) { /* superseded by a newer search */ }
+        catch (Exception ex)
+        {
+            FindInsnHeader.Text = "search failed";
+            StatusText.Text = ex.Message;
+        }
+        finally
+        {
+            if (ReferenceEquals(_findInsnCts, cts)) _findInsnCts = null;
+            cts.Dispose();
+        }
     }
 
     /// <summary>Decode+format every instruction line through the architecture-neutral seam (x86/x64/ARM/8051)
@@ -3710,8 +3753,7 @@ public partial class MainWindow : Window
     private static (List<InsnMatchItem> Rows, bool Capped) ScanInstructions(AnalysisResult r, string needle, CancellationToken ct)
     {
         var rows = new List<InsnMatchItem>();
-        var dis = NeutralDisasm.For(r.Image, r.Names);
-        try
+        using var dis = NeutralDisasm.For(r.Image, r.Names);
         {
             long count = r.Linear.Count;
             for (long i = 0; i < count; i++)
@@ -3729,7 +3771,6 @@ public partial class MainWindow : Window
                 }
             }
         }
-        finally { (dis as IDisposable)?.Dispose(); }                      // the ARM (Capstone) decoder is disposable
         return (rows, false);
     }
 
@@ -3785,8 +3826,7 @@ public partial class MainWindow : Window
     private void ArmCoverageTrace()
     {
         if (_findTraceArmed || _dbg is not { IsStopped: true } || !_dbgViewLive || _pendingCoveragePoints.Count == 0) return;
-        ulong slide = LiveSlide;
-        _dbg.SetCoveragePoints(_pendingCoveragePoints.Select(v => v + slide));
+        _dbg.SetCoveragePoints(_pendingCoveragePoints.Select(ToLive));
         _findTraceArmed = true;
         ClearCoverageBtn.IsEnabled = true;
         StartCoverageTimer();
@@ -3883,7 +3923,7 @@ public partial class MainWindow : Window
 
     /// <summary>Dump the selected section's bytes to a file — the on-disk raw bytes when static, or the live
     /// process-memory bytes during a debug session (whichever image the views are showing). Patches are overlaid.</summary>
-    private void OnDumpSection(object sender, RoutedEventArgs e)
+    private async void OnDumpSection(object sender, RoutedEventArgs e)
     {
         if (MemMapGrid.SelectedItem is not MemoryMapItem m || m.IsGap) return;
         var img = _result?.Image ?? _image;
@@ -3891,9 +3931,8 @@ public partial class MainWindow : Window
         // The row carries only a VA — re-find the section; the HEADER row isn't in Sections, so fall back to it.
         var sec = img.SectionAt(m.Va) ?? (img.HeaderRegion is { } h && h.StartVa == m.Va ? h : null);
         if (sec is null) { StatusText.Text = $"No section at {m.Va:X}"; return; }
-        int count = sec.FileSize > 0 ? sec.FileSize : (int)Math.Min(sec.VirtualSize, (ulong)int.MaxValue);
+        long count = sec.FileSize > 0 ? sec.FileSize : (long)Math.Min(sec.VirtualSize, (ulong)int.MaxValue);
         if (count <= 0) { StatusText.Text = $"{sec.Name}: nothing to dump (no bytes)"; return; }
-        var bytes = img.ReadBytesAtVa(sec.StartVa, count);
         var baseName = Path.GetFileNameWithoutExtension(_image?.FilePath ?? "image");
         var dlg = new SaveFileDialog
         {
@@ -3902,7 +3941,13 @@ public partial class MainWindow : Window
             Filter = "Binary|*.bin|All files|*.*",
         };
         if (dlg.ShowDialog(this) != true) return;
-        try { File.WriteAllBytes(dlg.FileName, bytes); StatusText.Text = $"Dumped {sec.Name} ({bytes.Length} bytes) to {dlg.FileName}"; }
+        try
+        {
+            StatusText.Text = $"Dumping {sec.Name}…";
+            await AtomicFile.WriteAsync(dlg.FileName,
+                (stream, token) => CopyImageRangeAsync(img, sec.StartVa, count, stream, token));
+            StatusText.Text = $"Dumped {sec.Name} ({count:N0} bytes) to {dlg.FileName}";
+        }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Dump failed", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
@@ -3949,7 +3994,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        try { File.WriteAllBytes(dlg.FileName, res.Bytes); }
+        try { AtomicFile.WriteAllBytes(dlg.FileName, res.Bytes); }
         catch (Exception ex)
         {
             StatusText.Text = "Dump as PE failed.";
@@ -4063,10 +4108,13 @@ public partial class MainWindow : Window
             ResSaveBtn.IsEnabled = false;
             return;
         }
-        var bytes = _image.ReadBytesAtVa(d.DataVa, d.Size);
-        ResHeader.Text = $"{vm.Display}   VA {d.DataVa:X}   {bytes.Length:N0} B   cp{d.CodePage}";
+        const int previewLimit = 1 << 20;
+        int previewSize = Math.Min(Math.Max(0, d.Size), previewLimit);
+        var bytes = _image.ReadBytesAtVa(d.DataVa, previewSize);
+        string truncated = d.Size > previewLimit ? "   (preview limited to 1 MiB)" : "";
+        ResHeader.Text = $"{vm.Display}   VA {d.DataVa:X}   {d.Size:N0} B   cp{d.CodePage}{truncated}";
         ResPreviewHost.Content = ResourcePreview.Build(bytes, vm.TypeId);
-        ResSaveBtn.IsEnabled = bytes.Length > 0;
+        ResSaveBtn.IsEnabled = d.Size > 0;
     }
 
     private void OnResourceActivate(object sender, MouseButtonEventArgs e)
@@ -4074,13 +4122,18 @@ public partial class MainWindow : Window
         if (ResTree.SelectedItem is ResourceNodeVm { Data: { } d }) _nav.Navigate(d.DataVa);
     }
 
-    private void OnSaveResource(object sender, RoutedEventArgs e)
+    private async void OnSaveResource(object sender, RoutedEventArgs e)
     {
         if (_selectedResource is not { Data: { } d } vm || _image is null) return;
-        var bytes = _image.ReadBytesAtVa(d.DataVa, d.Size);
         var dlg = new SaveFileDialog { Title = "Save resource", FileName = SuggestResourceName(vm) };
         if (dlg.ShowDialog(this) != true) return;
-        try { File.WriteAllBytes(dlg.FileName, bytes); StatusText.Text = $"Saved resource to {dlg.FileName}"; }
+        try
+        {
+            StatusText.Text = $"Saving resource ({d.Size:N0} bytes)…";
+            await AtomicFile.WriteAsync(dlg.FileName,
+                (stream, token) => CopyImageRangeAsync(_image, d.DataVa, d.Size, stream, token));
+            StatusText.Text = $"Saved resource to {dlg.FileName}";
+        }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
@@ -4178,45 +4231,73 @@ public partial class MainWindow : Window
     private void OnNetResourceActivate(object sender, MouseButtonEventArgs e) => SaveSelectedManagedResource();
     private void OnNetSaveResource(object sender, RoutedEventArgs e) => SaveSelectedManagedResource();
 
-    private void SaveSelectedManagedResource()
+    private async void SaveSelectedManagedResource()
     {
         if (NetResList.SelectedItem is not ManagedResourceEntry r) return;
         var dlg = new SaveFileDialog { Title = "Save resource", FileName = SafeResourceFileName(r.Name), Filter = "All files|*.*" };
         if (dlg.ShowDialog(this) != true) return;
-        try { File.WriteAllBytes(dlg.FileName, r.GetBytes()); StatusText.Text = $"Saved {dlg.FileName}"; }
+        try
+        {
+            StatusText.Text = $"Saving {r.Name}…";
+            await Task.Run(() => AtomicFile.WriteAllBytes(dlg.FileName, r.GetBytes()));
+            StatusText.Text = $"Saved {dlg.FileName}";
+        }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save failed", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
-    private void OnNetExtractAll(object sender, RoutedEventArgs e)
+    private async void OnNetExtractAll(object sender, RoutedEventArgs e)
     {
         if (_managed is not { } asm || asm.Resources.Count == 0) return;
         var dlg = new OpenFolderDialog { Title = "Extract all embedded resources to…" };
         if (dlg.ShowDialog(this) != true) return;
-        int ok = 0, fail = 0;
-        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in asm.Resources)
+        var (ok, fail) = await Task.Run(() =>
         {
-            try
+            int ok = 0, fail = 0;
+            var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in asm.Resources)
             {
-                var bytes = r.GetBytes();
-                if (bytes.Length == 0) continue;
-                string safe = SafeResourceFileName(r.Name);
-                string stem = Path.GetFileNameWithoutExtension(safe);
-                string ext = Path.GetExtension(safe);
-                string candidate = safe;
-                for (int suffix = 2;
-                     usedNames.Contains(candidate) || File.Exists(Path.Combine(dlg.FolderName, candidate));
-                     suffix++)
-                    candidate = $"{stem}_{suffix}{ext}";
-                usedNames.Add(candidate);
-                string outputPath = Path.Combine(dlg.FolderName, candidate);
-                using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                output.Write(bytes);
-                ok++;
+                try
+                {
+                    var bytes = r.GetBytes();
+                    if (bytes.Length == 0) continue;
+                    string safe = SafeResourceFileName(r.Name);
+                    string stem = Path.GetFileNameWithoutExtension(safe);
+                    string ext = Path.GetExtension(safe);
+                    string candidate = safe;
+                    for (int suffix = 2;
+                         usedNames.Contains(candidate) || File.Exists(Path.Combine(dlg.FolderName, candidate));
+                         suffix++)
+                        candidate = $"{stem}_{suffix}{ext}";
+                    usedNames.Add(candidate);
+                    string outputPath = Path.Combine(dlg.FolderName, candidate);
+                    using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    output.Write(bytes);
+                    ok++;
+                }
+                catch { fail++; }
             }
-            catch { fail++; }
-        }
+            return (ok, fail);
+        });
         StatusText.Text = $"Extracted {ok} resource(s) to {dlg.FolderName}" + (fail > 0 ? $"  ({fail} failed)" : "");
+    }
+
+    private static async Task CopyImageRangeAsync(IBinaryImage image, ulong startVa, long count,
+        Stream destination, CancellationToken cancellationToken)
+    {
+        const int chunkSize = 1 << 20;
+        byte[] buffer = new byte[chunkSize];
+        ulong va = startVa;
+        long remaining = count;
+        while (remaining > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int take = (int)Math.Min(buffer.Length, remaining);
+            int read = image.ReadVa(va, buffer.AsSpan(0, take));
+            if (read <= 0) throw new IOException($"Image range is unreadable at 0x{va:X}.");
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            va = checked(va + (uint)read);
+            remaining -= read;
+        }
     }
 
     /// <summary>A filesystem-safe name for an extracted managed resource (which may be an inner "blob :: key").</summary>

@@ -150,6 +150,16 @@ public sealed class ProcessSnapshotImage : IBinaryImage
             segs.Add(new Seg(va, (int)start, (int)size, ch, name));
         }
         segs.Sort((x, y) => x.Va.CompareTo(y.Va));
+        for (int i = 1; i < segs.Count; i++)
+        {
+            var previous = segs[i - 1];
+            if (previous.Va + (ulong)previous.Size > segs[i].Va)
+                throw new BinaryFormatException("Process snapshot contains overlapping virtual-address segments.");
+        }
+        var byBacking = segs.OrderBy(s => s.Start).ToArray();
+        for (int i = 1; i < byBacking.Length; i++)
+            if ((long)byBacking[i - 1].Start + byBacking[i - 1].Size > byBacking[i].Start)
+                throw new BinaryFormatException("Process snapshot contains overlapping backing segments.");
         return new ProcessSnapshotImage(path, b, bitness, imageBase, entryVa, segs.ToArray());
     }
 

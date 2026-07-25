@@ -58,8 +58,6 @@ public sealed class IlEmulator
     private readonly EmulationResult _result = new();
 
     // x86-64 volatile (caller-saved) registers a call clobbers, by canonical name — conservative for other arches.
-    private static readonly HashSet<string> Volatile = ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"];
-
     private IlEmulator(IBinaryImage image, ArchModel model, EmulationOptions opts)
     {
         _image = image; _model = model; _opts = opts;
@@ -244,8 +242,20 @@ public sealed class IlEmulator
             case BinOp.Ror: { int s = (int)(rv & (w * 8 - 1)); ulong u = Zext(lv, w); int bits = w * 8; res = (long)(bits == 64 ? (u >> s) | (u << (64 - s == 64 ? 0 : 64 - s)) : ((u >> s) | (u << (bits - s))) & ((1UL << bits) - 1)); break; }
             case BinOp.UDiv: { ulong d = Zext(rv, w); if (d == 0) return Val.Unknown; res = (long)(Zext(lv, w) / d); break; }
             case BinOp.UMod: { ulong d = Zext(rv, w); if (d == 0) return Val.Unknown; res = (long)(Zext(lv, w) % d); break; }
-            case BinOp.SDiv: { long d = Sext(rv, w); if (d == 0) return Val.Unknown; res = Sext(lv, w) / d; break; }
-            case BinOp.SMod: { long d = Sext(rv, w); if (d == 0) return Val.Unknown; res = Sext(lv, w) % d; break; }
+            case BinOp.SDiv:
+            {
+                long n = Sext(lv, w), d = Sext(rv, w);
+                if (d == 0 || (d == -1 && n == MinSigned(w))) return Val.Unknown;
+                res = n / d;
+                break;
+            }
+            case BinOp.SMod:
+            {
+                long n = Sext(lv, w), d = Sext(rv, w);
+                if (d == 0 || (d == -1 && n == MinSigned(w))) return Val.Unknown;
+                res = n % d;
+                break;
+            }
             default: return Val.Unknown;
         }
         return Val.K(Mask(res, w));
@@ -310,8 +320,7 @@ public sealed class IlEmulator
 
     private void ClobberVolatiles()
     {
-        // Remove volatile registers (a call may have changed them); by canonical name so sub-regs go too.
-        var drop = _regKnown.Keys.Where(k => Volatile.Contains(k.Name)).ToList();
+        var drop = _regKnown.Keys.Where(k => _model.CallerSaved.Contains(_model.Canon(k))).ToList();
         foreach (var k in drop) _regKnown.Remove(k);
     }
 
@@ -326,6 +335,8 @@ public sealed class IlEmulator
 
     /// <summary>Mask a value to the low <paramref name="w"/> bytes (result carries only those bits, zero-extended).</summary>
     private static long Mask(long v, int w) => w is <= 0 or >= 8 ? v : v & ((1L << (w * 8)) - 1);
+
+    private static long MinSigned(int w) => w is <= 0 or >= 8 ? long.MinValue : -(1L << (w * 8 - 1));
 
     /// <summary>Zero-extend the low <paramref name="w"/> bytes of <paramref name="v"/> to a 64-bit unsigned value.</summary>
     private static ulong Zext(long v, int w) => w is <= 0 or >= 8 ? (ulong)v : (ulong)v & ((1UL << (w * 8)) - 1);

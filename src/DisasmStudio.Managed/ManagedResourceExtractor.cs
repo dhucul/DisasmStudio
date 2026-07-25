@@ -14,6 +14,8 @@ namespace DisasmStudio.Managed;
 /// </summary>
 public static class ManagedResourceExtractor
 {
+    private const int MaxResourceBytes = 256 * 1024 * 1024;
+
     public static List<ManagedResourceEntry> Enumerate(MetadataFile pe)
     {
         var list = new List<ManagedResourceEntry>();
@@ -179,9 +181,18 @@ public static class ManagedResourceExtractor
 
     private static byte[] ReadAll(Stream s)
     {
-        if (s is MemoryStream ms) return ms.ToArray();
+        if (s.CanSeek && s.Length - s.Position > MaxResourceBytes)
+            throw new InvalidDataException("Resource exceeds the 256 MiB safety limit.");
         using var outMs = new MemoryStream();
-        s.CopyTo(outMs);
+        byte[] buffer = new byte[81920];
+        int total = 0, read;
+        while ((read = s.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            if (read > MaxResourceBytes - total)
+                throw new InvalidDataException("Resource exceeds the 256 MiB safety limit.");
+            outMs.Write(buffer, 0, read);
+            total += read;
+        }
         return outMs.ToArray();
     }
 }

@@ -34,13 +34,13 @@ public sealed class DecompilerView : Grid
     private ILLevel _level = ILLevel.PseudoC;
 
     private readonly Dictionary<ulong, DecompiledFunction> _cache = [];
-    private ulong _shownFn;
+    private ulong? _shownFn;
     private int _buildSeq;
 
     private long _top;
     private long _caret = -1;
 
-    private ulong _ipVa;            // the debuggee's current instruction (0 = not running) — drawn as an amber band
+    private ulong? _ipVa;           // the debuggee's current instruction, or null when not running — drawn as an amber band
     private int _ipLine = -1;       // the line _ipVa resolves to, recomputed whenever the shown lines change
     private ulong? _pendingGoto;    // a sync target (from the linear view / navigation) awaiting the async build
 
@@ -109,16 +109,20 @@ public sealed class DecompilerView : Grid
     /// without this the CFG/lift decode nothing and every function reads "no code recovered".</summary>
     public IInstructionDecoder? LiveDecoder { get; set; }
 
-    /// <summary>The address of the current caret line (0 when nothing is selected / it's a synthetic line).</summary>
+    /// <summary>The address of the current caret line. Check <see cref="HasCaretAddress"/> before using it.</summary>
     private ulong CaretVa => _caret >= 0 && _caret < _lines.Count ? _lines[(int)_caret].Va : 0;
+    private bool HasCaretAddress
+        => _caret >= 0 && _caret < _lines.Count && !_lines[(int)_caret].IsSynthetic;
 
     /// <summary>True when <paramref name="va"/> decodes to a conditional jump — the only kind the "Toggle jump"
     /// colour mark applies to. Uses the arch-neutral decoder (x86 + ARM), matching the linear/graph views; a
     /// branch/if/while line carries its deciding Jcc's VA, so this gates the action on those lines.</summary>
     private bool IsCondJumpAt(ulong va)
-        => va != 0 && _result is not null
-           && NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder).TryDecode(va, out var i)
-           && i.Flow == FlowKind.CondJump;
+    {
+        if (_result is null) return false;
+        using var dis = NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder);
+        return dis.TryDecode(va, out var i) && i.Flow == FlowKind.CondJump;
+    }
 
     private static readonly (ILLevel Level, string Label)[] Levels =
     [
@@ -168,30 +172,30 @@ public sealed class DecompilerView : Grid
 
         var menu = new ContextMenu();
         var rename = new MenuItem { Header = "Rename…", InputGestureText = "N" };
-        rename.Click += (_, _) => { if (CaretVa != 0) RenameRequested?.Invoke(CaretVa); };
+        rename.Click += (_, _) => { if (HasCaretAddress) RenameRequested?.Invoke(CaretVa); };
         var comment = new MenuItem { Header = "Set comment…", InputGestureText = ";" };
-        comment.Click += (_, _) => { if (CaretVa != 0) CommentRequested?.Invoke(CaretVa); };
+        comment.Click += (_, _) => { if (HasCaretAddress) CommentRequested?.Invoke(CaretVa); };
         var bookmark = new MenuItem { Header = "Toggle bookmark" };
-        bookmark.Click += (_, _) => { if (CaretVa != 0) BookmarkToggleRequested?.Invoke(CaretVa); };
+        bookmark.Click += (_, _) => { if (HasCaretAddress) BookmarkToggleRequested?.Invoke(CaretVa); };
         var emulate = new MenuItem { Header = "Emulate function (deobfuscate)…" };
-        emulate.Click += (_, _) => { if (_shownFn != 0) EmulateFunctionRequested?.Invoke(_shownFn); };
+        emulate.Click += (_, _) => { if (_shownFn is { } va) EmulateFunctionRequested?.Invoke(va); };
         var saveC = new MenuItem { Header = "Save function as C…" };
-        saveC.Click += (_, _) => { if (_shownFn != 0) SaveCRequested?.Invoke(_shownFn); };
+        saveC.Click += (_, _) => { if (_shownFn is { } va) SaveCRequested?.Invoke(va); };
         // Debug items — same actions as the linear view's, acting on the caret line's address / shown function.
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F9" };
-        toggleBp.Click += (_, _) => { if (CaretVa != 0) BreakpointToggleRequested?.Invoke(CaretVa); };
+        toggleBp.Click += (_, _) => { if (HasCaretAddress) BreakpointToggleRequested?.Invoke(CaretVa); };
         var toggleJump = new MenuItem { Header = "Toggle jump", InputGestureText = "Space" };
-        toggleJump.Click += (_, _) => { if (IsCondJumpAt(CaretVa)) ToggleJumpRequested?.Invoke(CaretVa); };
+        toggleJump.Click += (_, _) => { if (HasCaretAddress && IsCondJumpAt(CaretVa)) ToggleJumpRequested?.Invoke(CaretVa); };
         var hwBp = new MenuItem { Header = "Hardware breakpoint…" };
-        hwBp.Click += (_, _) => { if (CaretVa != 0) HardwareBreakpointRequested?.Invoke(CaretVa); };
+        hwBp.Click += (_, _) => { if (HasCaretAddress) HardwareBreakpointRequested?.Invoke(CaretVa); };
         var editBp = new MenuItem { Header = "Edit breakpoint…" };
-        editBp.Click += (_, _) => { if (CaretVa != 0) EditBreakpointRequested?.Invoke(CaretVa); };
+        editBp.Click += (_, _) => { if (HasCaretAddress) EditBreakpointRequested?.Invoke(CaretVa); };
         var runTo = new MenuItem { Header = "Run to cursor" };
-        runTo.Click += (_, _) => { if (CaretVa != 0) RunToCursorRequested?.Invoke(CaretVa); };
+        runTo.Click += (_, _) => { if (HasCaretAddress) RunToCursorRequested?.Invoke(CaretVa); };
         var runToRet = new MenuItem { Header = "Continue to return", InputGestureText = "Ctrl+F9" };
         runToRet.Click += (_, _) => RunToReturnRequested?.Invoke();
         var captureFn = new MenuItem { Header = "Capture this function" };
-        captureFn.Click += (_, _) => { if (_shownFn != 0) CaptureFunctionRequested?.Invoke(_shownFn); };
+        captureFn.Click += (_, _) => { if (_shownFn is { } va) CaptureFunctionRequested?.Invoke(va); };
         menu.Items.Add(rename);
         menu.Items.Add(comment);
         menu.Items.Add(bookmark);
@@ -210,8 +214,8 @@ public sealed class DecompilerView : Grid
         // jump's line (its if/while/branch line). Both mirror the linear view.
         menu.Opened += (_, _) =>
         {
-            editBp.IsEnabled = CaretVa != 0 && IsBreakpointAt?.Invoke(CaretVa) == true;
-            toggleJump.IsEnabled = IsCondJumpAt(CaretVa);
+            editBp.IsEnabled = HasCaretAddress && IsBreakpointAt?.Invoke(CaretVa) == true;
+            toggleJump.IsEnabled = HasCaretAddress && IsCondJumpAt(CaretVa);
         };
         _surface.ContextMenu = menu;
 
@@ -236,8 +240,17 @@ public sealed class DecompilerView : Grid
         // Build the CFG on the UI thread (shared mutable state), then lift/structure/emit in the background.
         // Pass the live decoder while debugging so the descent reads process memory, not the (absent) file image.
         if (!function.BlocksBuilt)
-            CfgBuilder.Build(result.Image, function, result.JumpTables,
-                LiveDecoder is null ? null : NeutralDisasm.For(result.Image, result.Names, LiveDecoder));
+        {
+            if (LiveDecoder is null)
+            {
+                CfgBuilder.Build(result.Image, function, result.JumpTables);
+            }
+            else
+            {
+                using var cfgDis = NeutralDisasm.For(result.Image, result.Names, LiveDecoder);
+                CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis);
+            }
+        }
 
         _shownFn = function.Va;
         int seq = ++_buildSeq;
@@ -248,10 +261,15 @@ public sealed class DecompilerView : Grid
         Task.Run(() => Decompiler.Decompile(fn, result, decoder)).ContinueWith(t =>
         {
             var dc = t.IsCompletedSuccessfully ? t.Result : null;
+            string? failure = t.Exception?.GetBaseException().Message;
             Dispatcher.Invoke(() =>
             {
                 if (seq != _buildSeq || !ReferenceEquals(_result, result)) return;
-                if (dc is null) return;
+                if (dc is null)
+                {
+                    ShowFailure(failure ?? "Decompiler failed.");
+                    return;
+                }
                 _cache[fn.Va] = dc;
                 Show(dc);
             });
@@ -267,10 +285,10 @@ public sealed class DecompilerView : Grid
         _lineByVa = [];
         _mergeOf = [];
         _cache.Clear();
-        _shownFn = 0;
+        _shownFn = null;
         _caret = -1;
         _top = 0;
-        _ipVa = 0;
+        _ipVa = null;
         _ipLine = -1;
         _pendingGoto = null;
         ConfigureScroll();
@@ -282,7 +300,7 @@ public sealed class DecompilerView : Grid
     public void InvalidateCache()
     {
         _cache.Clear();
-        if (_result is { } r && _shownFn != 0 && r.FunctionByVa.TryGetValue(_shownFn, out var fn))
+        if (_result is { } r && _shownFn is { } shownFn && r.FunctionByVa.TryGetValue(shownFn, out var fn))
             SetFunction(r, fn);
     }
 
@@ -293,7 +311,7 @@ public sealed class DecompilerView : Grid
         RebuildLineIndex();
         _top = 0;
         _caret = -1;
-        _ipLine = _ipVa != 0 ? BestLineFor(_ipVa) : -1;
+        _ipLine = _ipVa is { } ip ? BestLineFor(ip) : -1;
         ConfigureScroll();
         ApplyPendingGoto();   // a sync target that arrived while this function was still building on the bg thread
         _surface.InvalidateVisual();
@@ -302,7 +320,18 @@ public sealed class DecompilerView : Grid
     private void ShowBuilding(Function fn)
     {
         _dc = null;
-        _lines = [new DecompLine(fn.Va, [new AsmToken($"// decompiling {fn.Name}…", AsmTokenKind.Comment)], 0)];
+        _lines = [new DecompLine(fn.Va, [new AsmToken($"// decompiling {fn.Name}…", AsmTokenKind.Comment)], 0, true)];
+        RebuildLineIndex();
+        _top = 0;
+        _caret = -1;
+        ConfigureScroll();
+        _surface.InvalidateVisual();
+    }
+
+    private void ShowFailure(string message)
+    {
+        _dc = null;
+        _lines = [new DecompLine(0, [new AsmToken($"// decompilation failed: {message}", AsmTokenKind.Comment)], 0, true)];
         RebuildLineIndex();
         _top = 0;
         _caret = -1;
@@ -316,14 +345,14 @@ public sealed class DecompilerView : Grid
         UpdateLevelButtons();
         if (_dc is not null)
         {
-            ulong keep = CaretVa;   // the focused instruction — preserve it across the level switch
+            ulong? keep = HasCaretAddress ? CaretVa : null;   // preserve the focused instruction across the level switch
             _lines = _dc.Lines(_level);
             RebuildLineIndex();
             _top = 0;
             _caret = -1;
-            _ipLine = _ipVa != 0 ? BestLineFor(_ipVa) : -1;
+            _ipLine = _ipVa is { } ip ? BestLineFor(ip) : -1;
             ConfigureScroll();
-            if (keep != 0) GoToVa(keep);   // land on the same instruction at the new level, not back at the top
+            if (keep is { } va) GoToVa(va);   // land on the same instruction at the new level, not back at the top
         }
         _surface.InvalidateVisual();
     }
@@ -348,22 +377,22 @@ public sealed class DecompilerView : Grid
         _pendingGoto = null;
         _caret = idx;
         long third = Math.Max(0, VisibleRows / 3);
-        _top = Math.Clamp((long)idx - third, 0L, (long)Math.Max(0, _lines.Count - 1));
+        _top = Math.Clamp((long)idx - third, 0L, (long)Math.Max(0, _lines.Count - VisibleRows));
         _scroll.Value = _top;
         _surface.InvalidateVisual();
     }
 
     /// <summary>Mark the debuggee's current instruction with the amber IP band (like the linear view) and
-    /// scroll to it; pass 0 to clear the band when the session ends.</summary>
-    public void SetCurrentIp(ulong va)
+    /// scroll to it; pass null to clear the band when the session ends.</summary>
+    public void SetCurrentIp(ulong? va)
     {
         _ipVa = va;
-        _ipLine = va != 0 ? BestLineFor(va) : -1;
-        if (va != 0) GoToVa(va);
+        _ipLine = va is { } ip ? BestLineFor(ip) : -1;
+        if (va is { } current) GoToVa(current);
         else _surface.InvalidateVisual();
     }
 
-    /// <summary>Index of the addressed line (synthetic Va==0 lines skipped) whose VA is closest to
+    /// <summary>Index of the nearest addressed, non-synthetic line whose VA is closest to
     /// <paramref name="va"/>; -1 if the function has no addressed lines. Lines are roughly address-ordered,
     /// so a nearest match is a good "you are here" even where structuring reorders a few.</summary>
     private int BestLineFor(ulong va)
@@ -372,8 +401,8 @@ public sealed class DecompilerView : Grid
         ulong bestDiff = ulong.MaxValue;
         for (int i = 0; i < _lines.Count; i++)
         {
+            if (_lines[i].IsSynthetic) continue;
             ulong lva = _lines[i].Va;
-            if (lva == 0) continue;
             ulong diff = lva > va ? lva - va : va - lva;
             if (diff < bestDiff) { bestDiff = diff; best = i; if (diff == 0) break; }
         }
@@ -390,7 +419,7 @@ public sealed class DecompilerView : Grid
         var open = new Stack<int>();   // line indices of blocks whose closing brace we're still looking for
         for (int i = 0; i < _lines.Count; i++)
         {
-            if (_lines[i].Va != 0) _lineByVa.TryAdd(_lines[i].Va, i);
+            if (!_lines[i].IsSynthetic) _lineByVa.TryAdd(_lines[i].Va, i);
 
             int opens = 0, closes = 0;
             foreach (var t in _lines[i].Tokens)
@@ -446,7 +475,7 @@ public sealed class DecompilerView : Grid
 
     private void ScrollByLines(long delta)
     {
-        _top = Math.Clamp(_top + delta, 0, Math.Max(0, _lines.Count - 1));
+        _top = Math.Clamp(_top + delta, 0, Math.Max(0, _lines.Count - VisibleRows));
         _scroll.Value = _top;
         _surface.InvalidateVisual();
     }
@@ -457,10 +486,10 @@ public sealed class DecompilerView : Grid
         _caret = Math.Clamp(line, 0, _lines.Count - 1);
         if (_caret < _top) _top = _caret;
         else if (_caret >= _top + VisibleRows) _top = _caret - VisibleRows + 1;
-        _top = Math.Clamp(_top, 0, Math.Max(0, _lines.Count - 1));
+        _top = Math.Clamp(_top, 0, Math.Max(0, _lines.Count - VisibleRows));
         _scroll.Value = _top;
         ulong va = _lines[(int)_caret].Va;
-        if (va != 0) SelectionChanged?.Invoke(va);
+        if (!_lines[(int)_caret].IsSynthetic) SelectionChanged?.Invoke(va);
         _surface.InvalidateVisual();
     }
 
@@ -468,7 +497,7 @@ public sealed class DecompilerView : Grid
     {
         if (line < 0 || line >= _lines.Count) return;
         ulong va = _lines[(int)line].Va;
-        if (va == 0) return;               // synthetic line (brace / blank) — nothing to break on
+        if (_lines[(int)line].IsSynthetic) return; // synthetic line (brace / blank) — nothing to break on
         _caret = line;
         BreakpointToggleRequested?.Invoke(va);
         _surface.InvalidateVisual();
@@ -478,7 +507,7 @@ public sealed class DecompilerView : Grid
     {
         if (line < 0 || line >= _lines.Count) return;
         ulong va = _lines[(int)line].Va;
-        if (va == 0) return;
+        if (_lines[(int)line].IsSynthetic) return;
         // Follow a direct call/branch to its target; otherwise just sync to this line's address.
         if (_dis is not null && _dis.TryDecodeAt(va, out var ins)
             && FlowAnalysis.DirectBranchTarget(ins) is ulong t && _result?.Image.IsMappedVa(t) == true)
@@ -506,26 +535,26 @@ public sealed class DecompilerView : Grid
             var band = new Rect(BpGutterW, y, width - BpGutterW, _rowHeight);
 
             // Coverage/trace tint first, so the current-IP amber and the caret band paint on top of it.
-            if (line.Va != 0 && IsInstrHit?.Invoke(line.Va) == true)
+            if (!line.IsSynthetic && IsInstrHit?.Invoke(line.Va) == true)
                 dc.DrawRectangle(SyntaxTheme.CoveredInstr, null, band);
             // The debuggee's current instruction (amber) wins over the plain caret band when running.
-            if (_ipVa != 0 && idx == _ipLine)
+            if (_ipVa is not null && idx == _ipLine)
                 dc.DrawRectangle(SyntaxTheme.CurrentIp, null, band);
             else if (idx == _caret)
                 dc.DrawRectangle(SyntaxTheme.CurrentLine, null, band);
             // A toggled conditional jump recolours its line green (taken) / red (not taken). Drawn last (over the
             // caret/IP bands) but translucent, so the mark stays visible on the selected/current line while the
             // code text — painted just below — stays readable. Mirrors the linear/graph green/red branch marks.
-            if (line.Va != 0 && JumpMark?.Invoke(line.Va) is bool taken)
+            if (!line.IsSynthetic && JumpMark?.Invoke(line.Va) is bool taken)
                 dc.DrawRectangle(taken ? JumpTakenBand : JumpNotTakenBand, null, band);
 
-            if (line.Va != 0 && IsBreakpointAt?.Invoke(line.Va) == true)
+            if (!line.IsSynthetic && IsBreakpointAt?.Invoke(line.Va) == true)
             {
                 var dot = IsHardwareBreakpointAt?.Invoke(line.Va) == true ? SyntaxTheme.HwBreakpointDot : SyntaxTheme.BreakpointDot;
                 dc.DrawEllipse(dot, null, new Point(BpGutterW / 2, y + _rowHeight / 2), 4, 4);
             }
 
-            if (line.Va != 0)
+            if (!line.IsSynthetic)
                 Draw(dc, line.Va.ToString("X" + _addrDigits), AddrX, y, SyntaxTheme.Address, dpi);
 
             double x = ContentX + line.Indent * IndentChars * _charWidth;
@@ -548,7 +577,7 @@ public sealed class DecompilerView : Grid
     private void DrawBranchArrows(DrawingContext dc, int rows)
     {
         if (_result is null || _lines.Count == 0) return;
-        var dis = NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder);
+        using var dis = NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder);
 
         double xCode = AddrX - 3;          // arrows meet the code at the left edge of the address column
         double minX = BpGutterW + 2;       // don't cross into the breakpoint strip
@@ -564,8 +593,8 @@ public sealed class DecompilerView : Grid
         long scanHi = Math.Min(_lines.Count, _top + rows + Margin);
         for (long i = scanLo; i < scanHi; i++)
         {
+            if (_lines[(int)i].IsSynthetic) continue;
             ulong va = _lines[(int)i].Va;
-            if (va == 0) continue;
             if (!dis.TryDecode(va, out var insn) || insn.DirectTarget is not ulong branchTarget) continue;
             if (insn.Flow is not (FlowKind.Jump or FlowKind.CondJump)) continue;   // arrows for jumps, not calls
 
@@ -725,13 +754,13 @@ public sealed class DecompilerView : Grid
                 case Key.PageUp: _owner.MoveCaret(_owner._caret - _owner.VisibleRows); break;
                 case Key.Enter: _owner.Activate(_owner._caret); break;
                 case Key.N when (Keyboard.Modifiers & ModifierKeys.Control) == 0:
-                    if (_owner.CaretVa != 0) _owner.RenameRequested?.Invoke(_owner.CaretVa); break;
+                    if (_owner.HasCaretAddress) _owner.RenameRequested?.Invoke(_owner.CaretVa); break;
                 case Key.OemSemicolon:
-                    if (_owner.CaretVa != 0) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
+                    if (_owner.HasCaretAddress) _owner.CommentRequested?.Invoke(_owner.CaretVa); break;
                 case Key.F2 or Key.F9:
-                    if (_owner.CaretVa != 0) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
+                    if (_owner.HasCaretAddress) _owner.BreakpointToggleRequested?.Invoke(_owner.CaretVa); break;
                 case Key.Space:
-                    if (_owner.IsCondJumpAt(_owner.CaretVa)) _owner.ToggleJumpRequested?.Invoke(_owner.CaretVa); break;
+                    if (_owner.HasCaretAddress && _owner.IsCondJumpAt(_owner.CaretVa)) _owner.ToggleJumpRequested?.Invoke(_owner.CaretVa); break;
                 default: return;
             }
             e.Handled = true;

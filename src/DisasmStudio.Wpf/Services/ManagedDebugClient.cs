@@ -146,7 +146,16 @@ internal sealed class ManagedDebugClient : IDisposable
         if (!_disposed && !_sawExit) Raise(new MdbgEvent { Ev = Mdbg.Exited, Code = -1 });   // host/pipe died before a real exit
     }
 
-    private void Raise(MdbgEvent ev) => EventReceived?.Invoke(ev);
+    private void Raise(MdbgEvent ev)
+    {
+        var handlers = EventReceived;
+        if (handlers is null) return;
+        foreach (Action<MdbgEvent> handler in handlers.GetInvocationList())
+        {
+            try { handler(ev); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Managed debug event subscriber failed: {ex}"); }
+        }
+    }
 
     private void Send(MdbgCommand cmd)
     {

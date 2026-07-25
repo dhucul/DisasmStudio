@@ -11,6 +11,10 @@ public sealed class IcedNeutral(IInstructionDecoder inner, AsmFormatter fmt) : I
 {
     private static readonly AsmToken[] Empty = [];
 
+    public void Dispose()
+    {
+    }
+
     public bool TryDecode(ulong va, out NeutralInsn insn)
     {
         if (!inner.TryDecodeAt(va, out var i)) { insn = default; return false; }

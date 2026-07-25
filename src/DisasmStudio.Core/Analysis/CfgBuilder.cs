@@ -18,7 +18,8 @@ public static class CfgBuilder
     {
         if (fn.BlocksBuilt) return;
 
-        INeutralDisassembler dis = decoder ?? NeutralDisasm.For(image, null);
+        using INeutralDisassembler? owned = decoder is null ? NeutralDisasm.For(image, null) : null;
+        INeutralDisassembler dis = decoder ?? owned!;
 
         // Reachability gate for the descent. Normally an address must sit in an *executable* section — this
         // stops a mis-identified data "function" from decoding pointer bytes into a junk CFG. But some images
@@ -65,20 +66,20 @@ public static class CfgBuilder
             {
                 case FlowKind.CondJump:
                 {
-                    if (instr.DirectTarget is ulong t && image.IsExecutableVa(t)) { leaders.Add(t); work.Push(t); }
+                    if (instr.DirectTarget is ulong t && Reachable(t)) { leaders.Add(t); work.Push(t); }
                     leaders.Add(fall); work.Push(fall);
                     break;
                 }
                 case FlowKind.Jump:
                 {
-                    if (instr.DirectTarget is ulong t && image.IsExecutableVa(t)) { leaders.Add(t); work.Push(t); }
+                    if (instr.DirectTarget is ulong t && Reachable(t)) { leaders.Add(t); work.Push(t); }
                     break; // no fall-through
                 }
                 case FlowKind.IndirectJump:
                     // A recovered jump table turns an indirect jmp into real, followable case targets.
                     if (jumpTables is not null && jumpTables.TryGetValue(va, out var cases))
                         foreach (var t in cases)
-                            if (image.IsExecutableVa(t)) { leaders.Add(t); work.Push(t); }
+                            if (Reachable(t)) { leaders.Add(t); work.Push(t); }
                     break;
                 case FlowKind.Ret:
                 case FlowKind.Interrupt:

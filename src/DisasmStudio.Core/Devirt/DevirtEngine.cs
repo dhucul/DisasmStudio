@@ -54,16 +54,35 @@ public static class DevirtEngine
 
             var h = handlers[opcode];
             long operand = 0;
-            if (h.OperandBytes >= 4)
+            if (h.OperandBytes is not (0 or 1 or 2 or 4 or 8))
             {
-                var opb = image.ReadBytesAtVa(vip + 1, 4);
-                if (opb.Length >= 4) operand = BitConverter.ToInt32(opb, 0); else partial = true;
+                partial = true;
+                continue;
+            }
+            if (h.OperandBytes > 0)
+            {
+                if (vip == ulong.MaxValue) { partial = true; continue; }
+                var opb = image.ReadBytesAtVa(vip + 1, h.OperandBytes);
+                if (opb.Length != h.OperandBytes) { partial = true; continue; }
+                operand = h.OperandBytes switch
+                {
+                    1 => unchecked((sbyte)opb[0]),
+                    2 => BitConverter.ToInt16(opb, 0),
+                    4 => BitConverter.ToInt32(opb, 0),
+                    8 => BitConverter.ToInt64(opb, 0),
+                    _ => 0,
+                };
             }
             byVip[vip] = new VInsn { VipVa = vip, Index = -1, Handler = h, Operand = operand };
 
             if (h.Kind == HandlerKind.Unknown) { partial = true; continue; }   // unknown stride: stop this path
             if (h.Kind == HandlerKind.VmExit) continue;
-            work.Enqueue(vip + 1 + (ulong)h.OperandBytes);                      // fall-through
+            if (h.Kind != HandlerKind.Jump)
+            {
+                ulong stride = 1UL + (ulong)h.OperandBytes;
+                if (vip <= ulong.MaxValue - stride) work.Enqueue(vip + stride);
+                else partial = true;
+            }
             if (h.Kind is HandlerKind.Branch or HandlerKind.Jump) work.Enqueue((ulong)operand);
         }
 

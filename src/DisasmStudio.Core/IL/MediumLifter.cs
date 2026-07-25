@@ -72,7 +72,9 @@ public sealed class MediumLifter
         if (a.Dest is RegExpr d)
         {
             var c = _model.Canon(d.Reg);
-            if (_model.IsStackPtr(c)) return true;
+            if (_model.IsStackPtr(c))
+                return a.Src is BinExpr { Op: BinOp.Add or BinOp.Sub, L: RegExpr sp }
+                       && _model.IsStackPtr(_model.Canon(sp.Reg));
             if (_model.IsFrameBase(c) && !_model.IsStackPtr(c) && a.Src is RegExpr sr && _model.IsStackPtr(_model.Canon(sr.Reg))) return true;
             // pop of a callee-saved register: `reg = [sp/frame ...]`.
             if (_model.IsCalleeSaved(c) && a.Src is LoadExpr ld && IsFrameRelative(ld.Addr)) return true;
@@ -134,7 +136,8 @@ public sealed class MediumLifter
         var key = (bas, disp);
         if (slots.TryGetValue(key, out var v)) { if (v.Size == 0 && width > 0) v.Size = width; return v; }
         bool arg = _model.IsArgSlot(bas, disp);
-        string baseName = arg ? $"arg_{disp:X}" : $"var_{Math.Abs(disp):X}";
+        ulong magnitude = disp == long.MinValue ? 1UL << 63 : (ulong)Math.Abs(disp);
+        string baseName = arg ? $"arg_{disp:X}" : $"var_{magnitude:X}";
         // Distinct slots can map to the same base name (e.g. [rbp-0x20] and [rsp+0x20]); keep them unique
         // so declarations don't collide.
         string name = baseName;
@@ -249,7 +252,11 @@ public sealed class MediumLifter
             case TernaryExpr t:
                 return new TernaryExpr(Subst(t.Cond, env), Subst(t.T, env), Subst(t.F, env));
             case CallExpr call:
-                return call with { Args = call.Args.Select(a => Subst(a, env)).ToList() };
+                return call with
+                {
+                    Target = Subst(call.Target, env),
+                    Args = call.Args.Select(a => Subst(a, env)).ToList(),
+                };
             default:
                 return e;
         }
@@ -343,7 +350,8 @@ public sealed class MediumLifter
         var liveOut = blocks.ToDictionary(b => b.Start, _ => new HashSet<Loc>());
         bool changed = true;
         int guard = 0;
-        while (changed && guard++ < 1000)
+        int maxIterations = Math.Max(1, blocks.Count + 1);
+        while (changed && guard++ < maxIterations)
         {
             changed = false;
             for (int i = blocks.Count - 1; i >= 0; i--)
@@ -358,6 +366,7 @@ public sealed class MediumLifter
                 if (!liveIn[b.Start].SetEquals(inSet)) { liveIn[b.Start] = inSet; changed = true; }
             }
         }
+        if (changed) throw new InvalidOperationException("Liveness analysis did not converge.");
         return liveOut;
     }
 

@@ -7,7 +7,8 @@ public enum ILLevel { LowIL, MediumIL, HighIL, PseudoC }
 
 /// <summary>One rendered line of decompiler output: its coloured token runs, the indent depth, and
 /// the source instruction VA it maps to (0 = synthetic line such as a brace) for click-to-sync.</summary>
-public readonly record struct DecompLine(ulong Va, IReadOnlyList<AsmToken> Tokens, int Indent);
+public readonly record struct DecompLine(
+    ulong Va, IReadOnlyList<AsmToken> Tokens, int Indent, bool IsSynthetic = false);
 
 /// <summary>The decompilation of a single function, rendered at all four levels. Built lazily and
 /// cached per function, mirroring how control-flow graphs are built on first view.</summary>

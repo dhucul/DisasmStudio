@@ -292,6 +292,7 @@ internal static class StringEditSmoke
             elf[0] = 0x7F; elf[1] = (byte)'E'; elf[2] = (byte)'L'; elf[3] = (byte)'F';
             elf[4] = 2; elf[5] = 1;                                      // ELF64, little-endian
             BitConverter.GetBytes((ushort)0x3E).CopyTo(elf, 0x12);        // x86-64
+            BitConverter.GetBytes((ushort)0x40).CopyTo(elf, 0x34);        // e_ehsize
             File.WriteAllBytes(elfMetadataPath, elf);
             using (var minimalElf = ElfImage.Load(elfMetadataPath))
                 Check(minimalElf.Sections.Count == 0, "minimal sectionless ELF still loads", ref pass);

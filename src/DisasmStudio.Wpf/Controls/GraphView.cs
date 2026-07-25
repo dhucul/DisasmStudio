@@ -28,9 +28,9 @@ public sealed class GraphView : FrameworkElement
     private Point _lastDrag;
     private bool _dragging;
     private IInstructionDecoder? _decoder;   // live decoder while debugging
-    private ulong _ipVa;                      // debuggee's current instruction
-    private ulong _selVa;                     // last-clicked instruction (target of F2/F9 toggle)
-    private ulong _menuVa;                    // instruction under the last right-click (context-menu target)
+    private ulong? _ipVa;                     // debuggee's current instruction
+    private ulong? _selVa;                    // last-clicked instruction (target of F2/F9 toggle)
+    private ulong? _menuVa;                   // instruction under the last right-click (context-menu target)
 
     // A view change (fit-to-graph in disassembler mode, or focus-on-current-block in debugger mode) is
     // applied once the graph has a real size — the tab may not be laid out when it's requested.
@@ -102,22 +102,22 @@ public sealed class GraphView : FrameworkElement
     {
         var menu = new ContextMenu();
         var rename = new MenuItem { Header = "Rename…" };
-        rename.Click += (_, _) => { if (_menuVa != 0) RenameRequested?.Invoke(_menuVa); };
+        rename.Click += (_, _) => { if (_menuVa is { } va) RenameRequested?.Invoke(va); };
         var comment = new MenuItem { Header = "Set comment…" };
-        comment.Click += (_, _) => { if (_menuVa != 0) CommentRequested?.Invoke(_menuVa); };
+        comment.Click += (_, _) => { if (_menuVa is { } va) CommentRequested?.Invoke(va); };
         var bookmark = new MenuItem { Header = "Toggle bookmark" };
-        bookmark.Click += (_, _) => { if (_menuVa != 0) BookmarkToggleRequested?.Invoke(_menuVa); };
+        bookmark.Click += (_, _) => { if (_menuVa is { } va) BookmarkToggleRequested?.Invoke(va); };
         var toggleBp = new MenuItem { Header = "Toggle breakpoint", InputGestureText = "F2 / F9" };
-        toggleBp.Click += (_, _) => { if (_menuVa != 0) BreakpointToggleRequested?.Invoke(_menuVa); };
+        toggleBp.Click += (_, _) => { if (_menuVa is { } va) BreakpointToggleRequested?.Invoke(va); };
         var toggleJump = new MenuItem { Header = "Toggle jump", InputGestureText = "Space" };
-        toggleJump.Click += (_, _) => { if (_menuVa != 0 && IsCondJumpAt(_menuVa)) ToggleJumpRequested?.Invoke(_menuVa); };
+        toggleJump.Click += (_, _) => { if (_menuVa is { } va && IsCondJumpAt(va)) ToggleJumpRequested?.Invoke(va); };
         menu.Opened += (_, _) =>
         {
-            bool has = _menuVa != 0;
+            bool has = _menuVa is not null;
             rename.IsEnabled = comment.IsEnabled = bookmark.IsEnabled = toggleBp.IsEnabled = has;
             // "Toggle jump" flips a conditional jump's edge colours between green and red; enabled on any
             // conditional jump (click it repeatedly to toggle back and forth).
-            toggleJump.IsEnabled = has && IsCondJumpAt(_menuVa);
+            toggleJump.IsEnabled = _menuVa is { } va && IsCondJumpAt(va);
         };
         menu.Items.Add(rename);
         menu.Items.Add(comment);
@@ -145,13 +145,16 @@ public sealed class GraphView : FrameworkElement
         _function = function;
         _decoder = decoder;
         if (!function.BlocksBuilt)
-            CfgBuilder.Build(result.Image, function, result.JumpTables, NeutralDisasm.For(result.Image, result.Names, decoder));
+        {
+            using var cfgDis = NeutralDisasm.For(result.Image, result.Names, decoder);
+            CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis);
+        }
 
         _blocks.Clear();
         _byStart.Clear();
         _lines.Clear();
-        _selVa = 0;
-        _menuVa = 0;
+        _selVa = null;
+        _menuVa = null;
         _blocks.AddRange(function.Blocks);
         foreach (var b in _blocks) _byStart[b.Start] = b;
 
@@ -213,9 +216,9 @@ public sealed class GraphView : FrameworkElement
     {
         _function = null;
         _decoder = null;
-        _ipVa = 0;
-        _selVa = 0;
-        _menuVa = 0;
+        _ipVa = null;
+        _selVa = null;
+        _menuVa = null;
         _pend = Pend.None;   // drop any deferred fit/focus so it can't fire against empty blocks
         _blocks.Clear();
         _byStart.Clear();
@@ -243,7 +246,7 @@ public sealed class GraphView : FrameworkElement
     public void SetSelected(ulong va, bool center)
     {
         _selVa = va;
-        if (center && va != 0 && _blocks.Any(b => va >= b.Start && va < b.End))
+        if (center && _blocks.Any(b => va >= b.Start && va < b.End))
         {
             _pend = Pend.Focus; _pendVa = va; _pendResetZoom = false;
             ApplyPending();
@@ -263,7 +266,7 @@ public sealed class GraphView : FrameworkElement
     private void BuildLines(AnalysisResult result)
     {
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        INeutralDisassembler dis = NeutralDisasm.For(result.Image, result.Names, _decoder);
+        using INeutralDisassembler dis = NeutralDisasm.For(result.Image, result.Names, _decoder);
 
         foreach (var block in _blocks)
         {
@@ -402,7 +405,7 @@ public sealed class GraphView : FrameworkElement
     private void DrawBlock(DrawingContext dc, BasicBlock b, double dpi)
     {
         var rect = new Rect(b.X, b.Y, b.Width, b.Height);
-        bool isIpBlock = _ipVa != 0 && b.Start <= _ipVa && _ipVa < b.End;
+        bool isIpBlock = _ipVa is { } ip && b.Start <= ip && ip < b.End;
         var border = isIpBlock ? new Pen(SyntaxTheme.FuncName, 2) : new Pen(SyntaxTheme.BlockBorder, 1);
         dc.DrawRoundedRectangle(SyntaxTheme.BlockBg, border, rect, 5, 5);
         dc.DrawRoundedRectangle(SyntaxTheme.BlockHeader, null, new Rect(b.X, b.Y, b.Width, HeaderH), 5, 5);
@@ -419,9 +422,9 @@ public sealed class GraphView : FrameworkElement
                 dc.DrawRectangle(SyntaxTheme.CoveredInstrGraph, null, row);
             // Current instruction: a brighter amber band plus a warm outline — the plain band is near-
             // invisible over the block's lighter surface, so the outline makes the row unmistakable.
-            if (_ipVa != 0 && line.Va == _ipVa)
+            if (_ipVa is { } current && line.Va == current)
                 dc.DrawRectangle(SyntaxTheme.CurrentIpGraph, SyntaxTheme.CurrentIpGraphOutline, row);
-            else if (_selVa != 0 && line.Va == _selVa)   // selected instruction (F2/F9 target) — don't cover the IP
+            else if (_selVa is { } selected && line.Va == selected)   // selected instruction (F2/F9 target) — don't cover the IP
                 dc.DrawRectangle(SyntaxTheme.Selection, null, row);
             // Breakpoint marker in the block's left padding (the graph has no gutter column).
             if (IsBreakpointAt?.Invoke(line.Va) == true)
@@ -453,29 +456,29 @@ public sealed class GraphView : FrameworkElement
     // ---- interaction ----
     private Point ToGraph(Point screen) => new((screen.X - _offset.X) / _scale, (screen.Y - _offset.Y) / _scale);
 
-    /// <summary>The instruction VA under a screen point (inside a block's instruction rows), or 0 if none.</summary>
-    private ulong InstrAt(Point screen)
+    /// <summary>The instruction VA under a screen point (inside a block's instruction rows), or null if none.</summary>
+    private ulong? InstrAt(Point screen)
     {
         var g = ToGraph(screen);
         foreach (var b in _blocks)
         {
             if (g.X < b.X || g.X > b.X + b.Width || g.Y < b.Y || g.Y > b.Y + b.Height) continue;
-            if (g.Y < b.Y + HeaderH + 1) return 0;   // click is in the block header, not on an instruction row
+            if (g.Y < b.Y + HeaderH + 1) return null; // click is in the block header, not on an instruction row
             var lines = _lines[b.Start];
             int idx = (int)((g.Y - (b.Y + HeaderH + 1)) / _rowHeight);
-            return idx >= 0 && idx < lines.Count ? lines[idx].Va : 0;
+            return idx >= 0 && idx < lines.Count ? lines[idx].Va : null;
         }
-        return 0;
+        return null;
     }
 
     /// <summary>The direct branch/call target of the instruction at <paramref name="va"/>, or null when it has
     /// nothing to follow (not a direct call/jump, or the target lies outside the loaded image). Mirrors the linear
     /// view's <c>CaretFollowTarget</c> so double-clicking a call in the graph jumps to the callee.</summary>
-    private ulong? FollowTargetOf(ulong va)
+    private ulong? FollowTargetOf(ulong? va)
     {
-        if (_result is null || va == 0) return null;
-        var dis = NeutralDisasm.For(_result.Image, _result.Names, _decoder);
-        return dis.TryDecode(va, out var insn) && insn.DirectTarget is ulong t && _result.Image.IsMappedVa(t) ? t : null;
+        if (_result is null || va is not { } address) return null;
+        using var dis = NeutralDisasm.For(_result.Image, _result.Names, _decoder);
+        return dis.TryDecode(address, out var insn) && insn.DirectTarget is ulong t && _result.Image.IsMappedVa(t) ? t : null;
     }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
@@ -502,7 +505,7 @@ public sealed class GraphView : FrameworkElement
         _lastDrag = e.GetPosition(this);
 
         var g = ToGraph(_lastDrag);
-        ulong clicked = InstrAt(_lastDrag);   // exact instruction under the cursor (0 on a block header)
+        ulong? clicked = InstrAt(_lastDrag);  // exact instruction under the cursor (null on a block header)
         _selVa = clicked;                     // remember it so F2/F9 can toggle a breakpoint on it
 
         // Double-click a direct call/branch → follow its target to the callee, like double-clicking in the linear
@@ -518,7 +521,7 @@ public sealed class GraphView : FrameworkElement
         CaptureMouse();
         foreach (var b in _blocks)
             if (g.X >= b.X && g.X <= b.X + b.Width && g.Y >= b.Y && g.Y <= b.Y + b.Height)
-            { BlockSelected?.Invoke(clicked != 0 ? clicked : b.Start); break; }   // sync linear to the exact line
+            { BlockSelected?.Invoke(clicked ?? b.Start); break; }   // sync linear to the exact line
         InvalidateVisual();   // reflect the new selection highlight
     }
 
@@ -534,8 +537,8 @@ public sealed class GraphView : FrameworkElement
     {
         switch (e.Key)
         {
-            case Key.F2 or Key.F9: if (_selVa != 0) BreakpointToggleRequested?.Invoke(_selVa); break;
-            case Key.Space: if (_selVa != 0 && IsCondJumpAt(_selVa)) ToggleJumpRequested?.Invoke(_selVa); break;
+            case Key.F2 or Key.F9: if (_selVa is { } breakpointVa) BreakpointToggleRequested?.Invoke(breakpointVa); break;
+            case Key.Space: if (_selVa is { } jumpVa && IsCondJumpAt(jumpVa)) ToggleJumpRequested?.Invoke(jumpVa); break;
             case Key.Enter: if (FollowTargetOf(_selVa) is ulong t) NavigateRequested?.Invoke(t); break;
             default: return;
         }
