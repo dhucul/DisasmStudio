@@ -45,7 +45,7 @@ public sealed class DecompilerView : Grid
     private ulong? _pendingGoto;    // a sync target (from the linear view / navigation) awaiting the async build
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 13.0;
     private const int IndentChars = 4;
     private double _rowHeight = 16;
@@ -442,7 +442,7 @@ public sealed class DecompilerView : Grid
             bool on = Levels[i].Level == _level;
             _levelButtons[i].FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
             _levelButtons[i].Foreground = on
-                ? (Brush)Application.Current.Resources["Accent"]
+                ? (Brush)Application.Current.Resources["PanelAccentText"]
                 : (Brush)Application.Current.Resources["TextSecondary"];
         }
     }

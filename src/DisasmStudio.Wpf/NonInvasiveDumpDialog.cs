@@ -22,7 +22,7 @@ internal sealed class NonInvasiveDumpDialog : Window
     private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
     private static readonly Brush Fg = Palette.TextBrush;   // text
     private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
-    private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
+    private static readonly FontFamily Mono = AppFonts.Code;
 
     private readonly ulong _preferredImageBase;
     private readonly string _defaultDir;
@@ -71,6 +71,7 @@ internal sealed class NonInvasiveDumpDialog : Window
             : defaultDir!;
 
         Owner = owner;
+        FontFamily = AppFonts.Ui;
         Title = "Dump process (non-invasive)";
         Width = 660;
         Height = 600;
@@ -145,7 +146,7 @@ internal sealed class NonInvasiveDumpDialog : Window
         {
             Text = "Process-level containment only — it does NOT block network or filesystem access. " +
                    "Run truly untrusted samples in a disposable VM.",
-            Foreground = Palette.PeachBrush,
+            Foreground = Palette.WarnTextBrush,
             FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(20, 0, 0, 4),
         });
         opt.Children.Add(_launchPanel);

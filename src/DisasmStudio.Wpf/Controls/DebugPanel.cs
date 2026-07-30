@@ -15,7 +15,7 @@ namespace DisasmStudio.Wpf.Controls;
 /// </summary>
 public sealed class DebugPanel : Grid
 {
-    private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
+    private static readonly FontFamily Mono = AppFonts.Code;
 
     private DebugSession? _session;
     private uint _viewTid;

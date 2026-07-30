@@ -3,9 +3,8 @@
                     xmlns:svc="clr-namespace:DisasmStudio.Wpf.Services"
                     xmlns:ctl="clr-namespace:DisasmStudio.Wpf.Controls">
 
-    <!-- Colours come from the single-source Services/Palette.cs (Catppuccin Frappé) via x:Static,
-         so a flavour swap is one file. This dictionary only maps chrome ROLES → palette tokens.
-         Pastel accents carry DARK text (Palette.CrustBrush), never white. -->
+    <!-- Colours come from the single-source Services/Palette.cs via x:Static. This dictionary maps
+         chrome roles to palette tokens; bright accents carry dark text when used as solid fills. -->
     <SolidColorBrush x:Key="Background"    Color="{x:Static svc:Palette.Base}" />
     <SolidColorBrush x:Key="Surface"       Color="{x:Static svc:Palette.Surface0}" />
     <SolidColorBrush x:Key="Surface2"      Color="{x:Static svc:Palette.Surface1}" />
@@ -16,20 +15,24 @@
     <SolidColorBrush x:Key="OutlineStrong" Color="{x:Static svc:Palette.Surface2}" />
     <SolidColorBrush x:Key="TextPrimary"   Color="{x:Static svc:Palette.Text}" />
     <SolidColorBrush x:Key="TextSecondary" Color="{x:Static svc:Palette.Subtext1}" />
-    <SolidColorBrush x:Key="TextMuted"     Color="{x:Static svc:Palette.Overlay1}" />
+    <SolidColorBrush x:Key="TextMuted"     Color="{x:Static svc:Palette.FontMuted}" />
     <SolidColorBrush x:Key="Accent"        Color="{x:Static svc:Palette.Accent}" />
+    <SolidColorBrush x:Key="PanelAccentText" Color="{x:Static svc:Palette.PanelAccentText}" />
     <SolidColorBrush x:Key="AccentHover"   Color="{x:Static svc:Palette.AccentHover}" />
     <SolidColorBrush x:Key="AccentPressed" Color="{x:Static svc:Palette.AccentPressed}" />
     <SolidColorBrush x:Key="AccentSoft"    Color="{x:Static svc:Palette.AccentSoft}" />
     <SolidColorBrush x:Key="Selection"     Color="{x:Static svc:Palette.Selection}" />
-    <SolidColorBrush x:Key="StringRef"     Color="{x:Static svc:Palette.Peach}" /><!-- referenced-at-call marker in the Strings list -->
+    <SolidColorBrush x:Key="StringRef"     Color="{x:Static svc:Palette.PanelWarmText}" /><!-- referenced-at-call marker in the Strings list -->
 
     <!-- Semantic toolbar buttons (Run/Pause/Stop). -->
     <SolidColorBrush x:Key="Success"     Color="{x:Static svc:Palette.Green}" />
+    <SolidColorBrush x:Key="SuccessText" Color="{x:Static svc:Palette.SuccessText}" />
     <SolidColorBrush x:Key="SuccessSoft" Color="{x:Static svc:Palette.SuccessSoft}" />
     <SolidColorBrush x:Key="Warn"        Color="{x:Static svc:Palette.Peach}" />
+    <SolidColorBrush x:Key="WarnText"    Color="{x:Static svc:Palette.WarnText}" />
     <SolidColorBrush x:Key="WarnSoft"    Color="{x:Static svc:Palette.WarnSoft}" />
     <SolidColorBrush x:Key="Danger"      Color="{x:Static svc:Palette.Red}" />
+    <SolidColorBrush x:Key="DangerText"  Color="{x:Static svc:Palette.DangerText}" />
     <SolidColorBrush x:Key="DangerSoft"  Color="{x:Static svc:Palette.DangerSoft}" />
 
     <!-- Re-point system selection brushes at the theme (lists / tree selection). -->
@@ -103,6 +106,81 @@
         </Setter>
     </Style>
 
+    <!-- Arctic Circuit command bar: one dense row with a deliberate overflow surface. -->
+    <Style x:Key="ToolBarDivider" TargetType="Border">
+        <Setter Property="Width" Value="1" />
+        <Setter Property="Height" Value="18" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Background" Value="{StaticResource Outline}" />
+        <Setter Property="Margin" Value="8,3" />
+        <Style.Triggers>
+            <!-- A one-pixel vertical divider is meaningless inside the wrapped command palette. -->
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="ToolBarInfoText" TargetType="TextBlock">
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="16,3,0,3" />
+        <Setter Property="Foreground" Value="{StaticResource TextSecondary}" />
+        <Style.Triggers>
+            <!-- File metadata belongs in the bar itself, not among actionable overflow commands. -->
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+    <Style TargetType="ToolBarTray">
+        <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style TargetType="ToolBar">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToolBar">
+                    <Grid Background="Transparent" SnapsToDevicePixels="True">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ToolBarPanel x:Name="PART_ToolBarPanel" Grid.Column="0"
+                                      IsItemsHost="True" Margin="0" />
+                        <ToggleButton x:Name="OverflowButton" Grid.Column="1"
+                                      Width="34" Height="28" Margin="5,0,0,0"
+                                      Content="•••" Padding="0"
+                                      ToolTip="More commands" />
+                        <Popup x:Name="OverflowPopup"
+                               Placement="Bottom" PlacementTarget="{Binding ElementName=OverflowButton}"
+                               AllowsTransparency="True" PopupAnimation="Fade"
+                               IsOpen="{Binding IsOverflowOpen, RelativeSource={RelativeSource TemplatedParent}}">
+                            <Border Background="{StaticResource Surface2}"
+                                    BorderBrush="{StaticResource OutlineStrong}" BorderThickness="1"
+                                    CornerRadius="6" Padding="7" Margin="0,4,0,0">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Text="MORE COMMANDS" Margin="5,1,5,6"
+                                               Foreground="{StaticResource TextMuted}"
+                                               FontSize="10.5" FontWeight="SemiBold" />
+                                    <ToolBarOverflowPanel x:Name="PART_ToolBarOverflowPanel" Grid.Row="1"
+                                                          WrapWidth="360"
+                                                          KeyboardNavigation.TabNavigation="Cycle"
+                                                          KeyboardNavigation.DirectionalNavigation="Cycle" />
+                                </Grid>
+                            </Border>
+                        </Popup>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- Button -->
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource Surface2}" />
@@ -111,6 +189,7 @@
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="Padding" Value="10,4" />
         <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="Template">
@@ -120,7 +199,7 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"
                                           Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
                             <ContentPresenter.Resources>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
@@ -147,6 +226,15 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Width" Value="176" />
+                <Setter Property="Height" Value="30" />
+                <Setter Property="Margin" Value="2" />
+                <Setter Property="Padding" Value="9,4" />
+                <Setter Property="HorizontalContentAlignment" Value="Left" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- Semantic toolbar buttons: same chrome as the implicit Button, but the glyph + border carry an
@@ -156,7 +244,7 @@
 
     <!-- Run / Restart (green) -->
     <Style x:Key="RunButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-        <Setter Property="Foreground" Value="{StaticResource Success}" />
+        <Setter Property="Foreground" Value="{StaticResource SuccessText}" />
         <Setter Property="BorderBrush" Value="{StaticResource Success}" />
         <Setter Property="Template">
             <Setter.Value>
@@ -165,7 +253,7 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"
                                           Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
                             <ContentPresenter.Resources>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
@@ -192,8 +280,8 @@
 
     <!-- Step / flow controls (blue accent) -->
     <Style x:Key="StepButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-        <Setter Property="Foreground" Value="{StaticResource AccentHover}" />
-        <Setter Property="BorderBrush" Value="{StaticResource Accent}" />
+        <Setter Property="Foreground" Value="{StaticResource PanelAccentText}" />
+        <Setter Property="BorderBrush" Value="{x:Static svc:Palette.BlueBrush}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
@@ -201,7 +289,7 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"
                                           Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
                             <ContentPresenter.Resources>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
@@ -211,7 +299,7 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource AccentSoft}" />
-                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource AccentHover}" />
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{x:Static svc:Palette.BlueBrush}" />
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource AccentPressed}" />
@@ -228,7 +316,7 @@
 
     <!-- Pause (amber) -->
     <Style x:Key="WarnButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-        <Setter Property="Foreground" Value="{StaticResource Warn}" />
+        <Setter Property="Foreground" Value="{StaticResource WarnText}" />
         <Setter Property="BorderBrush" Value="{StaticResource Warn}" />
         <Setter Property="Template">
             <Setter.Value>
@@ -237,7 +325,7 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"
                                           Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
                             <ContentPresenter.Resources>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
@@ -264,7 +352,7 @@
 
     <!-- Stop / Detach (red) -->
     <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-        <Setter Property="Foreground" Value="{StaticResource Danger}" />
+        <Setter Property="Foreground" Value="{StaticResource DangerText}" />
         <Setter Property="BorderBrush" Value="{StaticResource Danger}" />
         <Setter Property="Template">
             <Setter.Value>
@@ -273,7 +361,7 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"
                                           Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
                             <ContentPresenter.Resources>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource ButtonGlyphText}" />
@@ -307,6 +395,7 @@
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="Padding" Value="10,4" />
         <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="Template">
@@ -316,7 +405,7 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="3" SnapsToDevicePixels="True">
-                        <ContentPresenter x:Name="cp" HorizontalAlignment="Center" VerticalAlignment="Center"
+                        <ContentPresenter x:Name="cp" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"
                                           Margin="{TemplateBinding Padding}" RecognizesAccessKey="True">
                             <!-- Re-point the glyph at the control's Foreground so the checked-state dark colour
                                  below shows over the light accent fill (see ButtonGlyphText for the why). -->
@@ -341,6 +430,15 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Width" Value="176" />
+                <Setter Property="Height" Value="30" />
+                <Setter Property="Margin" Value="2" />
+                <Setter Property="Padding" Value="9,4" />
+                <Setter Property="HorizontalContentAlignment" Value="Left" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- CheckBox -->
@@ -378,6 +476,13 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Width" Value="176" />
+                <Setter Property="Height" Value="30" />
+                <Setter Property="Margin" Value="2" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- TextBox -->
@@ -406,6 +511,45 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Height" Value="30" />
+                <Setter Property="Margin" Value="2" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- WPF substitutes special system styles for controls hosted by a ToolBar. Re-point those keys
+         at the app's own controls so the overflow palette does not mix native and themed chrome. -->
+    <Style x:Key="{x:Static ToolBar.ButtonStyleKey}" TargetType="Button"
+           BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Style.Triggers>
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Background" Value="{StaticResource Surface}" />
+                <Setter Property="BorderBrush" Value="{StaticResource Outline}" />
+                <Setter Property="BorderThickness" Value="1" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="{x:Static ToolBar.ToggleButtonStyleKey}" TargetType="ToggleButton"
+           BasedOn="{StaticResource {x:Type ToggleButton}}" />
+    <Style x:Key="{x:Static ToolBar.CheckBoxStyleKey}" TargetType="CheckBox"
+           BasedOn="{StaticResource {x:Type CheckBox}}" />
+    <Style x:Key="{x:Static ToolBar.TextBoxStyleKey}" TargetType="TextBox"
+           BasedOn="{StaticResource {x:Type TextBox}}" />
+    <Style x:Key="ToolBarAddressBox" TargetType="TextBox"
+           BasedOn="{StaticResource {x:Type TextBox}}">
+        <Setter Property="Width" Value="160" />
+        <Setter Property="Margin" Value="0,3,0,3" />
+        <Style.Triggers>
+            <Trigger Property="ToolBar.IsOverflowItem" Value="True">
+                <Setter Property="Width" Value="176" />
+                <Setter Property="Height" Value="30" />
+                <Setter Property="Margin" Value="2" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ComboBox + item. WPF's default ComboBox is a light system control, so the inherited light
@@ -815,7 +959,7 @@
         <Setter Property="EnableRowVirtualization" Value="True" />
         <Setter Property="EnableColumnVirtualization" Value="True" />
         <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
-        <Setter Property="FontFamily" Value="Cascadia Mono, Consolas" />
+        <Setter Property="FontFamily" Value="{x:Static svc:AppFonts.Code}" />
         <Setter Property="FontSize" Value="12" />
     </Style>
     <Style TargetType="DataGridColumnHeader">
@@ -858,7 +1002,7 @@
         <Setter Property="ctl:TrimmedToolTip.Enabled" Value="True" />
     </Style>
     <Style x:Key="GridCellAccent" TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
-        <Setter Property="Foreground" Value="{StaticResource Accent}" />
+        <Setter Property="Foreground" Value="{StaticResource PanelAccentText}" />
     </Style>
     <Style x:Key="GridCellMuted" TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
         <Setter Property="Foreground" Value="{StaticResource TextMuted}" />

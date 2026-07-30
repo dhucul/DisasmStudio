@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using DisasmStudio.ManagedDebug;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf.Controls;
 
@@ -10,8 +11,8 @@ namespace DisasmStudio.Wpf.Controls;
 /// (which shows registers/memory) — managed debugging has neither. Double-click a frame to navigate to it.</summary>
 public sealed class ManagedDebugPanel : Grid
 {
-    private readonly ListBox _frames = new() { BorderThickness = new Thickness(0), FontFamily = new FontFamily("Cascadia Mono, Consolas") };
-    private readonly ListBox _locals = new() { BorderThickness = new Thickness(0), FontFamily = new FontFamily("Cascadia Mono, Consolas") };
+    private readonly ListBox _frames = new() { BorderThickness = new Thickness(0), FontFamily = AppFonts.Code };
+    private readonly ListBox _locals = new() { BorderThickness = new Thickness(0), FontFamily = AppFonts.Code };
 
     /// <summary>Raised when a call-stack frame is activated (double-click) — the frame index.</summary>
     public event Action<int>? FrameActivated;

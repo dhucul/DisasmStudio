@@ -5,9 +5,9 @@ namespace DisasmStudio.Wpf.Services;
 
 /// <summary>
 /// The disassembly views' syntax palette — a thin semantic mapping of token/structure roles onto the
-/// shared <see cref="Palette"/> (the single flavour source). Frozen brushes, cheap to reuse on every
-/// render; token colours stay gentle so nothing fights for attention. To recolour, edit Palette; to
-/// re-map which token uses which hue, edit here.
+/// shared <see cref="Palette"/>. Frozen brushes are cheap to reuse on every render. Chrome and
+/// debugger signals use the full-strength theme colours; code tokens use a quieter, lower-chroma
+/// derivative so dense listings remain comfortable over long sessions.
 /// </summary>
 public static class SyntaxTheme
 {
@@ -22,23 +22,23 @@ public static class SyntaxTheme
     public static readonly Brush HwBreakpointDot = Palette.SkyBrush;    // hardware breakpoint marker
     public static readonly Brush CoveredInstr = Palette.CoveredBrush;   // an executed (covered) instruction row
 
-    // Columns
-    public static readonly Brush Address = Palette.BlueBrush;
-    public static readonly Brush Bytes = Palette.Overlay1Brush;   // dim
-    public static readonly Brush FuncName = Palette.YellowBrush;  // function headers
+    // All font brushes use the same perceived luminance (~0.30); hue alone identifies roles.
+    public static readonly Brush Address = B(0x78, 0x97, 0xC2);
+    public static readonly Brush Bytes = B(0x82, 0x97, 0xAE);
+    public static readonly Brush FuncName = B(0xB2, 0x90, 0x46);
 
-    // Token kinds (harmonized, distinct hues)
-    public static readonly Brush Mnemonic = Palette.BlueBrush;
-    public static readonly Brush Register = Palette.TealBrush;
-    public static readonly Brush Number = Palette.PeachBrush;
-    public static readonly Brush Symbol = Palette.GreenBrush;     // named targets
-    public static readonly Brush Keyword = Palette.MauveBrush;
-    public static readonly Brush Prefix = Palette.MauveBrush;
-    public static readonly Brush Punctuation = Palette.Overlay2Brush;
-    public static readonly Brush Text = Palette.TextBrush;
-    public static readonly Brush Comment = Palette.Overlay0Brush;
-    public static readonly Brush TypeName = Palette.SkyBrush;         // C types
-    public static readonly Brush Variable = Palette.Subtext1Brush;    // recovered vars
+    // Token hues remain distinct, but none is brighter or dimmer than its neighbours.
+    public static readonly Brush Mnemonic = B(0x74, 0x98, 0xC4);
+    public static readonly Brush Register = B(0x5A, 0xA1, 0x99);
+    public static readonly Brush Number = B(0xBC, 0x8C, 0x57);
+    public static readonly Brush Symbol = B(0x59, 0xA3, 0x83);
+    public static readonly Brush Keyword = B(0xA0, 0x8C, 0xBC);
+    public static readonly Brush Prefix = B(0xA0, 0x8C, 0xBC);
+    public static readonly Brush Punctuation = B(0x7F, 0x98, 0xB0);
+    public static readonly Brush Text = B(0x79, 0x98, 0xB7);
+    public static readonly Brush Comment = B(0x7F, 0x98, 0xAF);
+    public static readonly Brush TypeName = B(0x62, 0x9E, 0xAC);
+    public static readonly Brush Variable = B(0x81, 0x98, 0xAD);
 
     // Graph view: the debugger bands are brightened (rows sit over the lighter block surface), and the
     // current-IP row also gets a bright warm outline so it can't be missed against a covered run of rows.
@@ -60,6 +60,13 @@ public static class SyntaxTheme
         var p = new Pen(brush, thickness);
         p.Freeze();
         return p;
+    }
+
+    private static Brush B(byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
     }
 
     public static Brush BrushFor(AsmTokenKind kind) => kind switch

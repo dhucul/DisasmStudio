@@ -58,7 +58,7 @@ internal static class ExceptionDialog
             BorderThickness = new Thickness(0), MinHeight = 280,
         };
         grid.ColumnHeaderStyle = HeaderStyle();
-        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var mono = AppFonts.Code;
         grid.Columns.Add(new DataGridTextColumn { Header = "Code (hex)", Binding = new System.Windows.Data.Binding("Code"), Width = 150, FontFamily = mono });
         grid.Columns.Add(new DataGridTextColumn { Header = "Name", Binding = new System.Windows.Data.Binding("Name"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         grid.Columns.Add(new DataGridCheckBoxColumn { Header = "Break 1st", Binding = new System.Windows.Data.Binding("BreakFirst") });
@@ -89,6 +89,7 @@ internal static class ExceptionDialog
 
         var win = new Window
         {
+            FontFamily = AppFonts.Ui,
             Title = "Debugger exceptions", Owner = owner, Width = 640, Height = 460,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = Bg, Foreground = Fg,
         };

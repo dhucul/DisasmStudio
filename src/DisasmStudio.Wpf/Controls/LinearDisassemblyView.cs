@@ -45,7 +45,7 @@ public sealed class LinearDisassemblyView : Grid
     private double _disasmGapChars = 28;   // bytes→disasm gap in chars; draggable via the column divider
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 13.0;
     private double _rowHeight = 16;
     private double _charWidth = 8;

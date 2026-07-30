@@ -21,13 +21,14 @@ public sealed class EmulationDialog : Window
         Action<ulong> onNavigate, Action onApplyComments, Action onApplyPatch)
     {
         Owner = owner;
+        FontFamily = AppFonts.Ui;
         Title = $"Emulate — {funcName}";
         Width = 720;
         Height = 560;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         Background = Palette.Surface0Brush;
         Foreground = Palette.TextBrush;
-        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var mono = AppFonts.Code;
 
         string statusText = er.Status switch
         {
@@ -81,7 +82,7 @@ public sealed class EmulationDialog : Window
         {
             FontFamily = mono, FontSize = 12, IsReadOnly = true, Margin = new Thickness(16, 0, 16, 8),
             Height = 130, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Background = Palette.BaseBrush, Foreground = Palette.GreenBrush,
+            Background = Palette.BaseBrush, Foreground = Palette.SuccessTextBrush,
             Text = FormatDecrypted(er, nameFor),
         };
 

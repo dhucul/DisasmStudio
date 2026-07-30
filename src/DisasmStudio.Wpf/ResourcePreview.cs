@@ -18,7 +18,7 @@ namespace DisasmStudio.Wpf;
 internal static class ResourcePreview
 {
     private static readonly Brush Fg = Palette.TextBrush; // text
-    private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
+    private static readonly FontFamily Mono = AppFonts.Code;
 
     public static UIElement Build(byte[] data, uint? typeId)
     {

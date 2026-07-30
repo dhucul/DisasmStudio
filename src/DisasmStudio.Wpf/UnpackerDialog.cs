@@ -23,8 +23,8 @@ internal sealed class UnpackerDialog : Window
     private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
     private static readonly Brush Fg = Palette.TextBrush;   // text
     private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
-    private static readonly Brush Warn = Palette.PeachBrush; // peach
-    private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
+    private static readonly Brush Warn = Palette.WarnTextBrush;
+    private static readonly FontFamily Mono = AppFonts.Code;
 
     private readonly string _target;
     private readonly int _bitness;
@@ -67,6 +67,7 @@ internal sealed class UnpackerDialog : Window
         _verdict = verdict;
 
         Owner = owner;
+        FontFamily = AppFonts.Ui;
         Title = "Unpack";
         // Wide enough — and floored by MinWidth so the user can't shrink below it — that the right-aligned button
         // row (Unpack … Close, ~642 DIP) never overflows left and clips the leftmost "Unpack" button.

@@ -29,7 +29,7 @@ public sealed class SourceViewerWindow : Window
     private long _caret = -1;
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double CodeFontSize = 13.0;
     private double _rowHeight = 16;
     private double _charWidth = 8;
@@ -37,6 +37,7 @@ public sealed class SourceViewerWindow : Window
 
     public SourceViewerWindow(string path)
     {
+        FontFamily = AppFonts.Ui;
         Title = "Source — " + Path.GetFileName(path);
         Width = 900;
         Height = 700;

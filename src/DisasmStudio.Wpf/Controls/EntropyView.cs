@@ -22,7 +22,7 @@ public sealed class EntropyView : FrameworkElement
     private const double LeftPad = 30, RightPad = 8, TopPad = 8, BottomPad = 6;
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 10.0;
 
     /// <summary>Replace the plotted data (null clears) and repaint.</summary>
@@ -119,7 +119,7 @@ public sealed class EntropyView : FrameworkElement
             double y = plotB - (e / 8.0) * plotH;
             dc.DrawLine(gridPen, new Point(plotL, y), new Point(plotR, y));
             var ft = new FormattedText(e.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture,
-                FlowDirection.LeftToRight, _typeface, FontSize, Palette.Overlay1Brush, dpi);
+                FlowDirection.LeftToRight, _typeface, FontSize, Palette.FontMutedBrush, dpi);
             dc.DrawText(ft, new Point(plotL - ft.Width - 4, y - ft.Height / 2));
         }
 

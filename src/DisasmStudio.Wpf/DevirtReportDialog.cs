@@ -16,13 +16,14 @@ internal sealed class DevirtReportDialog : Window
     private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
     private static readonly Brush Fg = Palette.TextBrush;   // text
     private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
-    private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
+    private static readonly FontFamily Mono = AppFonts.Code;
 
     private readonly string _report;
 
     public DevirtReportDialog(Window owner, IBinaryImage image, DevirtResult result)
     {
         Owner = owner;
+        FontFamily = AppFonts.Ui;
         Title = "Devirtualizer";
         Width = 860;
         Height = 680;

@@ -4,10 +4,10 @@ using System.Windows.Media;
 namespace DisasmStudio.Wpf.Services;
 
 /// <summary>
-/// The single source of truth for the app's colour theme (Catppuccin Frappé).
+/// The single source of truth for the app's Arctic Circuit colour theme.
 ///
-/// To switch flavour, edit ONLY the token block below — the 26 named Catppuccin colours plus the
-/// two hand-tuned debugger bands. Everything else is derived (accent tints are computed by blending)
+/// To retune the theme, edit only the token block below plus the hand-tuned debugger bands.
+/// Everything else is derived (accent tints are computed by blending)
 /// and every consumer reads from here: the chrome dictionary (<c>Themes/Dark.xaml</c> via
 /// <c>{x:Static}</c>), <see cref="SyntaxTheme"/>, <c>Controls/HexView</c>, and the code-built dialogs.
 /// The role → token mapping lives in those consumers and is stable across flavours; see
@@ -17,46 +17,47 @@ public static class Palette
 {
     private static Color C(byte r, byte g, byte b) => Color.FromRgb(r, g, b);
 
-    // ─────────────────────────  FLAVOUR TOKENS — the swap point  ─────────────────────────
-    //  Catppuccin Frappé (https://github.com/catppuccin/catppuccin). Swap these to change
-    //  flavour (e.g. Mocha: Base #1E1E2E / Surface0 #313244 / Text #CDD6F4 / Lavender #B4BEFE …).
-    public static readonly Color Rosewater = C(0xF2, 0xD5, 0xCF);
-    public static readonly Color Flamingo  = C(0xEE, 0xBE, 0xBE);
-    public static readonly Color Pink      = C(0xF4, 0xB8, 0xE4);
-    public static readonly Color Mauve     = C(0xCA, 0x9E, 0xE6);
-    public static readonly Color Red       = C(0xE7, 0x82, 0x84);
-    public static readonly Color Maroon    = C(0xEA, 0x99, 0x9C);
-    public static readonly Color Peach     = C(0xEF, 0x9F, 0x76);
-    public static readonly Color Yellow    = C(0xE5, 0xC8, 0x90);
-    public static readonly Color Green     = C(0xA6, 0xD1, 0x89);
-    public static readonly Color Teal      = C(0x81, 0xC8, 0xBE);
-    public static readonly Color Sky       = C(0x99, 0xD1, 0xDB);
-    public static readonly Color Sapphire  = C(0x85, 0xC1, 0xDC);
-    public static readonly Color Blue      = C(0x8C, 0xAA, 0xEE);
-    public static readonly Color Lavender  = C(0xBA, 0xBB, 0xF1);
-    public static readonly Color Text      = C(0xC6, 0xD0, 0xF5);
-    public static readonly Color Subtext1  = C(0xB5, 0xBF, 0xE2);
-    public static readonly Color Subtext0  = C(0xA5, 0xAD, 0xCE);
-    public static readonly Color Overlay2  = C(0x94, 0x9C, 0xBB);
-    public static readonly Color Overlay1  = C(0x83, 0x8B, 0xA7);
-    public static readonly Color Overlay0  = C(0x73, 0x79, 0x94);
-    public static readonly Color Surface2  = C(0x62, 0x68, 0x80);
-    public static readonly Color Surface1  = C(0x51, 0x57, 0x6D);
-    public static readonly Color Surface0  = C(0x41, 0x45, 0x59);
-    public static readonly Color Base      = C(0x30, 0x34, 0x46);
-    public static readonly Color Mantle    = C(0x29, 0x2C, 0x3C);
-    public static readonly Color Crust     = C(0x23, 0x26, 0x34);
+    // ─────────────────────────  ARCTIC CIRCUIT TOKENS  ─────────────────────────
+    //  Layered navy surfaces provide the structure. Icy cyan marks navigation and selection;
+    //  periwinkle carries addresses, while mint is reserved for successful/live-debug state.
+    public static readonly Color Rosewater = C(0xF0, 0xCD, 0xD1);
+    public static readonly Color Flamingo  = C(0xF0, 0xA4, 0xAE);
+    public static readonly Color Pink      = C(0xE6, 0x8F, 0xDB);
+    public static readonly Color Mauve     = C(0xB9, 0x94, 0xF6);
+    public static readonly Color Red       = C(0xFF, 0x6B, 0x7A);
+    public static readonly Color Maroon    = C(0xE9, 0x78, 0x89);
+    public static readonly Color Peach     = C(0xF4, 0xB8, 0x60);
+    public static readonly Color Yellow    = C(0xF0, 0xCE, 0x72);
+    public static readonly Color Green     = C(0x56, 0xD6, 0xA7);
+    public static readonly Color Teal      = C(0x55, 0xD8, 0xC1);
+    public static readonly Color Sky       = C(0x45, 0xD7, 0xF0);
+    public static readonly Color Sapphire  = C(0x5E, 0xBB, 0xE6);
+    public static readonly Color Blue      = C(0x7F, 0xA7, 0xFF);
+    public static readonly Color Lavender  = C(0xA0, 0xA7, 0xFF);
+    // Neutral typography shares the same perceived intensity as the coloured code tokens below.
+    public static readonly Color Text      = C(0x79, 0x98, 0xB7);
+    public static readonly Color Subtext1  = C(0x81, 0x98, 0xAD);
+    public static readonly Color Subtext0  = C(0x7F, 0x98, 0xB0);
+    public static readonly Color Overlay2  = C(0x7F, 0x98, 0xB0);
+    public static readonly Color Overlay1  = C(0x62, 0x7C, 0x98);
+    public static readonly Color Overlay0  = C(0x58, 0x73, 0x8D);
+    public static readonly Color Surface2  = C(0x1C, 0x2E, 0x45);
+    public static readonly Color Surface1  = C(0x18, 0x28, 0x3B);
+    public static readonly Color Surface0  = C(0x16, 0x24, 0x37);
+    public static readonly Color Base      = C(0x11, 0x1C, 0x2B);
+    public static readonly Color Mantle    = C(0x0E, 0x17, 0x23);
+    public static readonly Color Crust     = C(0x09, 0x11, 0x1B);
 
-    // Hand-tuned debugger bands (warm amber / green over the dark base; retune per flavour).
-    public static readonly Color CurrentIpBand = C(0x4E, 0x4A, 0x35);
-    public static readonly Color CoveredBand   = C(0x38, 0x4A, 0x3C);
+    // Hand-tuned debugger bands (cyan / mint over the dark base).
+    public static readonly Color CurrentIpBand = C(0x16, 0x4A, 0x63);
+    public static readonly Color CoveredBand   = C(0x19, 0x3F, 0x38);
     // Brighter variants for the graph view, where rows sit over the lighter block surface (Surface0)
     // instead of Base — the base bands are near-invisible there, so these lift the luminance/chroma.
-    public static readonly Color CurrentIpBandGraph = C(0x5E, 0x57, 0x3E);
-    public static readonly Color CoveredBandGraph   = C(0x46, 0x66, 0x4C);
+    public static readonly Color CurrentIpBandGraph = C(0x1D, 0x60, 0x7B);
+    public static readonly Color CoveredBandGraph   = C(0x22, 0x55, 0x48);
 
-    // The single UI accent (re-point here for a non-Lavender accent).
-    public static readonly Color Accent = Lavender;
+    // The single UI accent.
+    public static readonly Color Accent = Sky;
     // ───────────────────────────  end swap point  ───────────────────────────
 
     // Derived accent / semantic tints — computed, so a flavour swap needs no edits here.
@@ -67,6 +68,14 @@ public static class Palette
     public static readonly Color SuccessSoft   = Mix(Base, Green, 0.16);
     public static readonly Color WarnSoft      = Mix(Base, Peach, 0.14);
     public static readonly Color DangerSoft    = Mix(Base, Red, 0.16);
+    // Every font-only colour below has the same relative luminance (~0.30). Hues still
+    // communicate roles, while no label or token appears inherently louder than another.
+    public static readonly Color FontMuted       = C(0x82, 0x97, 0xAE);
+    public static readonly Color PanelAccentText = C(0x78, 0x97, 0xC2);
+    public static readonly Color PanelWarmText   = C(0xBC, 0x8C, 0x57);
+    public static readonly Color SuccessText     = C(0x29, 0xA8, 0x7A);
+    public static readonly Color WarnText        = C(0xD2, 0x83, 0x0F);
+    public static readonly Color DangerText      = C(0xFF, 0x5C, 0x6C);
 
     private static Color Mix(Color a, Color b, double t)
     {
@@ -89,6 +98,12 @@ public static class Palette
     public static readonly SolidColorBrush Surface1Brush = F(Surface1);
     public static readonly SolidColorBrush Surface2Brush = F(Surface2);
     public static readonly SolidColorBrush AccentBrush   = F(Accent);
+    public static readonly SolidColorBrush FontMutedBrush = F(FontMuted);
+    public static readonly SolidColorBrush PanelAccentTextBrush = F(PanelAccentText);
+    public static readonly SolidColorBrush PanelWarmTextBrush = F(PanelWarmText);
+    public static readonly SolidColorBrush SuccessTextBrush = F(SuccessText);
+    public static readonly SolidColorBrush WarnTextBrush = F(WarnText);
+    public static readonly SolidColorBrush DangerTextBrush = F(DangerText);
     public static readonly SolidColorBrush BlueBrush     = F(Blue);
     public static readonly SolidColorBrush SkyBrush      = F(Sky);
     public static readonly SolidColorBrush TealBrush     = F(Teal);

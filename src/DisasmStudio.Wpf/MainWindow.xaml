@@ -2,73 +2,93 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ctl="clr-namespace:DisasmStudio.Wpf.Controls"
-        Title="DisasmStudio" Height="820" Width="1320"
+        xmlns:svc="clr-namespace:DisasmStudio.Wpf.Services"
+        Title="DisasmStudio" Height="820" Width="1320" MinHeight="500" MinWidth="940"
+        WindowStartupLocation="CenterScreen"
         Icon="DisasmStudio.ico"
-        FontFamily="Segoe UI" FontSize="12.5">
+        FontFamily="{x:Static svc:AppFonts.Ui}" FontSize="12.5">
     <DockPanel>
-        <!-- Toolbar -->
-        <Border DockPanel.Dock="Top" Background="{StaticResource Surface}"
-                BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1" Padding="8,6">
-            <!-- WrapPanel so a narrow window flows buttons onto another row instead of clipping them. -->
-            <WrapPanel>
+        <!-- Compact command bar. WPF's toolbar overflow keeps this to one row at every window width. -->
+        <Border DockPanel.Dock="Top" Background="{StaticResource Surface2}"
+                BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1" Padding="6,5">
+            <ctl:PersistentToolBar x:Name="MainToolBar"
+                                   Style="{StaticResource {x:Type ToolBar}}"
+                                   HorizontalAlignment="Stretch"
+                                   KeyboardNavigation.TabNavigation="Continue">
                 <Button x:Name="OpenBtn" Content="Open…" Click="OnOpen" Margin="0,3,0,3" />
-                <Button Content="Open Project…" Click="OnOpenProject" Margin="6,3,0,3" />
-                <Button Content="Save Project…" Click="OnSaveProject" Margin="6,3,0,3" />
-                <Button x:Name="UndoBtn" Content="↶ Undo" Click="OnUndoPatch" Margin="6,3,0,3" IsEnabled="False" ToolTip="Undo last edit (Ctrl+Z)" />
-                <Button x:Name="SavePatchedBtn" Content="Save Patched As…" Click="OnSavePatched" Margin="6,3,0,3" IsEnabled="False" />
-                <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button Content="Save ASM…" Click="OnSaveAsm" Margin="0,3,0,3" ToolTip="Export the full disassembly listing to a .asm file" />
-                <Button Content="Save C…" Click="OnSaveC" Margin="6,3,0,3" ToolTip="Export the decompiled Pseudo-C of all functions to a .c file" />
-                <Button Content="Gen Signatures…" Click="OnGenerateSignatures" Margin="6,3,0,3" ToolTip="FLIRT/FID-style: write masked prologue signatures for this binary's named functions to a .sig file. Drop .sig files in the 'signatures' folder beside the app and they auto-name matching functions when you open other binaries." />
-                <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
+                <Button ToolBar.OverflowMode="Always" Content="Open Project…" Click="OnOpenProject" />
+                <Button ToolBar.OverflowMode="Always" Content="Save Project…" Click="OnSaveProject" />
+                <Button ToolBar.OverflowMode="Always" x:Name="UndoBtn" Content="↶ Undo" Click="OnUndoPatch" IsEnabled="False" ToolTip="Undo last edit (Ctrl+Z)" />
+                <Button ToolBar.OverflowMode="Always" x:Name="SavePatchedBtn" Content="Save Patched As…" Click="OnSavePatched" IsEnabled="False" />
+                <Border ToolBar.OverflowMode="Always" Style="{StaticResource ToolBarDivider}" />
+                <Button ToolBar.OverflowMode="Always" Content="Save ASM…" Click="OnSaveAsm" ToolTip="Export the full disassembly listing to a .asm file" />
+                <Button ToolBar.OverflowMode="Always" Content="Save C…" Click="OnSaveC" ToolTip="Export the decompiled Pseudo-C of all functions to a .c file" />
+                <Button ToolBar.OverflowMode="Always" Content="Gen Signatures…" Click="OnGenerateSignatures" ToolTip="FLIRT/FID-style: write masked prologue signatures for this binary's named functions to a .sig file. Drop .sig files in the 'signatures' folder beside the app and they auto-name matching functions when you open other binaries." />
+                <Border Style="{StaticResource ToolBarDivider}" />
                 <Button x:Name="DbgRunBtn" Style="{StaticResource RunButton}" Content="▶ Run" Click="OnDebugRun" Margin="0,3,0,3" ToolTip="Run / continue (F5)" />
                 <Button x:Name="StepIntoBtn" Style="{StaticResource StepButton}" Content="⤓ Into" Click="OnStepInto" Margin="6,3,0,3" IsEnabled="False" ToolTip="Step into (F7)" />
                 <Button x:Name="StepOverBtn" Style="{StaticResource StepButton}" Content="⤵ Over" Click="OnStepOver" Margin="6,3,0,3" IsEnabled="False" ToolTip="Step over (F8)" />
                 <Button x:Name="StepOutBtn" Style="{StaticResource StepButton}" Content="⤴ Out" Click="OnStepOut" Margin="6,3,0,3" IsEnabled="False" ToolTip="Step out (Shift+F11)" />
-                <Button x:Name="RunToRetBtn" Style="{StaticResource StepButton}" Content="⤴▸ To Ret" Click="OnRunToReturn" Margin="6,3,0,3" IsEnabled="False" ToolTip="Continue until the current function returns — stop ON its ret, with calls running at full speed (Ctrl+F9). Falls back to Step Out in unanalyzed code." />
+                <Button ToolBar.OverflowMode="Always" x:Name="RunToRetBtn" Style="{StaticResource StepButton}" Content="⤴▸ To Ret" Click="OnRunToReturn" IsEnabled="False" ToolTip="Continue until the current function returns — stop ON its ret, with calls running at full speed (Ctrl+F9). Falls back to Step Out in unanalyzed code." />
                 <Button Style="{StaticResource WarnButton}" Content="⏸ Pause" Click="OnDebugPause" Margin="6,3,0,3" />
                 <Button Style="{StaticResource DangerButton}" Content="⏹ Stop" Click="OnDebugStop" Margin="6,3,0,3" />
-                <Button x:Name="DetachBtn" Style="{StaticResource DangerButton}" Content="⏏ Detach" Click="OnDebugDetach" Margin="6,3,0,3" IsEnabled="False" ToolTip="Detach the debugger but leave the program running. Restores all breakpoints and hide-layer code patches to the original bytes, clears the debug registers, releases job containment, and stops debugging — the process keeps running. Available only while stopped." />
-                <Button x:Name="RestartBtn" Style="{StaticResource RunButton}" Content="⟳ Restart" Click="OnDebugRestart" Margin="6,3,0,3" IsEnabled="False" ToolTip="Terminate the debuggee and launch it again from the start" />
-                <ToggleButton x:Name="CoverageToggle" Content="◴ Trace" Click="OnToggleCoverage" Margin="6,3,0,3" IsEnabled="False" ToolTip="Instruction trace from here: starts recording exactly where you're stopped — nothing is planted up front, so there's no whole-image arming. On Continue (F5) it single-steps the loaded module and tints each executed instruction green in the listing; a call into a system DLL runs at full speed and tracing resumes when it returns. Step Into/Over/Out also contribute. Enable while stopped, then Continue or step. Click again to stop tracing (no need to pause). Exact but slower than a free run over long loops." />
-                <Button x:Name="ClearCoverageBtn" Content="Clear trace" Click="OnClearCoverage" Margin="6,3,0,3" IsEnabled="False" ToolTip="Clear the execution-trace highlights." />
-                <ToggleButton x:Name="FollowWritesToggle" Content="⤒ Follow writes" IsChecked="True" Margin="6,3,0,3" ToolTip="While stepping, scroll the memory views (debug Memory dump and the Hex tab) so the address the current instruction writes to sits at the top, selected. Pairs with the red change-highlight: land on a store, the view snaps to its destination, step, and the byte turns red there. Stack pushes are not followed. Turn off to keep the memory views where they are." />
+                <Button ToolBar.OverflowMode="Always" x:Name="DetachBtn" Style="{StaticResource DangerButton}" Content="⏏ Detach" Click="OnDebugDetach" IsEnabled="False" ToolTip="Detach the debugger but leave the program running. Restores all breakpoints and hide-layer code patches to the original bytes, clears the debug registers, releases job containment, and stops debugging — the process keeps running. Available only while stopped." />
+                <Button ToolBar.OverflowMode="Always" x:Name="RestartBtn" Style="{StaticResource RunButton}" Content="⟳ Restart" Click="OnDebugRestart" IsEnabled="False" ToolTip="Terminate the debuggee and launch it again from the start" />
+                <ToggleButton ToolBar.OverflowMode="Always" x:Name="CoverageToggle" Content="◴ Trace" Click="OnToggleCoverage" IsEnabled="False" ToolTip="Instruction trace from here: starts recording exactly where you're stopped — nothing is planted up front, so there's no whole-image arming. On Continue (F5) it single-steps the loaded module and tints each executed instruction green in the listing; a call into a system DLL runs at full speed and tracing resumes when it returns. Step Into/Over/Out also contribute. Enable while stopped, then Continue or step. Click again to stop tracing (no need to pause). Exact but slower than a free run over long loops." />
+                <Button ToolBar.OverflowMode="Always" x:Name="ClearCoverageBtn" Content="Clear trace" Click="OnClearCoverage" IsEnabled="False" ToolTip="Clear the execution-trace highlights." />
+                <ToggleButton ToolBar.OverflowMode="Always" x:Name="FollowWritesToggle" Content="⤒ Follow writes" IsChecked="True" ToolTip="While stepping, scroll the memory views (debug Memory dump and the Hex tab) so the address the current instruction writes to sits at the top, selected. Pairs with the red change-highlight: land on a store, the view snaps to its destination, step, and the byte turns red there. Stack pushes are not followed. Turn off to keep the memory views where they are." />
                 <Button Content="Attach…" Click="OnAttach" Margin="6,3,0,3" ToolTip="Attach the debugger to a running process" />
-                <Button x:Name="UnpackBtn" Content="Unpack…" Click="OnUnpack" Margin="6,3,0,3" ToolTip="Generic unpacker: run a packed PE under the debugger, stop at the original entry point, dump it, rebuild the IAT and write a clean, re-analyzable EXE." />
-                <Button x:Name="DumpProcBtn" Content="Dump Process…" Click="OnDumpProcess" Margin="6,3,0,3" ToolTip="Non-invasive dump: snapshot a process's image to a clean PE WITHOUT debugging it, so an anti-debug protector decrypts itself normally and can't detect us. Attach to a separately-run target, or Launch and watch it from t=0; the Auto watch dumps the moment its image settles, then rebuilds the IAT." />
-                <Button x:Name="DevirtBtn" Content="Devirt..." Click="OnDevirt" Margin="6,3,0,3" ToolTip="Experimental VM devirtualizer: analyze a decrypted PE/memory image for a VM dispatcher, handler table and bytecode stream." />
-                <Button Content="Exceptions…" Click="OnExceptions" Margin="6,3,0,3" ToolTip="Configure which exceptions break vs pass straight to the program (first/second chance), x64dbg-style. Persisted across sessions and applied live." />
-                <CheckBox x:Name="LoaderBreakCheck" Content="Break at loader" Margin="12,3,0,3" ToolTip="When you Run, stop early instead of running free. Native target: stop at the loader breakpoint (before the entry point) so a capture can include TLS callbacks and static DLL DllMains. .NET target: stop at the managed entry point (Main). Set this before Run." />
-                <CheckBox x:Name="HideDebuggerCheck" Content="Hide debugger" Margin="12,3,0,3" ToolTip="Anti-anti-debug (ScyllaHide-style): before the entry point, clears the PEB BeingDebugged/NtGlobalFlag/heap-debug flags and hooks ntdll's NtQueryInformationProcess / NtSetInformationThread / NtQuerySystemInformation to report 'not debugged', and defeats the invalid-handle trick. Set this before Run; always on during Unpack." />
-                <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button x:Name="CaptureBtn" Content="⦿ Capture" Click="OnCaptureAll" Margin="0,3,0,3" IsEnabled="False" ToolTip="FunCap: log each function's arguments + return value on its first call, then stop intercepting it (fast for large programs)" />
-                <Button x:Name="CaptureFnBtn" Content="Capture Fn" Click="OnCaptureFunc" Margin="6,3,0,3" IsEnabled="False" ToolTip="Capture every call of the function at the current address" />
-                <CheckBox x:Name="OnceCheck" Content="First call only" IsChecked="True" Margin="12,3,0,3" IsEnabled="False" ToolTip="Capture each function once, then let it run at full speed (fast for large programs). Uncheck to capture every call (detailed but much slower)." />
-                <CheckBox x:Name="RetCheck" Content="Capture returns" IsChecked="True" Margin="12,3,0,3" IsEnabled="False" ToolTip="Also capture each function's return value (sets a return breakpoint). Uncheck for args-only: about half the events, faster." />
-                <CheckBox x:Name="DerefCheck" Content="Dereference args" IsChecked="True" Margin="12,3,0,3" IsEnabled="False" ToolTip="Annotate values with the string/symbol they point to (e.g. rcx → &quot;C:\…&quot;). This per-argument lookup is the main per-hit cost — uncheck to log raw hex values only, which is faster for dense captures." />
-                <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
+                <Button ToolBar.OverflowMode="Always" x:Name="UnpackBtn" Content="Unpack…" Click="OnUnpack" ToolTip="Generic unpacker: run a packed PE under the debugger, stop at the original entry point, dump it, rebuild the IAT and write a clean, re-analyzable EXE." />
+                <Button ToolBar.OverflowMode="Always" x:Name="DumpProcBtn" Content="Dump Process…" Click="OnDumpProcess" ToolTip="Non-invasive dump: snapshot a process's image to a clean PE WITHOUT debugging it, so an anti-debug protector decrypts itself normally and can't detect us. Attach to a separately-run target, or Launch and watch it from t=0; the Auto watch dumps the moment its image settles, then rebuilds the IAT." />
+                <Button ToolBar.OverflowMode="Always" x:Name="DevirtBtn" Content="Devirt..." Click="OnDevirt" ToolTip="Experimental VM devirtualizer: analyze a decrypted PE/memory image for a VM dispatcher, handler table and bytecode stream." />
+                <Button ToolBar.OverflowMode="Always" Content="Exceptions…" Click="OnExceptions" ToolTip="Configure which exceptions break vs pass straight to the program (first/second chance), x64dbg-style. Persisted across sessions and applied live." />
+                <CheckBox ToolBar.OverflowMode="Always" x:Name="LoaderBreakCheck" Content="Break at loader" ToolTip="When you Run, stop early instead of running free. Native target: stop at the loader breakpoint (before the entry point) so a capture can include TLS callbacks and static DLL DllMains. .NET target: stop at the managed entry point (Main). Set this before Run." />
+                <CheckBox ToolBar.OverflowMode="Always" x:Name="HideDebuggerCheck" Content="Hide debugger" ToolTip="Anti-anti-debug (ScyllaHide-style): before the entry point, clears the PEB BeingDebugged/NtGlobalFlag/heap-debug flags and hooks ntdll's NtQueryInformationProcess / NtSetInformationThread / NtQuerySystemInformation to report 'not debugged', and defeats the invalid-handle trick. Set this before Run; always on during Unpack." />
+                <Border Style="{StaticResource ToolBarDivider}" />
+                <Button ToolBar.OverflowMode="Always" x:Name="CaptureBtn" Content="⦿ Capture" Click="OnCaptureAll" IsEnabled="False" ToolTip="FunCap: log each function's arguments + return value on its first call, then stop intercepting it (fast for large programs)" />
+                <Button ToolBar.OverflowMode="Always" x:Name="CaptureFnBtn" Content="Capture Fn" Click="OnCaptureFunc" IsEnabled="False" ToolTip="Capture every call of the function at the current address" />
+                <CheckBox ToolBar.OverflowMode="Always" x:Name="OnceCheck" Content="First call only" IsChecked="True" IsEnabled="False" ToolTip="Capture each function once, then let it run at full speed (fast for large programs). Uncheck to capture every call (detailed but much slower)." />
+                <CheckBox ToolBar.OverflowMode="Always" x:Name="RetCheck" Content="Capture returns" IsChecked="True" IsEnabled="False" ToolTip="Also capture each function's return value (sets a return breakpoint). Uncheck for args-only: about half the events, faster." />
+                <CheckBox ToolBar.OverflowMode="Always" x:Name="DerefCheck" Content="Dereference args" IsChecked="True" IsEnabled="False" ToolTip="Annotate values with the string/symbol they point to (e.g. rcx → &quot;C:\…&quot;). This per-argument lookup is the main per-hit cost — uncheck to log raw hex values only, which is faster for dense captures." />
+                <Border Style="{StaticResource ToolBarDivider}" />
                 <Button x:Name="BackBtn" Content="◀ Back" Click="OnBack" IsEnabled="False" Margin="0,3,0,3" />
                 <Button x:Name="FwdBtn" Content="Forward ▶" Click="OnForward" IsEnabled="False" Margin="6,3,0,3" />
-                <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <TextBlock Text="Address" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}" Margin="0,3,6,3" />
-                <TextBox x:Name="AddrBox" Width="160" Margin="0,3,0,3" FontFamily="Cascadia Mono, Consolas"
-                         KeyDown="OnAddrKeyDown" />
-                <Button Content="Go" Click="OnGo" Margin="6,3,0,3" />
-                <Button x:Name="SectionsBtn" Content="Sections ▾" Click="OnSectionsMenu" Margin="6,3,0,3"
-                        ToolTip="Jump to the start of a section (or the PE header) in the linear view — loads a data section into the listing if needed" />
-                <TextBlock x:Name="FileInfo" VerticalAlignment="Center" Margin="16,3,0,3"
-                           Foreground="{StaticResource TextSecondary}" />
-                <Border Width="1" Height="18" VerticalAlignment="Center" Background="{StaticResource Outline}" Margin="8,3" />
-                <Button x:Name="HelpBtn" Content="Help ▾" Click="OnHelpMenu" Margin="0,3,0,3" ToolTip="Help (F1)">
-                    <Button.ContextMenu>
-                        <ContextMenu>
-                            <MenuItem Header="Keyboard Shortcuts" InputGestureText="F1" Click="OnHelpShortcuts" />
-                            <Separator />
-                            <MenuItem Header="About DisasmStudio…" Click="OnHelpAbout" />
-                        </ContextMenu>
-                    </Button.ContextMenu>
-                </Button>
-            </WrapPanel>
+                <Border Style="{StaticResource ToolBarDivider}" />
+                <!-- Keep the related navigation controls together as one intentional full-width overflow row. -->
+                <Grid ToolBar.OverflowMode="Always" Width="356" Margin="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="ADDR" Width="36" Margin="0,0,4,0"
+                               VerticalAlignment="Center" Foreground="{StaticResource TextMuted}"
+                               FontSize="10.5" FontWeight="SemiBold" />
+                    <TextBox Grid.Column="1" x:Name="AddrBox" Style="{StaticResource ToolBarAddressBox}"
+                             Height="30" Margin="0" HorizontalAlignment="Stretch"
+                             Background="{StaticResource Surface}" BorderBrush="{StaticResource OutlineStrong}"
+                             FontFamily="{x:Static svc:AppFonts.Code}" KeyDown="OnAddrKeyDown"
+                             ToolTip="Address (hex)" />
+                    <Button Grid.Column="2" Content="Go" Click="OnGo"
+                            Width="42" Height="30" Margin="2,0,0,0" Padding="8,4" />
+                    <Button Grid.Column="3" x:Name="SectionsBtn" Content="Sections ▾" Click="OnSectionsMenu"
+                            Width="94" Height="30" Margin="2,0,0,0" Padding="8,4"
+                            ToolTip="Jump to the start of a section (or the PE header) in the linear view — loads a data section into the listing if needed" />
+                    <Button Grid.Column="4" x:Name="HelpBtn" Content="Help ▾" Click="OnHelpMenu"
+                            Width="78" Height="30" Margin="2,0,0,0" Padding="8,4" ToolTip="Help (F1)">
+                        <Button.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Keyboard Shortcuts" InputGestureText="F1" Click="OnHelpShortcuts" />
+                                <Separator />
+                                <MenuItem Header="About DisasmStudio…" Click="OnHelpAbout" />
+                            </ContextMenu>
+                        </Button.ContextMenu>
+                    </Button>
+                </Grid>
+                <TextBlock x:Name="FileInfo" Style="{StaticResource ToolBarInfoText}" />
+            </ctl:PersistentToolBar>
         </Border>
 
         <!-- Status bar -->
@@ -120,15 +140,15 @@
                                 <MenuItem Header="Capture this function" Click="OnCaptureSelectedFunc" />
                             </ContextMenu>
                         </DataGrid.ContextMenu>
-                        <!-- Name / Section size to content (not star), so a long function name
-                             overflows the panel and the grid shows a horizontal scrollbar to reach
-                             it — the same "scroll instead of widen the panel" behaviour as the lists. -->
+                        <!-- Keep all three headers visible at the pane's default width. Name absorbs
+                             the remaining space and trims long symbols (GridCellText supplies the
+                             full value on hover); the two metadata columns stay compact and stable. -->
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="Auto" MinWidth="140"
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*" MinWidth="90"
                                                 ElementStyle="{StaticResource GridCellText}" />
-                            <DataGridTextColumn Header="Address" Binding="{Binding Address, StringFormat='0x{0}'}" Width="104"
+                            <DataGridTextColumn Header="Address" Binding="{Binding Address, StringFormat='0x{0}'}" Width="100"
                                                 ElementStyle="{StaticResource GridCellAccent}" />
-                            <DataGridTextColumn Header="Section" Binding="{Binding Section}" Width="Auto" MinWidth="70"
+                            <DataGridTextColumn Header="Section" Binding="{Binding Section}" Width="68"
                                                 ElementStyle="{StaticResource GridCellMuted}" />
                         </DataGrid.Columns>
                     </DataGrid>
@@ -227,14 +247,14 @@
                     <TabItem x:Name="XrefsTab" Header="Xrefs">
                         <DockPanel>
                             <TextBlock x:Name="XrefHeader" DockPanel.Dock="Top" Margin="10,8"
-                                       Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas"
+                                       Foreground="{StaticResource TextMuted}" FontFamily="{x:Static svc:AppFonts.Code}"
                                        Text="Select an address" />
                             <ListBox x:Name="XrefList" MouseDoubleClick="OnXrefActivate"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{Binding From}" Foreground="{StaticResource Accent}" Width="120" />
+                                            <TextBlock Text="{Binding From}" Foreground="{StaticResource PanelAccentText}" Width="120" />
                                             <TextBlock Text="{Binding Kind}" Foreground="{StaticResource TextSecondary}" />
                                         </StackPanel>
                                     </DataTemplate>
@@ -304,7 +324,7 @@
                                                              Height="9" Margin="4,0" VerticalAlignment="Center"
                                                              BorderThickness="0"
                                                              Background="{StaticResource Surface2}"
-                                                             Foreground="{StaticResource Accent}" />
+                                                             Foreground="{StaticResource PanelAccentText}" />
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -322,12 +342,12 @@
                                         Padding="6,1" Margin="6,3,0,3" Click="OnRefreshStrings"
                                         ToolTip="Rebuild the strings list. While stopped in a live session this re-scans the debuggee's process memory (so decrypted/unpacked strings appear); otherwise it rebuilds from the file's static strings." />
                                 <TextBlock x:Name="StringHeader" VerticalAlignment="Center" Margin="2,0,0,0"
-                                           Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                                           Foreground="{StaticResource TextMuted}" FontFamily="{x:Static svc:AppFonts.Code}" FontSize="11" Text="" />
                             </DockPanel>
                             <TextBox x:Name="StringFilter" DockPanel.Dock="Top" Margin="8,2,8,6" TextChanged="OnStringFilter" />
                             <ListBox x:Name="StringList" MouseDoubleClick="OnStringActivate"
                                      KeyDown="OnStringListKeyDown" PreviewMouseRightButtonDown="OnStringRightClick"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <ListBox.ContextMenu>
                                     <ContextMenu Opened="OnStringMenuOpening">
                                         <MenuItem x:Name="EditStringMenuItem" Header="Edit string…" InputGestureText="F2"
@@ -339,7 +359,7 @@
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="{Binding Marker}" Foreground="{StaticResource StringRef}" Width="14"
                                                        ToolTip="Referenced by the current call — recovered from a live argument/register pointer (heap/stack/other module)" />
-                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="92" />
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource PanelAccentText}" Width="92" />
                                             <TextBlock Text="{Binding Text}" Foreground="{StaticResource TextPrimary}"
                                                        TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
@@ -350,7 +370,7 @@
                     </TabItem>
                     <TabItem x:Name="ImportsTab" Header="Imports">
                         <ListBox x:Name="ImportList" MouseDoubleClick="OnImportActivate"
-                                 FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                 FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
                                     <StackPanel Orientation="Horizontal">
@@ -366,11 +386,11 @@
                         <DockPanel>
                             <TextBox x:Name="ExportFilter" DockPanel.Dock="Top" Margin="8,8,8,6" TextChanged="OnExportFilter" />
                             <ListBox x:Name="ExportList" MouseDoubleClick="OnExportActivate"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="92" />
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource PanelAccentText}" Width="92" />
                                             <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}"
                                                        TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
@@ -386,7 +406,7 @@
                                        Text="Breakpoints set with F2 or the gutter (before Run or during a session); right-click an instruction for a hardware breakpoint or to add a condition / hit-count. Untick a row to disable it (kept, not armed); double-click to jump; right-click here to edit or remove (Delete removes)." />
                             <ListBox x:Name="BreakpointList" MouseDoubleClick="OnBreakpointActivate"
                                      KeyDown="OnBreakpointListKey"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <ListBox.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="Jump to breakpoint" Click="OnBreakpointJump" />
@@ -401,7 +421,7 @@
                                             <CheckBox IsChecked="{Binding Enabled, Mode=OneWay}" Click="OnBreakpointEnabledToggle"
                                                       VerticalAlignment="Center" Margin="0,0,6,0"
                                                       ToolTip="Enabled — untick to disable this breakpoint without removing it" />
-                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="120" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource PanelAccentText}" Width="120" VerticalAlignment="Center" />
                                             <TextBlock Text="{Binding Label}" Foreground="{StaticResource TextPrimary}"
                                                        TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
                                         </StackPanel>
@@ -417,7 +437,7 @@
                                        Text="Bookmark any address from the listing / graph / decompiler / hex (right-click → Toggle bookmark). Rename symbols (N) and add comments (;) the same way. Double-click a bookmark to jump; Delete or right-click → Remove to clear it. All of this is saved in the .dsproj." />
                             <ListBox x:Name="BookmarkList" MouseDoubleClick="OnBookmarkActivate"
                                      KeyDown="OnBookmarkListKey"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <ListBox.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="Jump to bookmark" Click="OnBookmarkJump" />
@@ -427,7 +447,7 @@
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="120" />
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource PanelAccentText}" Width="120" />
                                             <TextBlock Text="{Binding Label}" Foreground="{StaticResource TextPrimary}"
                                                        TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
@@ -446,7 +466,7 @@
                                        Text="Double-click a row to jump (data → Hex). Right-click → 'Show in listing'. Tick to show/hide a section in the listing. In the listing, click the [+]/[−] in the gutter to collapse a section." />
                             <ListBox x:Name="SectionList" MouseDoubleClick="OnSectionActivate"
                                      PreviewMouseRightButtonDown="OnSectionRightClick"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <ListBox.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="Show in listing + jump" Click="OnSectionJumpFold" />
@@ -477,7 +497,7 @@
                             </Grid.RowDefinitions>
                             <TreeView x:Name="ResTree" Grid.Row="0"
                                       SelectedItemChanged="OnResourceSelected" MouseDoubleClick="OnResourceActivate"
-                                      FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                      FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <TreeView.ItemTemplate>
                                     <HierarchicalDataTemplate ItemsSource="{Binding Children}">
                                         <TextBlock Text="{Binding Display}" Foreground="{StaticResource TextPrimary}" />
@@ -510,12 +530,12 @@
                                        Foreground="{StaticResource TextSecondary}" FontSize="11.5" />
                             <ListBox x:Name="NetResList" Grid.Row="1" SelectionChanged="OnNetResourceSelected"
                                      MouseDoubleClick="OnNetResourceActivate"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="11.5"
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="11.5"
                                      Background="{StaticResource Surface}" BorderThickness="0">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal" Margin="2,1">
-                                            <TextBlock Text="{Binding Kind}" Foreground="{StaticResource Accent}" Width="130" />
+                                            <TextBlock Text="{Binding Kind}" Foreground="{StaticResource PanelAccentText}" Width="130" />
                                             <TextBlock Text="{Binding Size}" Foreground="{StaticResource TextMuted}" Width="90"
                                                        TextAlignment="Right" Margin="0,0,10,0" />
                                             <TextBlock Text="{Binding Name}" Foreground="{StaticResource TextPrimary}"
@@ -533,7 +553,7 @@
                     <!-- Obj-C: Objective-C classes/methods recovered from a Mach-O's __objc_* metadata. -->
                     <TabItem Header="Obj-C" x:Name="ObjCTab" Visibility="Collapsed">
                         <TreeView x:Name="ObjCTree" MouseDoubleClick="OnObjCActivate"
-                                  FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                  FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                             <TreeView.ItemTemplate>
                                 <HierarchicalDataTemplate ItemsSource="{Binding Children}">
                                     <TextBlock Text="{Binding Display}" Foreground="{StaticResource TextPrimary}" />
@@ -549,7 +569,7 @@
                                 <TextBox x:Name="SearchBox" TextChanged="OnSearchFilter"
                                          ToolTip="Type text or a hex address. Click a result to list every reference to it below; double-click a result to jump to its definition, or a reference to jump to that call site." />
                                 <TextBlock x:Name="SearchHeader" Margin="2,4,0,0"
-                                           Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                                           Foreground="{StaticResource TextMuted}" FontFamily="{x:Static svc:AppFonts.Code}" FontSize="11" Text="" />
                             </StackPanel>
                             <Grid>
                                 <Grid.RowDefinitions>
@@ -560,12 +580,12 @@
                                 </Grid.RowDefinitions>
                                 <ListBox x:Name="SearchResults" Grid.Row="0"
                                          SelectionChanged="OnSearchResultSelected" MouseDoubleClick="OnSearchResultActivate"
-                                         FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                         FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
                                             <StackPanel Orientation="Horizontal">
                                                 <TextBlock Text="{Binding Kind}" Foreground="{StaticResource TextMuted}" Width="34" />
-                                                <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="92" />
+                                                <TextBlock Text="{Binding Address}" Foreground="{StaticResource PanelAccentText}" Width="92" />
                                                 <TextBlock Text="{Binding Text}" Foreground="{StaticResource TextPrimary}"
                                                            TextTrimming="CharacterEllipsis" />
                                             </StackPanel>
@@ -575,14 +595,14 @@
                                 <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch"
                                               Background="{StaticResource Outline}" />
                                 <TextBlock x:Name="SearchRefHeader" Grid.Row="2" Margin="10,6,10,4"
-                                           Foreground="{StaticResource TextMuted}" FontFamily="Cascadia Mono, Consolas" FontSize="11"
+                                           Foreground="{StaticResource TextMuted}" FontFamily="{x:Static svc:AppFonts.Code}" FontSize="11"
                                            Text="Select a result to list references" TextTrimming="CharacterEllipsis" />
                                 <ListBox x:Name="SearchRefs" Grid.Row="3" MouseDoubleClick="OnSearchRefActivate"
-                                         FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                         FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
                                             <StackPanel Orientation="Horizontal">
-                                                <TextBlock Text="{Binding From}" Foreground="{StaticResource Accent}" Width="92" />
+                                                <TextBlock Text="{Binding From}" Foreground="{StaticResource PanelAccentText}" Width="92" />
                                                 <TextBlock Text="{Binding Kind}" Foreground="{StaticResource TextSecondary}" Width="52" />
                                                 <TextBlock Text="{Binding Context}" Foreground="{StaticResource TextMuted}"
                                                            TextTrimming="CharacterEllipsis" />
@@ -608,17 +628,17 @@
                                               Margin="0,0,8,0" IsEnabled="False" Click="OnFindHitsOnly"
                                               ToolTip="Show only the matches that were hit during tracing (hides the ones that never ran)." />
                                     <TextBlock x:Name="FindInsnHeader" VerticalAlignment="Center" Foreground="{StaticResource TextMuted}"
-                                               FontFamily="Cascadia Mono, Consolas" FontSize="11" Text="" />
+                                               FontFamily="{x:Static svc:AppFonts.Code}" FontSize="11" Text="" />
                                 </DockPanel>
                             </StackPanel>
                             <ListBox x:Name="FindInsnResults" SelectionChanged="OnFindInsnActivate" MouseDoubleClick="OnFindInsnActivate"
-                                     FontFamily="Cascadia Mono, Consolas" FontSize="12">
+                                     FontFamily="{x:Static svc:AppFonts.Code}" FontSize="12">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="{Binding HitMark}" Foreground="{StaticResource StringRef}" Width="14" FontWeight="Bold"
                                                        ToolTip="Executed during hit-tracing" />
-                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource Accent}" Width="84" />
+                                            <TextBlock Text="{Binding Address}" Foreground="{StaticResource PanelAccentText}" Width="84" />
                                             <TextBlock Text="{Binding Text}" Foreground="{StaticResource TextPrimary}"
                                                        TextTrimming="CharacterEllipsis" />
                                         </StackPanel>

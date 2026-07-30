@@ -34,6 +34,10 @@ namespace DisasmStudio.Wpf;
 public partial class MainWindow : Window
 {
     private const int MaxStringRows = 20_000;
+    private const int DwmUseImmersiveDarkMode = 20;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);
 
     private readonly NavigationService _nav = new();
     private IBinaryImage? _image;
@@ -140,6 +144,12 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        SourceInitialized += (_, _) =>
+        {
+            int dark = 1;
+            _ = DwmSetWindowAttribute(new WindowInteropHelper(this).Handle,
+                DwmUseImmersiveDarkMode, ref dark, sizeof(int));
+        };
         _stringRefreshTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(300),
@@ -1850,9 +1860,66 @@ public partial class MainWindow : Window
             Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
         };
 
+        static Grid SectionMenuRow(string name, string address, string kind, bool heading = false)
+        {
+            var row = new Grid { Width = 310 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(112) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(148) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(50) });
+
+            var nameCell = new TextBlock
+            {
+                Text = name,
+                Foreground = heading ? Palette.Overlay2Brush : Palette.TextBrush,
+                FontSize = heading ? 10 : 12,
+                FontWeight = heading ? FontWeights.SemiBold : FontWeights.Normal,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                ToolTip = heading ? null : name,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 12, 0),
+            };
+            var addressCell = new TextBlock
+            {
+                Text = address,
+                Foreground = heading ? Palette.Overlay2Brush : Palette.PanelAccentTextBrush,
+                FontFamily = AppFonts.Code,
+                FontSize = heading ? 10 : 12,
+                FontWeight = heading ? FontWeights.SemiBold : FontWeights.Normal,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var kindCell = new TextBlock
+            {
+                Text = kind,
+                Foreground = heading ? Palette.Overlay2Brush : Palette.FontMutedBrush,
+                FontSize = heading ? 10 : 11,
+                FontWeight = heading ? FontWeights.SemiBold : FontWeights.Normal,
+                TextAlignment = TextAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            Grid.SetColumn(nameCell, 0);
+            Grid.SetColumn(addressCell, 1);
+            Grid.SetColumn(kindCell, 2);
+            row.Children.Add(nameCell);
+            row.Children.Add(addressCell);
+            row.Children.Add(kindCell);
+            return row;
+        }
+
+        cm.Items.Add(new MenuItem
+        {
+            Header = SectionMenuRow("SECTION", "ADDRESS", "TYPE", heading: true),
+            Focusable = false,
+            IsHitTestVisible = false,
+            Padding = new Thickness(10, 4, 10, 4),
+        });
+        cm.Items.Add(new Separator());
+
         void Add(string name, ulong va, bool code, bool isHeader, bool foldable)
         {
-            var mi = new MenuItem { Header = $"{name,-10}  {va:X}   {(code ? "code" : "data")}" };
+            string kind = code ? "code" : "data";
+            var mi = new MenuItem { Header = SectionMenuRow(name, va.ToString("X"), kind) };
+            System.Windows.Automation.AutomationProperties.SetName(mi, $"{name}, {va:X}, {kind}");
             mi.Click += (_, _) => JumpToSection(va, isHeader ? null : name, isHeader, foldable);
             cm.Items.Add(mi);
         }
@@ -1862,6 +1929,11 @@ public partial class MainWindow : Window
             Add(s.Name, s.StartVa, s.IsExecutable, isHeader: false, foldable: !s.IsExecutable && s.FileSize > 0);
 
         b.ContextMenu = cm;
+        if (MainToolBar.IsOverflowOpen)
+        {
+            // Keep the placement target alive while its child menu is open.
+            e.Handled = true;
+        }
         cm.IsOpen = true;
     }
 
@@ -1909,6 +1981,12 @@ public partial class MainWindow : Window
         {
             cm.PlacementTarget = b;
             cm.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+            if (MainToolBar.IsOverflowOpen)
+            {
+                // The ToolBar normally closes its overflow after a child Click, which would also close
+                // this nested menu. Keep the parent palette open while the nested menu is used.
+                e.Handled = true;
+            }
             cm.IsOpen = true;
         }
     }

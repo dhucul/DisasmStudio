@@ -35,7 +35,7 @@ public sealed class HexView : Grid
     private readonly HashSet<ulong> _changedVas = new();
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 13.0;
     private double _rowHeight = 16;
     private double _charWidth = 8;
@@ -82,12 +82,12 @@ public sealed class HexView : Grid
     public Func<ulong, byte, bool>? WriteByteAt { get; set; }
 
     private static readonly Brush BgBrush = Palette.BaseBrush;
-    private static readonly Brush AddrBrush = Palette.BlueBrush;
-    private static readonly Brush HexBrush = Palette.TextBrush;
-    private static readonly Brush AsciiBrush = Palette.GreenBrush;
+    private static readonly Brush AddrBrush = SyntaxTheme.Address;
+    private static readonly Brush HexBrush = SyntaxTheme.Text;
+    private static readonly Brush AsciiBrush = SyntaxTheme.Symbol;
     private static readonly Brush DimBrush = Palette.Surface2Brush;      // unreadable/zero bytes
     private static readonly Brush SelBrush = Palette.SelOverlayBrush;    // lavender @ 0x66 alpha
-    private static readonly Brush PatchBrush = Palette.PeachBrush;       // edited byte
+    private static readonly Brush PatchBrush = Palette.WarnTextBrush;    // edited byte
     private static readonly Brush ChangedBrush = Palette.ChangedByteBrush; // byte changed since the last step (debugger)
 
     public HexView()

@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf.Controls;
 
@@ -43,7 +44,7 @@ public sealed class CallGraphView : DockPanel
 
     public CallGraphView()
     {
-        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var mono = AppFonts.Code;
 
         _mode = new ComboBox { Width = 96, Margin = new Thickness(6, 0, 0, 0) };
         _mode.Items.Add("Callees ↓");

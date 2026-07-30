@@ -13,8 +13,8 @@ internal static class HelpDialog
     private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
     private static readonly Brush Fg = Palette.TextBrush;   // text
     private static readonly Brush Sub = Palette.Subtext1Brush;  // subtext1
-    private static readonly Brush Accent = Palette.AccentBrush; // lavender
-    private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
+    private static readonly Brush Accent = Palette.PanelAccentTextBrush;
+    private static readonly FontFamily Mono = AppFonts.Code;
 
     private static readonly (string Title, (string Key, string Desc)[] Items)[] Groups =
     [
@@ -114,7 +114,7 @@ internal static class HelpDialog
         }
         stack.Children.Add(new TextBlock
         {
-            Text = "Press F1 to reopen this.", Foreground = Palette.Overlay1Brush,
+            Text = "Press F1 to reopen this.", Foreground = Palette.FontMutedBrush,
             FontStyle = FontStyles.Italic, Margin = new Thickness(0, 16, 0, 0),
         });
 
@@ -145,7 +145,7 @@ internal static class HelpDialog
         panel.Children.Add(new TextBlock
         {
             Text = $".NET {Environment.Version}  ·  {(Environment.Is64BitProcess ? "x64" : "x86")}",
-            Foreground = Palette.Overlay1Brush, FontFamily = Mono, FontSize = 11,
+            Foreground = Palette.FontMutedBrush, FontFamily = Mono, FontSize = 11,
         });
         Show(owner, "About DisasmStudio", panel, width: 440, height: 0, resizable: false);
     }
@@ -155,6 +155,7 @@ internal static class HelpDialog
     {
         var win = new Window
         {
+            FontFamily = AppFonts.Ui,
             Title = title, Owner = owner, Width = width,
             Background = Bg, Foreground = Fg,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,

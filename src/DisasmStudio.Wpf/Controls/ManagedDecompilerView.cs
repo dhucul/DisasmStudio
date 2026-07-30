@@ -123,7 +123,7 @@ public sealed class ManagedDecompilerView : Grid
     }
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 13.0;
     private double _rowHeight = 16;
     private double _charWidth = 8;
@@ -407,8 +407,8 @@ public sealed class ManagedDecompilerView : Grid
     {
         _csBtn.FontWeight = _il ? FontWeights.Normal : FontWeights.SemiBold;
         _ilBtn.FontWeight = _il ? FontWeights.SemiBold : FontWeights.Normal;
-        _csBtn.Foreground = _il ? (Brush)Application.Current.Resources["TextSecondary"] : (Brush)Application.Current.Resources["Accent"];
-        _ilBtn.Foreground = _il ? (Brush)Application.Current.Resources["Accent"] : (Brush)Application.Current.Resources["TextSecondary"];
+        _csBtn.Foreground = _il ? (Brush)Application.Current.Resources["TextSecondary"] : (Brush)Application.Current.Resources["PanelAccentText"];
+        _ilBtn.Foreground = _il ? (Brush)Application.Current.Resources["PanelAccentText"] : (Brush)Application.Current.Resources["TextSecondary"];
     }
 
     // ---- geometry / rendering (mirrors DecompilerView, minus the address gutter) ----

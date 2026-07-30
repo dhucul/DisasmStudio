@@ -26,7 +26,7 @@ public sealed class MemoryMapStrip : FrameworkElement
     private const double MinGapPx = 2;    // a gap may be thinner
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 10.0;
 
     /// <summary>Raised (with the row index) when a block is clicked; the host navigates + selects the table row.</summary>

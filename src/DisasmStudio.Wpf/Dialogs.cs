@@ -18,7 +18,7 @@ internal static class Dialogs
 {
     private static readonly Brush Bg = Palette.Surface0Brush;   // surface0
     private static readonly Brush Fg = Palette.TextBrush;   // text
-    private static readonly Brush Muted = Palette.Overlay1Brush; // overlay1
+    private static readonly Brush Muted = Palette.FontMutedBrush;
 
     /// <summary>How to host a DLL under the debugger: the host EXE that loads it, the full command line
     /// (incl. argv0), the working directory, and the chosen export's static VA to break at (null = "just
@@ -39,7 +39,7 @@ internal static class Dialogs
     public static (ulong BaseVa, int Bitness, ulong EntryVa, Architecture Arch)? AskRawOptions(
         Window owner, FirmwareScan scan, long fileLength, Architecture? suggestedArch = null)
     {
-        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var mono = AppFonts.Code;
 
         var bits = new ComboBox { Margin = new Thickness(0, 0, 0, 10) };
         bits.Items.Add("x64 (64-bit)");                // 0
@@ -92,7 +92,7 @@ internal static class Dialogs
             panel.Children.Add(new TextBlock
             {
                 Text = scan.Summary,
-                Foreground = Palette.GreenBrush,
+                Foreground = Palette.SuccessTextBrush,
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 0, 0, 12),
             });
@@ -126,7 +126,7 @@ internal static class Dialogs
     /// (full decompiler support), else arm64, else the first. Returns the chosen slice, or null if cancelled.</summary>
     public static MachOSlice? AskMachOSlice(Window owner, IReadOnlyList<MachOSlice> slices)
     {
-        var combo = new ComboBox { Margin = new Thickness(0, 0, 0, 10), FontFamily = new FontFamily("Cascadia Mono, Consolas") };
+        var combo = new ComboBox { Margin = new Thickness(0, 0, 0, 10), FontFamily = AppFonts.Code };
         foreach (var s in slices)
             combo.Items.Add($"{s.ArchName,-8}  @ 0x{s.Offset:X}   {s.Size / 1024:N0} KB");
 
@@ -150,28 +150,93 @@ internal static class Dialogs
     public static AnalysisOptions? AskLoadSections(Window owner, IBinaryImage image, AnalysisOptions current)
     {
         var outer = new StackPanel { Margin = new Thickness(16) };
-        outer.Children.Add(Label("Sections in this image. Code is always shown; tick a data section / the header to fold it into the listing as data:"));
+        var intro = Label("Sections in this image. Code is always shown; tick a data section / the header to fold it into the listing as data:");
+        intro.TextWrapping = TextWrapping.Wrap;
+        outer.Children.Add(intro);
 
         var rows = new List<(CheckBox Box, string? Section, bool Header)>();   // toggleable rows only
-        var selectAll = new CheckBox { Content = "Select all data sections", Foreground = Fg, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 4) };
+        var selectAll = new CheckBox { Content = "Select all data sections", Foreground = Fg, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 6) };
         selectAll.Click += (_, _) => { bool on = selectAll.IsChecked == true; foreach (var (box, _, _) in rows) box.IsChecked = on; };
         outer.Children.Add(selectAll);
 
+        static Grid SectionRow(string name, string range, string status, bool heading = false)
+        {
+            // Reserve room for the vertical scrollbar so STATUS remains fully visible
+            // when a binary has more sections than fit in the viewport.
+            var row = new Grid { Width = 470, MinHeight = heading ? 20 : 24 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(110) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(270) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
+
+            var nameCell = new TextBlock
+            {
+                Text = name,
+                Foreground = heading ? Palette.Overlay2Brush : Palette.TextBrush,
+                FontSize = heading ? 10 : 12,
+                FontWeight = heading ? FontWeights.SemiBold : FontWeights.Normal,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                ToolTip = heading ? null : name,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 12, 0),
+            };
+            var rangeCell = new TextBlock
+            {
+                Text = range,
+                Foreground = heading ? Palette.Overlay2Brush : Palette.PanelAccentTextBrush,
+                FontFamily = AppFonts.Code,
+                FontSize = heading ? 10 : 12,
+                FontWeight = heading ? FontWeights.SemiBold : FontWeights.Normal,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var statusCell = new TextBlock
+            {
+                Text = status,
+                Foreground = heading ? Palette.Overlay2Brush : Palette.FontMutedBrush,
+                FontSize = heading ? 10 : 11,
+                FontWeight = heading ? FontWeights.SemiBold : FontWeights.Normal,
+                TextAlignment = TextAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            Grid.SetColumn(nameCell, 0);
+            Grid.SetColumn(rangeCell, 1);
+            Grid.SetColumn(statusCell, 2);
+            row.Children.Add(nameCell);
+            row.Children.Add(rangeCell);
+            row.Children.Add(statusCell);
+            return row;
+        }
+
+        outer.Children.Add(new Border
+        {
+            Child = SectionRow("SECTION", "ADDRESS RANGE", "STATUS", heading: true),
+            BorderBrush = Palette.Overlay0Brush,
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Margin = new Thickness(22, 0, 0, 1),
+            Padding = new Thickness(0, 0, 0, 4),
+        });
+
         // The section rows scroll so a many-section binary can't push the OK/Cancel buttons off-screen.
         var list = new StackPanel();
-        outer.Children.Add(new ScrollViewer { Content = list, MaxHeight = 360, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        outer.Children.Add(new ScrollViewer
+        {
+            Content = list,
+            MaxHeight = 360,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        });
 
-        void AddRow(string text, bool isChecked, bool enabled, string? section, bool header)
+        void AddRow(string name, string range, string status, bool isChecked, bool enabled, string? section, bool header)
         {
             var cb = new CheckBox
             {
-                Content = text,
+                Content = SectionRow(name, range, status),
                 Foreground = enabled ? Fg : Muted,
-                Margin = new Thickness(0, 6, 0, 0),
+                Margin = new Thickness(0, 4, 0, 0),
                 IsChecked = isChecked,
                 IsEnabled = enabled,
-                FontFamily = new FontFamily("Cascadia Mono, Consolas"),
             };
+            System.Windows.Automation.AutomationProperties.SetName(cb, $"{name}, {range}, {status}");
             if (enabled)
             {
                 cb.Click += (_, _) => { if (cb.IsChecked != true) selectAll.IsChecked = false; };   // keep "Select all" honest
@@ -181,12 +246,12 @@ internal static class Dialogs
         }
 
         if (image.HeaderRegion is { FileSize: > 0 })
-            AddRow("HEADER    (PE header)            [data]", current.IncludeHeader, true, null, true);
+            AddRow("HEADER", "(PE header)", "data", current.IncludeHeader, true, null, true);
         foreach (var s in image.Sections.OrderBy(s => s.StartVa))
         {
             bool exec = s.IsExecutable, hasData = s.FileSize > 0;
-            string tag = exec ? "[code · always]" : hasData ? "[data]" : "[no file data]";
-            AddRow($"{s.Name,-8} {s.StartVa:X}-{s.EndVa:X}  {tag}",
+            string status = exec ? "code · always" : hasData ? "data" : "no file data";
+            AddRow(s.Name, $"{s.StartVa:X}-{s.EndVa:X}", status,
                 isChecked: exec || (hasData && current.IncludedDataSections.Contains(s.Name)),
                 enabled: !exec && hasData,
                 section: !exec && hasData ? s.Name : null, header: false);
@@ -195,7 +260,7 @@ internal static class Dialogs
         if (rows.Count == 0) return current;   // nothing optional to choose (e.g. a raw blob: one code section)
         selectAll.IsChecked = rows.All(r => r.Box.IsChecked == true);
 
-        bool ok = ShowModal(owner, "Load sections", outer, selectAll, 460);
+        bool ok = ShowModal(owner, "Load sections", outer, selectAll, 560);
         if (!ok) return null;
 
         var set = new HashSet<string>();
@@ -213,9 +278,9 @@ internal static class Dialogs
     /// (or hex bytes) to encode, and whether to just NOP it out; null if cancelled.</summary>
     public static (string Asm, bool Nop)? AskPatch(Window owner, ulong va, string currentText, string currentBytes, string prefill = "")
     {
-        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var mono = AppFonts.Code;
         var info = new TextBlock { Text = $"{va:X}   {currentText}", Foreground = Fg, FontFamily = mono, Margin = new Thickness(0, 0, 0, 2) };
-        var bytes = new TextBlock { Text = currentBytes, Foreground = Palette.Overlay1Brush, FontFamily = mono, Margin = new Thickness(0, 0, 0, 10) };
+        var bytes = new TextBlock { Text = currentBytes, Foreground = Palette.FontMutedBrush, FontFamily = mono, Margin = new Thickness(0, 0, 0, 10) };
         var box = new TextBox { Text = prefill, FontFamily = mono, AcceptsReturn = true, MinLines = 2, MaxLines = 8 };
         box.SelectAll();
         var nop = new CheckBox { Content = "Replace with NOPs", Foreground = Fg, Margin = new Thickness(0, 10, 0, 0) };
@@ -240,7 +305,7 @@ internal static class Dialogs
     public static DebugDllOptions? AskDebugDll(Window owner, string dllPath, int bitness,
                                                IReadOnlyList<(string Name, ulong Va)> exports)
     {
-        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var mono = AppFonts.Code;
 
         var hostBox = new TextBox { Text = Rundll32Path(bitness), FontFamily = mono };
         var browse = new Button { Content = "Browse…", MinWidth = 76, Margin = new Thickness(8, 0, 0, 0) };
@@ -330,7 +395,7 @@ internal static class Dialogs
     /// Returns the chosen pid, or null if cancelled.</summary>
     public static uint? AskProcess(Window owner, int expectBitness)
     {
-        var mono = new FontFamily("Cascadia Mono, Consolas");
+        var mono = AppFonts.Code;
         // expectBitness 0 = no file open: the process's own image is analyzed after attach, so any arch is fine.
         string hint = expectBitness switch
         {
@@ -393,6 +458,7 @@ internal static class Dialogs
 
         var win = new Window
         {
+            FontFamily = AppFonts.Ui,
             Title = "Attach to process",
             Owner = owner,
             Width = 680,
@@ -471,10 +537,10 @@ internal static class Dialogs
         mode.Items.Add("Text (UTF-16)");
         mode.SelectedIndex = 0;
 
-        var box = new TextBox { FontFamily = new FontFamily("Cascadia Mono, Consolas") };
+        var box = new TextBox { FontFamily = AppFonts.Code };
         var error = new TextBlock
         {
-            Foreground = Palette.RedBrush, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0),
+            Foreground = Palette.DangerTextBrush, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0),
         };
 
         var panel = new StackPanel { Margin = new Thickness(16) };
@@ -485,6 +551,7 @@ internal static class Dialogs
 
         var win = new Window
         {
+            FontFamily = AppFonts.Ui,
             Title = "Find bytes",
             Owner = owner,
             Width = 380,
@@ -548,7 +615,7 @@ internal static class Dialogs
         var box = new TextBox
         {
             Text = initial,
-            FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+            FontFamily = AppFonts.Code,
             AcceptsReturn = allowLineBreaks,
             AcceptsTab = true,
             MinWidth = 440,
@@ -565,7 +632,7 @@ internal static class Dialogs
         };
         var error = new TextBlock
         {
-            Foreground = Palette.RedBrush,
+            Foreground = Palette.DangerTextBrush,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 5, 0, 0),
         };
@@ -577,6 +644,7 @@ internal static class Dialogs
 
         var win = new Window
         {
+            FontFamily = AppFonts.Ui,
             Title = "Edit string",
             Owner = owner,
             Width = 500,
@@ -628,7 +696,7 @@ internal static class Dialogs
         var box = new TextBox
         {
             Text = initial,
-            FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+            FontFamily = AppFonts.Code,
             AcceptsReturn = multiline,
             MinLines = multiline ? 3 : 1,
             MaxLines = multiline ? 8 : 1,
@@ -682,6 +750,7 @@ internal static class Dialogs
     {
         var win = new Window
         {
+            FontFamily = AppFonts.Ui,
             Title = "Edit breakpoint",
             Owner = owner,
             Width = 440,
@@ -695,7 +764,7 @@ internal static class Dialogs
         var cond = new TextBox { Text = current.Condition ?? "" };
         var err = new TextBlock
         {
-            Foreground = Palette.RedBrush,
+            Foreground = Palette.DangerTextBrush,
             Margin = new Thickness(0, 4, 0, 0),
             TextWrapping = TextWrapping.Wrap,
             Visibility = Visibility.Collapsed,
@@ -798,6 +867,7 @@ internal static class Dialogs
     {
         var win = new Window
         {
+            FontFamily = AppFonts.Ui,
             Title = title,
             Owner = owner,
             Width = width,

@@ -41,7 +41,7 @@ public sealed class GraphView : FrameworkElement
     private const double DebugZoom = 1.0;    // readable zoom for debugger follow (don't shrink to fit)
 
     private readonly Typeface _typeface =
-        new(new FontFamily("Cascadia Mono, Consolas"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 12.5;
     private double _rowHeight = 15;
     private double _charWidth = 7.5;
