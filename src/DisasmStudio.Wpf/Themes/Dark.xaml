@@ -16,6 +16,7 @@
     <SolidColorBrush x:Key="TextPrimary"   Color="{x:Static svc:Palette.Text}" />
     <SolidColorBrush x:Key="TextSecondary" Color="{x:Static svc:Palette.Subtext1}" />
     <SolidColorBrush x:Key="TextMuted"     Color="{x:Static svc:Palette.FontMuted}" />
+    <SolidColorBrush x:Key="TextDisabled"  Color="{x:Static svc:Palette.TextDisabled}" />
     <SolidColorBrush x:Key="Accent"        Color="{x:Static svc:Palette.Accent}" />
     <SolidColorBrush x:Key="PanelAccentText" Color="{x:Static svc:Palette.PanelAccentText}" />
     <SolidColorBrush x:Key="AccentHover"   Color="{x:Static svc:Palette.AccentHover}" />
@@ -43,6 +44,7 @@
 
     <Style TargetType="{x:Type Window}">
         <Setter Property="Background" Value="{StaticResource Background}" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
         <Setter Property="UseLayoutRounding" Value="True" />
         <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
         <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
@@ -61,6 +63,9 @@
             <Trigger Property="TextTrimming" Value="WordEllipsis">
                 <Setter Property="ctl:TrimmedToolTip.Enabled" Value="True" />
             </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+            </Trigger>
         </Style.Triggers>
     </Style>
 
@@ -76,6 +81,11 @@
 
     <Style TargetType="Label">
         <Setter Property="Foreground" Value="{StaticResource TextSecondary}" />
+        <Style.Triggers>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ToolTip (default is a light system popup; the inherited light text was unreadable) -->
@@ -220,7 +230,7 @@
                             <Setter TargetName="bd" Property="Background" Value="{StaticResource SurfacePressed}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.45" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -270,7 +280,8 @@
                             <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.45" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Outline}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -306,7 +317,8 @@
                             <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.45" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Outline}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -342,7 +354,8 @@
                             <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.45" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Outline}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -378,7 +391,8 @@
                             <Setter Property="Foreground" Value="{x:Static svc:Palette.CrustBrush}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.45" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Outline}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -424,7 +438,8 @@
                             <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Accent}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.45" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                            <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Outline}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -470,7 +485,7 @@
                             <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource AccentHover}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter Property="Opacity" Value="0.45" />
+                            <Setter Property="Opacity" Value="0.58" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -512,6 +527,10 @@
             </Setter.Value>
         </Setter>
         <Style.Triggers>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                <Setter Property="CaretBrush" Value="{StaticResource TextDisabled}" />
+            </Trigger>
             <Trigger Property="ToolBar.IsOverflowItem" Value="True">
                 <Setter Property="Height" Value="30" />
                 <Setter Property="Margin" Value="2" />
@@ -632,8 +651,8 @@
                             <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Accent}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="bd" Property="Opacity" Value="0.5" />
-                            <Setter TargetName="contentPresenter" Property="Opacity" Value="0.5" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                            <Setter TargetName="arrow" Property="Fill" Value="{StaticResource TextDisabled}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -658,6 +677,9 @@
                         </Trigger>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="b" Property="Background" Value="{StaticResource AccentSoft}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -717,6 +739,9 @@
                             <Setter TargetName="tb" Property="Background" Value="{StaticResource AccentSoft}" />
                             <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
                         </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
@@ -768,6 +793,9 @@
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="chip" Property="Background" Value="{StaticResource AccentSoft}" />
                             <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -1067,7 +1095,7 @@
                             <Setter TargetName="b" Property="Background" Value="{StaticResource Selection}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter Property="Opacity" Value="0.5" />
+                            <Setter Property="Foreground" Value="{StaticResource TextDisabled}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>

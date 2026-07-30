@@ -34,13 +34,16 @@ public static class Palette
     public static readonly Color Sapphire  = C(0x5E, 0xBB, 0xE6);
     public static readonly Color Blue      = C(0x7F, 0xA7, 0xFF);
     public static readonly Color Lavender  = C(0xA0, 0xA7, 0xFF);
-    // Neutral typography shares the same perceived intensity as the coloured code tokens below.
-    public static readonly Color Text      = C(0x79, 0x98, 0xB7);
-    public static readonly Color Subtext1  = C(0x81, 0x98, 0xAD);
-    public static readonly Color Subtext0  = C(0x7F, 0x98, 0xB0);
-    public static readonly Color Overlay2  = C(0x7F, 0x98, 0xB0);
-    public static readonly Color Overlay1  = C(0x62, 0x7C, 0x98);
-    public static readonly Color Overlay0  = C(0x58, 0x73, 0x8D);
+    // Neutral typography follows a deliberate hierarchy over Base:
+    // primary (~8.1:1), secondary (~5.4:1), muted (~4.1:1), disabled (~3.2:1).
+    // None of these use pure white or black.
+    public static readonly Color Text         = C(0x9F, 0xB5, 0xCA);
+    public static readonly Color Subtext1     = C(0x7E, 0x95, 0xAB);
+    public static readonly Color Subtext0     = C(0x68, 0x7F, 0x96);
+    public static readonly Color Overlay2     = C(0x74, 0x8B, 0xA2);
+    public static readonly Color Overlay1     = C(0x60, 0x76, 0x8C);
+    public static readonly Color Overlay0     = C(0x58, 0x6D, 0x82);
+    public static readonly Color TextDisabled = C(0x58, 0x6D, 0x82);
     public static readonly Color Surface2  = C(0x1C, 0x2E, 0x45);
     public static readonly Color Surface1  = C(0x18, 0x28, 0x3B);
     public static readonly Color Surface0  = C(0x16, 0x24, 0x37);
@@ -68,14 +71,14 @@ public static class Palette
     public static readonly Color SuccessSoft   = Mix(Base, Green, 0.16);
     public static readonly Color WarnSoft      = Mix(Base, Peach, 0.14);
     public static readonly Color DangerSoft    = Mix(Base, Red, 0.16);
-    // Every font-only colour below has the same relative luminance (~0.30). Hues still
-    // communicate roles, while no label or token appears inherently louder than another.
-    public static readonly Color FontMuted       = C(0x82, 0x97, 0xAE);
-    public static readonly Color PanelAccentText = C(0x78, 0x97, 0xC2);
-    public static readonly Color PanelWarmText   = C(0xBC, 0x8C, 0x57);
-    public static readonly Color SuccessText     = C(0x29, 0xA8, 0x7A);
-    public static readonly Color WarnText        = C(0xD2, 0x83, 0x0F);
-    public static readonly Color DangerText      = C(0xFF, 0x5C, 0x6C);
+    // Descriptive text stays quiet; important addresses, values, warnings, and state
+    // labels sit above it without reaching the intensity of the full-strength accents.
+    public static readonly Color FontMuted       = C(0x68, 0x7F, 0x96);
+    public static readonly Color PanelAccentText = C(0x87, 0xA9, 0xCE);
+    public static readonly Color PanelWarmText   = C(0xC1, 0x9A, 0x68);
+    public static readonly Color SuccessText     = C(0x67, 0xB9, 0x9C);
+    public static readonly Color WarnText        = C(0xD4, 0xA1, 0x5D);
+    public static readonly Color DangerText      = C(0xE5, 0x8A, 0x94);
 
     private static Color Mix(Color a, Color b, double t)
     {
@@ -88,6 +91,7 @@ public static class Palette
 
     public static readonly SolidColorBrush TextBrush     = F(Text);
     public static readonly SolidColorBrush Subtext1Brush = F(Subtext1);
+    public static readonly SolidColorBrush TextDisabledBrush = F(TextDisabled);
     public static readonly SolidColorBrush Overlay2Brush = F(Overlay2);
     public static readonly SolidColorBrush Overlay1Brush = F(Overlay1);
     public static readonly SolidColorBrush Overlay0Brush = F(Overlay0);

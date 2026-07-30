@@ -7,7 +7,7 @@ namespace DisasmStudio.Wpf.Services;
 /// The disassembly views' syntax palette — a thin semantic mapping of token/structure roles onto the
 /// shared <see cref="Palette"/>. Frozen brushes are cheap to reuse on every render. Chrome and
 /// debugger signals use the full-strength theme colours; code tokens use a quieter, lower-chroma
-/// derivative so dense listings remain comfortable over long sessions.
+/// hierarchy so important instructions and values lead, while raw bytes and comments recede.
 /// </summary>
 public static class SyntaxTheme
 {
@@ -22,23 +22,24 @@ public static class SyntaxTheme
     public static readonly Brush HwBreakpointDot = Palette.SkyBrush;    // hardware breakpoint marker
     public static readonly Brush CoveredInstr = Palette.CoveredBrush;   // an executed (covered) instruction row
 
-    // All font brushes use the same perceived luminance (~0.30); hue alone identifies roles.
-    public static readonly Brush Address = B(0x78, 0x97, 0xC2);
-    public static readonly Brush Bytes = B(0x82, 0x97, 0xAE);
-    public static readonly Brush FuncName = B(0xB2, 0x90, 0x46);
+    // Addresses and function names are important values; raw bytes are supporting detail.
+    public static readonly Brush Address = B(0x87, 0xA9, 0xCE);
+    public static readonly Brush Bytes = B(0x68, 0x7F, 0x96);
+    public static readonly Brush FuncName = B(0xC1, 0x9A, 0x68);
 
-    // Token hues remain distinct, but none is brighter or dimmer than its neighbours.
-    public static readonly Brush Mnemonic = B(0x74, 0x98, 0xC4);
-    public static readonly Brush Register = B(0x5A, 0xA1, 0x99);
-    public static readonly Brush Number = B(0xBC, 0x8C, 0x57);
-    public static readonly Brush Symbol = B(0x59, 0xA3, 0x83);
-    public static readonly Brush Keyword = B(0xA0, 0x8C, 0xBC);
-    public static readonly Brush Prefix = B(0xA0, 0x8C, 0xBC);
-    public static readonly Brush Punctuation = B(0x7F, 0x98, 0xB0);
-    public static readonly Brush Text = B(0x79, 0x98, 0xB7);
-    public static readonly Brush Comment = B(0x7F, 0x98, 0xAF);
-    public static readonly Brush TypeName = B(0x62, 0x9E, 0xAC);
-    public static readonly Brush Variable = B(0x81, 0x98, 0xAD);
+    // Executable tokens remain comfortably prominent. Punctuation is secondary and
+    // comments are muted, keeping dense listings readable without flattening the hierarchy.
+    public static readonly Brush Mnemonic = B(0x86, 0xA7, 0xCC);
+    public static readonly Brush Register = B(0x73, 0xAA, 0x9F);
+    public static readonly Brush Number = B(0xC1, 0x9A, 0x68);
+    public static readonly Brush Symbol = B(0x6F, 0xAE, 0x91);
+    public static readonly Brush Keyword = B(0xAE, 0x9A, 0xC3);
+    public static readonly Brush Prefix = B(0xAE, 0x9A, 0xC3);
+    public static readonly Brush Punctuation = B(0x78, 0x8F, 0xA6);
+    public static readonly Brush Text = B(0x9F, 0xB5, 0xCA);
+    public static readonly Brush Comment = B(0x68, 0x7F, 0x96);
+    public static readonly Brush TypeName = B(0x71, 0xA4, 0xB1);
+    public static readonly Brush Variable = B(0x84, 0x9C, 0xAF);
 
     // Graph view: the debugger bands are brightened (rows sit over the lighter block surface), and the
     // current-IP row also gets a bright warm outline so it can't be missed against a covered run of rows.
