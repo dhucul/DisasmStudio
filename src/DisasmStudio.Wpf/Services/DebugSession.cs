@@ -42,6 +42,7 @@ public sealed class DebugSession
     public event Action? Stopped;
     public event Action? Running;
     public event Action<int>? Exited;
+    public event Action<DebugStartFailure>? StartFailed;
     /// <summary>Raised when the debugger detached but left the process running (see <see cref="Detach"/>).</summary>
     public event Action? Detached;
     public event Action<string>? Output;
@@ -57,12 +58,13 @@ public sealed class DebugSession
         _ui = ui; _static = staticResult;
         Engine.Stopped += OnStopped;
         Engine.Running += () => _ui.BeginInvoke(() => { IsStopped = false; Running?.Invoke(); });
+        Engine.StartFailed += failure => _ui.BeginInvoke(() => StartFailed?.Invoke(failure));
         Engine.Exited += code => _ui.BeginInvoke(() => { IsStopped = false; Exited?.Invoke(code); });
         Engine.Detached += () => _ui.BeginInvoke(() => { IsStopped = false; Detached?.Invoke(); });
         Engine.Output += m => _ui.BeginInvoke(() => Output?.Invoke(m));
     }
 
-    public void Launch(string path) => Engine.Launch(path);
+    public void Launch(string path, string? workingDirectory = null) => Engine.Launch(path, workingDirectory);
     public void Attach(uint pid) => Engine.Attach(pid);
 
     /// <summary>Debug a DLL by hosting it in <paramref name="hostExe"/> (rundll32 or a custom host) which

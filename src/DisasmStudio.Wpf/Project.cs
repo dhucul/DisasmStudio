@@ -1,8 +1,10 @@
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DisasmStudio.Core.Analysis;
+using DisasmStudio.ManagedDebug;
 using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
 
@@ -16,7 +18,7 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 public sealed record ProjectFile
 {
-    public int Version { get; init; } = 9;
+    public int Version { get; init; } = 10;
     public long MachSliceOffset { get; init; }   // v8: selected slice in a fat/universal Mach-O (0 for a thin file)
     public string BinaryPath { get; init; } = "";
     public string? BinarySha256 { get; init; }   // v9: pristine backing-file identity before offset-based state is restored
@@ -38,6 +40,8 @@ public sealed record ProjectFile
     public List<ulong>? Trace { get; init; }                      // executed-instruction trace (coverage), static VAs
     public List<PatchRun>? Patches { get; init; }                 // byte edits, coalesced into contiguous file-offset runs
     public Dictionary<ulong, bool>? JumpAssumptions { get; init; } // static "toggle jump" what-ifs: VA → assumed-taken
+    public List<BpLoc>? ManagedBreakpoints { get; init; }         // v10: source breakpoints (module + metadata token + IL offset)
+    public DllDebugState? DllDebug { get; init; }                 // v10: exact DLL host/export selection for restart/elevation
 
     // Fields (BpDef uses public fields) + enums-as-strings so BpDef's HwKind/MemAccess/HitCountMode round-trip
     // robustly; byte[] in PatchRun serialises as base64.
@@ -48,11 +52,18 @@ public sealed record ProjectFile
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public void Save(string path) => AtomicFile.WriteAllText(path, JsonSerializer.Serialize(this, Opts));
+    public string ToJson() => JsonSerializer.Serialize(this, Opts);
 
-    public static ProjectFile Load(string path) =>
-        JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path), Opts)
+    public void Save(string path) => AtomicFile.WriteAllText(path, ToJson());
+
+    public static ProjectFile FromJson(string json) =>
+        JsonSerializer.Deserialize<ProjectFile>(json, Opts)
         ?? throw new InvalidDataException("Not a valid DisasmStudio project file.");
+
+    public static ProjectFile Load(string path) => FromJson(File.ReadAllText(path));
+
+    public static string ComputeJsonSha256(string json)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
 
     public static string ComputeBinarySha256(string path)
     {
@@ -65,3 +76,12 @@ public sealed record ProjectFile
 /// <summary>A contiguous run of patched bytes at file <paramref name="Offset"/> — how a project stores byte edits,
 /// re-applied verbatim via <see cref="DisasmStudio.Core.Formats.IBinaryImage.Patch"/> on reload.</summary>
 public sealed record PatchRun(int Offset, byte[] Bytes);
+
+/// <summary>The host and stop location selected for a native DLL debug launch.</summary>
+public sealed record DllDebugState(
+    string HostExe,
+    string CommandLine,
+    string? WorkingDir,
+    string DllPath,
+    uint BreakRva,
+    bool BreakIsEntry);

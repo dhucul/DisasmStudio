@@ -26,6 +26,8 @@ public sealed partial class DebuggerEngine
     /// <summary>Raised when the debugger has detached but left the debuggee running (see <see cref="Detach"/>).
     /// Distinct from <see cref="Exited"/> so the UI can report "still running" rather than an exit code.</summary>
     public event Action? Detached;
+    /// <summary>Raised before <see cref="Exited"/> when launch/attach fails before a debug loop is active.</summary>
+    public event Action<DebugStartFailure>? StartFailed;
     public event Action<string>? Output;
     public event Action? ModulesChanged;
     public event Action? ThreadsChanged;
@@ -42,6 +44,7 @@ public sealed partial class DebuggerEngine
 
     private Thread? _thread;
     private string? _launchPath;
+    private string? _launchWorkingDir;
     private uint _attachPid;
     private bool _attached;
 
@@ -128,9 +131,9 @@ public sealed partial class DebuggerEngine
     public void EnableJobContainment() => _useJob = true;
 
     // ---- start ----
-    public void Launch(string path)
+    public void Launch(string path, string? workingDirectory = null)
     {
-        _launchPath = path; _attached = false;
+        _launchPath = path; _launchWorkingDir = workingDirectory; _attached = false;
         _thread = new Thread(DebugLoop) { IsBackground = true, Name = "Debugger" };
         _thread.Start();
     }
@@ -171,6 +174,7 @@ public sealed partial class DebuggerEngine
                 Output?.Invoke(err == 5
                     ? "DebugActiveProcess failed: access denied. Run DisasmStudio as administrator when attaching to an elevated or protected target."
                     : $"DebugActiveProcess failed ({err})");
+                StartFailed?.Invoke(new DebugStartFailure(DebugStartOperation.Attach, err));
                 return false;
             }
             _pid = _attachPid;
@@ -181,7 +185,7 @@ public sealed partial class DebuggerEngine
         // CreateProcessW requires when lpApplicationName is set). Otherwise launch the target path directly.
         string? appName = _hostingDll ? _hostExe        : _launchPath;
         string? cmdLine = _hostingDll ? _hostCmdLine    : null;
-        string? workDir = _hostingDll ? _hostWorkingDir : null;
+        string? workDir = _hostingDll ? _hostWorkingDir : _launchWorkingDir;
         uint baseFlags = Native.DEBUG_ONLY_THIS_PROCESS | Native.CREATE_NEW_CONSOLE;
         // To job-contain the target we must first pull it out of any job the host itself was launched into
         // (Windows Terminal, a CI runner, VS, …), since such a job usually forbids nesting ours — the later
@@ -204,6 +208,7 @@ public sealed partial class DebuggerEngine
             Output?.Invoke(err is 5 or 740
                 ? "CreateProcess failed: the target requires elevation. Run DisasmStudio as administrator for this target."
                 : $"CreateProcess failed ({err})");
+            StartFailed?.Invoke(new DebugStartFailure(DebugStartOperation.Launch, err));
             return false;
         }
         _pid = pi.dwProcessId;

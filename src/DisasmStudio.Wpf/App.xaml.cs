@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Windows;
+using DisasmStudio.Debug;
 using DisasmStudio.Wpf.Diagnostics;
 
 namespace DisasmStudio.Wpf;
@@ -8,6 +9,7 @@ public partial class App : Application
 {
     [DllImport("kernel32.dll")] private static extern bool AttachConsole(int dwProcessId);
     private const int ATTACH_PARENT_PROCESS = -1;
+    internal DebugElevationRequest? PendingDebugElevationRequest { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -122,6 +124,19 @@ public partial class App : Application
             int rc = StringEditSmoke.Run();
             Shutdown(rc);
             return;
+        }
+
+        if (e.Args.Length > 0
+            && string.Equals(e.Args[0], DebugElevationRequest.Switch, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!DebugElevationRequest.TryParse(e.Args, out var request))
+            {
+                MessageBox.Show("The elevated debug handoff is invalid.", "DisasmStudio",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                Shutdown(2);
+                return;
+            }
+            PendingDebugElevationRequest = request;
         }
         base.OnStartup(e);   // StartupUri creates MainWindow
     }

@@ -92,16 +92,13 @@ public partial class MainWindow : Window
     private readonly HashSet<ulong> _coveredInstrs = [];
     private DispatcherTimer? _coverageTimer;  // polls the engine while running so highlights grow live
     private bool _restartPending;           // relaunch the target once the current debuggee has exited
-    private DllDebugParams? _dllDebug;      // set for a hosted-DLL session (null for an EXE); reused on Restart
+    private DllDebugState? _dllDebug;       // set for a hosted-DLL session (null for an EXE); reused on Restart/elevation
     private Function? _graphFn;              // function currently shown in the graph (avoids rebuild per step)
     private bool _openingGraph;              // guards OnCenterTabChanged from re-opening the graph at the caret during an explicit "open in graph"
     private CallGraph? _callGraph;           // whole-program static call graph, built lazily on first Call Graph tab view
     private EntropyData? _entropy;           // per-block + per-section byte entropy, built lazily on first Entropy tab view
     private int _entropyGen;                 // bumps per file/build so a stale background compute discards its result
     private bool _entropyComputing;          // a Build is in flight for the current gen — skips a redundant re-compute
-
-    // How the current DLL session is hosted, so Restart can relaunch it identically.
-    private readonly record struct DllDebugParams(string HostExe, string CommandLine, string? WorkingDir, string DllPath, uint BreakRva, bool BreakIsEntry);
 
     private DispatcherTimer? _captureTimer;  // polls the capture stream for the log/comments/graph
     private System.Threading.Timer? _captureFlushTimer;   // flushes the capture log off the UI thread (disk I/O)
@@ -139,6 +136,7 @@ public partial class MainWindow : Window
     private bool _staticStringsDirty;
     private bool _staticStringsScanning;
     private bool _refreshStaticStringsAfterDebug;
+    private DebugStartFailure? _debugStartFailure;
     private sealed record StaticStringSnapshot(List<FoundString> Strings, Dictionary<ulong, ulong> PointerSlots);
 
     public MainWindow()
@@ -173,6 +171,48 @@ public partial class MainWindow : Window
             // Build after the ElementName-bound chip Tags have resolved (not yet in the ctor).
             BuildSideAccordionMap();
             SyncAccordionToSelection();
+            if (Application.Current is App { PendingDebugElevationRequest: { } request })
+            {
+                if (!File.Exists(request.TargetPath))
+                {
+                    TryDeleteElevationSnapshot(request.SessionPath);
+                    StatusText.Text = $"Elevated debug target was not found: {request.TargetPath}";
+                    return;
+                }
+
+                if (request.SessionPath is { Length: > 0 } sessionPath)
+                {
+                    if (!IsElevationSnapshotPath(sessionPath) || !File.Exists(sessionPath))
+                    {
+                        StatusText.Text = "The elevated session snapshot is unavailable; debug was not started.";
+                        return;
+                    }
+                    try
+                    {
+                        await LoadProject(
+                            sessionPath,
+                            transient: true,
+                            expectedJsonSha256: request.SessionSha256);
+                    }
+                    finally { TryDeleteElevationSnapshot(sessionPath); }
+                }
+                else
+                    await LoadFile(request.TargetPath);
+
+                if (_image is null || !PathsEqual(_image.FilePath, request.TargetPath))
+                {
+                    StatusText.Text = "Elevated debug was not started because the target did not finish loading.";
+                    return;
+                }
+
+                HideDebuggerCheck.IsChecked = request.HideFromDebugger;
+                LoaderBreakCheck.IsChecked = request.StopAtLoaderBreakpoint;
+                StartDebugRun(
+                    forceNative: request.Mode == ElevatedDebugMode.Native,
+                    launchWorkingDirectory: request.WorkingDirectory,
+                    reuseDllConfiguration: request.SessionPath is { Length: > 0 });
+                return;
+            }
             var args = Environment.GetCommandLineArgs();
             if (args.Length > 1 && File.Exists(args[1])) await LoadFile(args[1]);
         };
@@ -407,6 +447,9 @@ public partial class MainWindow : Window
 
     // ---- debugger ----
     private void OnDebugRun(object sender, RoutedEventArgs e)
+        => StartDebugRun(forceNative: false);
+
+    private void StartDebugRun(bool forceNative, string? launchWorkingDirectory = null, bool reuseDllConfiguration = false)
     {
         if (_mdbg is not null) { if (_mdbg.IsStopped) _mdbg.Go(); return; }   // managed: continue from a stop
         if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return; }   // native: continue only from a stop (else it skips the next stop)
@@ -414,9 +457,15 @@ public partial class MainWindow : Window
         if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         // A .NET assembly → source-level (C# line) debugging via the out-of-process ICorDebug host, not the
         // native Win32 debugger. The loaded image is the managed module (its .exe apphost is what we launch).
-        if (_managed is not null) { StartManagedDebug(); return; }
+        if (_managed is not null && !forceNative) { StartManagedDebug(); return; }
         if (_image.IsDll)
         {
+            if (reuseDllConfiguration && _dllDebug is { } saved && PathsEqual(saved.DllPath, _image.FilePath))
+            {
+                BeginDebug(d => d.LaunchDll(saved.HostExe, saved.CommandLine, saved.WorkingDir,
+                    saved.DllPath, saved.BreakRva, saved.BreakIsEntry));
+                return;
+            }
             // A DLL can't be launched directly — host it in an EXE (rundll32 by default, or a custom host)
             // that LoadLibrary's it, and break at the DLL's DllMain (or a chosen export) once it maps.
             var exports = _image.Symbols.Where(s => s.Kind == NamedSymbolKind.Export)
@@ -430,13 +479,13 @@ public partial class MainWindow : Window
                 ? (uint)(exportVa - _image.ImageBase)
                 : (uint)(_image.EntryVa - _image.ImageBase);
 
-            var p = new DllDebugParams(opt.HostExe, opt.CommandLine, opt.WorkingDir, _image.FilePath, breakRva, breakIsEntry);
+            var p = new DllDebugState(opt.HostExe, opt.CommandLine, opt.WorkingDir, _image.FilePath, breakRva, breakIsEntry);
             _dllDebug = p;
             BeginDebug(d => d.LaunchDll(p.HostExe, p.CommandLine, p.WorkingDir, p.DllPath, p.BreakRva, p.BreakIsEntry));
             return;
         }
         _dllDebug = null;
-        BeginDebug(d => d.Launch(_image.FilePath));
+        BeginDebug(d => d.Launch(_image.FilePath, launchWorkingDirectory));
     }
 
     private void OnAttach(object sender, RoutedEventArgs e)
@@ -1393,11 +1442,13 @@ public partial class MainWindow : Window
     private void BeginDebug(Action<DebugSession> start)
     {
         DeferStaticStringRefreshForDebug();
+        _debugStartFailure = null;
         _savedResult = _result;
         _dbgViewLive = false;
         _dbg = new DebugSession(Dispatcher, _result);   // _result may be null: attach with no file open
         _dbg.Stopped += OnDbgStopped;
         _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); };   // no continue/step while running
+        _dbg.StartFailed += failure => _debugStartFailure = failure;
         _dbg.Exited += OnDbgExited;
         _dbg.Detached += OnDbgDetached;
         _dbg.CaptureFinished += OnCaptureFinished;
@@ -1780,33 +1831,62 @@ public partial class MainWindow : Window
         {
             EndManagedDebug();
             StatusText.Text = "The target requires administrator rights.";
+            if (_image is null || ElevationRelaunch.IsCurrentProcessElevated())
+            {
+                StatusText.Text = "The managed target still could not be launched from the elevated debugger.";
+                return;
+            }
             if (MessageBox.Show(this,
                 "This program requests administrator rights, and DisasmStudio is running as a standard user — so it can't launch it.\n\n" +
-                "Relaunch DisasmStudio as administrator and reopen this file?",
+                "Open an elevated DisasmStudio window and retry this debug launch?\n\n" +
+                "This standard-rights window will remain open.",
                 "Administrator rights required", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
-                RelaunchElevated();
+                RelaunchElevated(ElevatedDebugMode.Auto);
             return;
         }
         StatusText.Text = "Managed debug: " + msg;
     }
 
-    /// <summary>Relaunch DisasmStudio elevated (UAC prompt), reopening the current file, then close this instance.</summary>
-    private void RelaunchElevated()
+    /// <summary>Open an elevated copy with a debug handoff. This instance always remains available.</summary>
+    private void RelaunchElevated(ElevatedDebugMode mode)
     {
+        if (_image is null) return;
+
+        string? snapshotPath = null;
+        DebugElevationRequest request;
         try
         {
-            var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath ?? "DisasmStudio.exe")
-            {
-                UseShellExecute = true,   // required for the "runas" verb (UAC)
-                Verb = "runas",
-            };
-            if (_image is not null) psi.ArgumentList.Add(_image.FilePath);   // `DisasmStudio <path>` auto-loads on start
-            System.Diagnostics.Process.Start(psi);
-            Application.Current.Shutdown();
+            var snapshot = SaveElevationSnapshot();
+            snapshotPath = snapshot.Path;
+            request = new DebugElevationRequest(
+                _image.FilePath,
+                mode,
+                HideDebuggerCheck.IsChecked == true,
+                LoaderBreakCheck.IsChecked == true,
+                Environment.CurrentDirectory,
+                snapshot.Path,
+                snapshot.Sha256);
         }
-        catch (Exception ex)   // e.g. the user dismissed the UAC prompt (ERROR_CANCELLED)
+        catch (Exception ex)
         {
-            StatusText.Text = "Relaunch as administrator was cancelled or failed: " + ex.Message;
+            StatusText.Text = "Could not prepare the elevated debug session: " + ex.Message;
+            TryDeleteElevationSnapshot(snapshotPath);
+            return;
+        }
+
+        var result = ElevationRelaunch.TryStart(request, out string? error);
+        if (result != ElevationRelaunchResult.Started) TryDeleteElevationSnapshot(snapshotPath);
+        switch (result)
+        {
+            case ElevationRelaunchResult.Started:
+                StatusText.Text = "Elevated DisasmStudio started; this window remains at standard rights.";
+                break;
+            case ElevationRelaunchResult.Cancelled:
+                StatusText.Text = "Administrator access was declined; DisasmStudio is still running normally.";
+                break;
+            default:
+                StatusText.Text = "Could not start elevated DisasmStudio: " + error;
+                break;
         }
     }
 
@@ -2299,7 +2379,16 @@ public partial class MainWindow : Window
 
     private void OnDbgExited(int code)
     {
+        DebugStartFailure? startFailure = _debugStartFailure;
+        _debugStartFailure = null;
         TeardownDebugSessionUi();
+
+        if (startFailure is { } failure)
+        {
+            HandleDebugStartFailure(failure);
+            return;
+        }
+
         StatusText.Text = $"Debuggee exited (code {code}).";
 
         if (_restartPending)
@@ -2310,6 +2399,39 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(() => BeginDebug(d => d.LaunchDll(p.HostExe, p.CommandLine, p.WorkingDir, p.DllPath, p.BreakRva, p.BreakIsEntry)));
             else if (img is { Format: BinaryFormat.Pe })
                 Dispatcher.BeginInvoke(() => BeginDebug(d => d.Launch(img.FilePath)));
+        }
+    }
+
+    private void HandleDebugStartFailure(DebugStartFailure failure)
+    {
+        string operation = failure.Operation == DebugStartOperation.Attach ? "attach" : "launch";
+        StatusText.Text = $"Debugger could not {operation} the target (Win32 error {failure.Win32Error}).";
+
+        if (failure.Operation != DebugStartOperation.Launch || !failure.MayRequireElevation
+            || _image is null || ElevationRelaunch.IsCurrentProcessElevated())
+            return;
+
+        string reason = failure.Win32Error == DebugStartFailure.ElevationRequired
+            ? "This target requests administrator rights."
+            : "Windows denied the debug launch; administrator rights may be required.";
+        if (MessageBox.Show(this,
+            $"{reason}\n\nOpen an elevated DisasmStudio window and retry this debug launch?\n\n" +
+            "This standard-rights window will remain open, and declining UAC will not close it.",
+            "Administrator rights may be required", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        RelaunchElevated(ElevatedDebugMode.Native);
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        try
+        {
+            return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -2600,12 +2722,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadProject(string path)
+    private async Task LoadProject(string path, bool transient = false, string? expectedJsonSha256 = null)
     {
         if (!ConfirmDiscardSessionChanges()) return;
 
         ProjectFile proj;
-        try { proj = ProjectFile.Load(path); }
+        try
+        {
+            if (expectedJsonSha256 is null)
+                proj = ProjectFile.Load(path);
+            else
+            {
+                string json = File.ReadAllText(path);
+                string actual = ProjectFile.ComputeJsonSha256(json);
+                if (!string.Equals(actual, expectedJsonSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The elevated session snapshot failed its integrity check.");
+                proj = ProjectFile.FromJson(json);
+            }
+        }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
 
         if (!string.IsNullOrWhiteSpace(proj.BinarySha256))
@@ -2681,11 +2815,13 @@ public partial class MainWindow : Window
         // The fresh analysis wiped the cross-run breakpoint / trace / jump-toggle sets (they belonged to the old
         // file); re-arm them from the project now that the new result exists.
         if (outcome != AnalyzeOutcome.Applied) return;
-        _projectPath = path;
+        _projectPath = transient ? null : path;
         RestoreSessionState(proj);
         RefreshBookmarkList();
         _sessionDirty = false;
-        Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(image.FilePath)})";
+        Title = transient
+            ? $"DisasmStudio — {Path.GetFileName(image.FilePath)}"
+            : $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(image.FilePath)})";
     }
 
     /// <summary>Re-arm the live-session state a v7 project carries — breakpoints, the execution trace, and the
@@ -2706,11 +2842,38 @@ public partial class MainWindow : Window
         if (proj.JumpAssumptions is { Count: > 0 })
             foreach (var (va, taken) in proj.JumpAssumptions) _jumpAssume[va] = taken;
 
+        _managedBps.Clear();
+        if (proj.ManagedBreakpoints is { Count: > 0 })
+            foreach (var bp in proj.ManagedBreakpoints)
+                if (bp.Id > 0 && bp.Token != 0 && bp.IlOffset >= 0 && !_managedBps.ContainsKey(bp.Id))
+                    _managedBps[bp.Id] = bp;
+        _nextManagedBpId = NextManagedBreakpointId(_managedBps.Keys);
+        Managed.SetActiveBreakpoints(_managedBps.Values.Select(b => (b.Token, b.IlOffset)).ToList());
+
+        _dllDebug = proj.DllDebug is { } dll && !string.IsNullOrWhiteSpace(dll.HostExe)
+            && !string.IsNullOrWhiteSpace(dll.CommandLine) && !string.IsNullOrWhiteSpace(dll.DllPath)
+            ? dll
+            : null;
+
         RefreshBreakpointList();
         ClearCoverageBtn.IsEnabled = _coveredInstrs.Count > 0;
         UpdatePatchButtons();
         // Repaint so the restored breakpoint dots, coverage tint and jump marks show across all code views.
         Linear.Refresh(); Graph.Refresh(); Decompiler.Refresh();
+    }
+
+    private static int NextManagedBreakpointId(IEnumerable<int> ids)
+    {
+        long candidate = 1;
+        foreach (int id in ids.Where(id => id > 0).Distinct().Order())
+        {
+            if (id < candidate) continue;
+            if (id > candidate) break;
+            candidate++;
+        }
+        if (candidate > int.MaxValue)
+            throw new InvalidDataException("The project contains too many managed breakpoint identifiers.");
+        return (int)candidate;
     }
 
     private void OnSaveProject(object sender, RoutedEventArgs e)
@@ -2743,7 +2906,20 @@ public partial class MainWindow : Window
             return;
         }
 
-        var proj = new ProjectFile
+        var proj = CaptureProjectState(binaryHash);
+        try { proj.Save(path); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+
+        _projectPath = path;
+        _sessionDirty = false;
+        Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(_image.FilePath)})";
+        StatusText.Text = $"Saved project to {path}";
+    }
+
+    private ProjectFile CaptureProjectState(string binaryHash)
+    {
+        if (_image is null) throw new InvalidOperationException("No binary is open.");
+        return new ProjectFile
         {
             BinaryPath = _image.FilePath,
             BinarySha256 = binaryHash,
@@ -2758,19 +2934,53 @@ public partial class MainWindow : Window
             LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
             LoadHeader = _loadOptions.IncludeHeader,
             Markup = _markup.IsEmpty ? null : _markup,
-            // v7 live-session state (all null when empty so the file stays minimal / round-trips with older readers).
             Breakpoints = _pendingBreakpoints.Count > 0 ? new Dictionary<ulong, BpDef>(_pendingBreakpoints) : null,
             Trace = _coveredInstrs.Count > 0 ? _coveredInstrs.ToList() : null,
             Patches = CoalescePatches(_image.Patches),
             JumpAssumptions = _jumpAssume.Count > 0 ? new Dictionary<ulong, bool>(_jumpAssume) : null,
+            ManagedBreakpoints = _managedBps.Count > 0 ? _managedBps.Values.OrderBy(b => b.Id).ToList() : null,
+            DllDebug = _dllDebug,
         };
-        try { proj.Save(path); }
-        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Save project failed", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+    }
 
-        _projectPath = path;
-        _sessionDirty = false;
-        Title = $"DisasmStudio — {Path.GetFileNameWithoutExtension(_projectPath)} ({Path.GetFileName(_image.FilePath)})";
-        StatusText.Text = $"Saved project to {path}";
+    private static string ElevationSnapshotDirectory => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "DisasmStudio", "ElevationHandoffs");
+
+    private (string Path, string Sha256) SaveElevationSnapshot()
+    {
+        if (_image is null) throw new InvalidOperationException("No binary is open.");
+        string binaryHash = ProjectFile.ComputeBinarySha256(_image.FilePath);
+        Directory.CreateDirectory(ElevationSnapshotDirectory);
+        string path = Path.Combine(ElevationSnapshotDirectory, $"{Guid.NewGuid():N}.dsproj");
+        string json = CaptureProjectState(binaryHash).ToJson();
+        string sha256 = ProjectFile.ComputeJsonSha256(json);
+        AtomicFile.WriteAllText(path, json);
+        return (path, sha256);
+    }
+
+    private static bool IsElevationSnapshotPath(string path)
+    {
+        try
+        {
+            string directory = Path.GetFullPath(ElevationSnapshotDirectory)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            string fullPath = Path.GetFullPath(path);
+            return fullPath.StartsWith(directory, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetExtension(fullPath), ".dsproj", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TryDeleteElevationSnapshot(string? path)
+    {
+        if (path is null || !IsElevationSnapshotPath(path)) return;
+        try { File.Delete(path); }
+        catch { /* best-effort: a failed cleanup must not break the debugger handoff */ }
     }
 
     /// <summary>Group the image's byte edits (file offset → value) into contiguous runs for compact project

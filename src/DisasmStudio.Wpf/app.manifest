@@ -4,8 +4,8 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- Keep normal analysis and file handling at the caller's integrity level. Debugging an elevated target
-             still requires the user to launch DisasmStudio explicitly as administrator. -->
+        <!-- Keep normal analysis and file handling at the caller's integrity level. When a debug target requires
+             elevation, the app explicitly starts a second copy through UAC and leaves this copy unelevated. -->
         <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>

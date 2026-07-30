@@ -2,15 +2,17 @@ using System.IO;
 using System.Text;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Debug;
+using DisasmStudio.ManagedDebug;
 using DisasmStudio.Wpf.ViewModels;
 
 namespace DisasmStudio.Wpf.Diagnostics;
 
 /// <summary>A console self-test for <c>.dsproj</c> persistence (<see cref="ProjectFile"/>), run via
-/// <c>DisasmStudio --smoke-project</c>. Pure serialization — no GUI, no binary — so it verifies that the v9
+/// <c>DisasmStudio --smoke-project</c>. Pure serialization — no GUI, no binary — so it verifies that the v10
 /// live-session state round-trips: breakpoints (fields + <see cref="HwKind"/>/<see cref="MemAccess"/>/
 /// <see cref="HitCountMode"/> enums), the execution trace, byte patches (base64), static jump what-ifs, and
-/// the existing markup; plus that an older (pre-v7) file with none of those fields still loads (nulls).
+/// the existing markup, managed breakpoints, and DLL debug launch state; plus that an older (pre-v7) file with
+/// none of those fields still loads (nulls).
 /// Returns 0 if every assertion passes, else the number of failures.</summary>
 internal static class ProjectSmoke
 {
@@ -54,6 +56,10 @@ internal static class ProjectSmoke
             Trace = [0x401000, 0x401002, 0x401007, 0x40100c],
             Patches = [new PatchRun(0x200, [0x90, 0x90, 0x90]), new PatchRun(0x400, [0xEB, 0xFE])],
             JumpAssumptions = new() { [0x401010] = true, [0x401020] = false },
+            ManagedBreakpoints = [new BpLoc("target.exe", 0x06000001, 12, 7)],
+            DllDebug = new DllDebugState(
+                @"C:\Windows\System32\rundll32.exe", "\"rundll32.exe\" \"target.dll\",Export",
+                @"C:\some\path", @"C:\some\path\target.dll", 0x1234, false),
         };
 
         string path = Path.Combine(Path.GetTempPath(), "disasmstudio_smoke_project.dsproj");
@@ -61,7 +67,7 @@ internal static class ProjectSmoke
         var back = ProjectFile.Load(path);
 
         // ---- base fields ----
-        Check("Version is 9", back.Version == 9);
+        Check("Version is 10", back.Version == 10);
         Check("BinaryPath round-trips", back.BinaryPath == proj.BinaryPath);
         Check("BinarySha256 round-trips", back.BinarySha256 == proj.BinarySha256);
         Check("Mach-O slice offset round-trips", back.MachSliceOffset == 0x123400);
@@ -96,6 +102,12 @@ internal static class ProjectSmoke
 
         // ---- jump what-ifs ----
         Check("JumpAssumptions round-trip", back.JumpAssumptions is { Count: 2 } j && j[0x401010] && !j[0x401020]);
+        Check("Managed breakpoints round-trip",
+            back.ManagedBreakpoints is [{ Module: "target.exe", Token: 0x06000001, IlOffset: 12, Id: 7 }]);
+        Check("DLL debug state round-trips",
+            back.DllDebug is { BreakRva: 0x1234, BreakIsEntry: false } dll
+            && dll.HostExe.EndsWith("rundll32.exe", StringComparison.OrdinalIgnoreCase)
+            && dll.WorkingDir == @"C:\some\path");
 
         // ---- enums serialised as strings (robust to enum value reordering) ----
         string json = File.ReadAllText(path);
@@ -115,6 +127,8 @@ internal static class ProjectSmoke
         Check("v6 loads: Trace null", old.Trace is null);
         Check("v6 loads: Patches null", old.Patches is null);
         Check("v6 loads: JumpAssumptions null", old.JumpAssumptions is null);
+        Check("v6 loads: ManagedBreakpoints null", old.ManagedBreakpoints is null);
+        Check("v6 loads: DllDebug null", old.DllDebug is null);
         Check("v6 loads: MachSliceOffset defaults to zero", old.MachSliceOffset == 0);
 
         // ---- empty project round-trips (all live-session fields stay null, no throw) ----
@@ -122,7 +136,8 @@ internal static class ProjectSmoke
         new ProjectFile { BinaryPath = "y.bin", Format = "PE" }.Save(emptyPath);
         var emptyBack = ProjectFile.Load(emptyPath);
         Check("empty project round-trips with null session state",
-            emptyBack.Breakpoints is null && emptyBack.Trace is null && emptyBack.Patches is null && emptyBack.JumpAssumptions is null);
+            emptyBack.Breakpoints is null && emptyBack.Trace is null && emptyBack.Patches is null
+            && emptyBack.JumpAssumptions is null && emptyBack.ManagedBreakpoints is null && emptyBack.DllDebug is null);
 
         Log(fail == 0 ? $"All {total} checks passed." : $"{fail}/{total} checks FAILED.");
 
