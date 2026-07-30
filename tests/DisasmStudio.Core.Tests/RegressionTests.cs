@@ -84,6 +84,30 @@ public sealed class RegressionTests : IDisposable
     }
 
     [Fact]
+    public void UpxStaticUnpackRebuildsExecutionReadyImageEndToEnd()
+    {
+        byte[] packed = MinimalRunnableUpxPe();
+
+        StaticUnpackResult result = new UpxStaticUnpacker().Unpack(packed);
+
+        Assert.True(result.Applicable);
+        Assert.True(result.Ok, result.Error);
+        Assert.True(result.CanExecute, result.Log);
+        byte[] output = Assert.IsType<byte[]>(result.Image);
+        Assert.Equal(0xE00, output.Length);
+        Assert.True(PeView.TryParse(output, out PeView rebuilt));
+        Assert.Equal((0x2200u, 40u), rebuilt.DataDir(PeConstants.DirImport));
+        Assert.Equal((0x3000u, 0x104u), rebuilt.DataDir(PeConstants.DirResource));
+        Assert.Equal((0x4000u, 8u), rebuilt.DataDir(PeConstants.DirBaseReloc));
+        Assert.Equal("KERNEL32.DLL\0",
+            System.Text.Encoding.ASCII.GetString(output, 0x780, 13));
+        Assert.Equal("ExitProcess\0",
+            System.Text.Encoding.ASCII.GetString(output, 0x762, 12));
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, output[0xB00..0xB04]);
+        Assert.Equal(new byte[] { 0, 0, 0, 0, 8, 0, 0, 0 }, output[0xC00..0xC08]);
+    }
+
+    [Fact]
     public void UpxStaticUnpackRejectsNrvReadPastCompressedBlock()
     {
         byte[] packed = MinimalStaticallyUnpackableUpxPe();
@@ -123,6 +147,176 @@ public sealed class RegressionTests : IDisposable
             () => new UpxStaticUnpacker().Unpack(packed, cancellation.Token));
     }
 
+    [Fact]
+    public void UpxRuntimeRebuildRestoresOrdinaryImports()
+    {
+        byte[] packed = MinimalMappedPe();
+        const int packedRaw = 0x200;
+        "KERNEL32.DLL\0"u8.CopyTo(packed.AsSpan(packedRaw + 0x20));
+        Assert.True(PeView.TryParse(packed, out PeView packedPe));
+
+        byte[] recovered = new byte[0x500];
+        const int extra = 0x20;
+        Put32(recovered, extra, 0x300);
+        Put32(recovered, extra + 4, 0);
+        Put32(recovered, 0x300, 0x20);
+        Put32(recovered, 0x304, 0x100);
+        recovered[0x308] = 1;
+        "ExitProcess\0"u8.CopyTo(recovered.AsSpan(0x309));
+        Put32(recovered, 0x200 + 12, 0x1180);
+        BitConverter.GetBytes(0x1160UL).CopyTo(recovered, 0x100);
+
+        object?[] arguments =
+        [
+            packed, packedPe, recovered, extra, 0x1000u, 0x1200u, 40u, true,
+            new System.Text.StringBuilder(), CancellationToken.None,
+        ];
+        Assert.True(InvokeUpxPrivate("TryRebuildImports", arguments));
+
+        Assert.Equal(0x28, Assert.IsType<int>(arguments[3]));
+        Assert.Equal(0x1100u, BitConverter.ToUInt32(recovered, 0x200 + 16));
+        Assert.Equal("KERNEL32.DLL\0",
+            System.Text.Encoding.ASCII.GetString(recovered, 0x180, 13));
+        Assert.Equal("ExitProcess\0",
+            System.Text.Encoding.ASCII.GetString(recovered, 0x162, 12));
+        Assert.Equal(0x1160UL, BitConverter.ToUInt64(recovered, 0x100));
+        Assert.Equal(0UL, BitConverter.ToUInt64(recovered, 0x108));
+    }
+
+    [Fact]
+    public void UpxRuntimeRebuildReservesNullImportDescriptor()
+    {
+        byte[] packed = MinimalMappedPe();
+        const int packedRaw = 0x200;
+        "FIRST.DLL\0"u8.CopyTo(packed.AsSpan(packedRaw + 0x20));
+        "SECOND.DLL\0"u8.CopyTo(packed.AsSpan(packedRaw + 0x30));
+        Assert.True(PeView.TryParse(packed, out PeView packedPe));
+
+        byte[] recovered = new byte[0x500];
+        const int extra = 0x20;
+        Put32(recovered, extra, 0x300);
+        Put32(recovered, 0x300, 0x20);
+        Put32(recovered, 0x304, 0x100);
+        Put32(recovered, 0x309, 0x30);
+        Put32(recovered, 0x30D, 0x120);
+
+        object?[] arguments =
+        [
+            packed, packedPe, recovered, extra, 0x1000u, 0x1200u, 40u, true,
+            new System.Text.StringBuilder(), CancellationToken.None,
+        ];
+        Assert.False(InvokeUpxPrivate("TryRebuildImports", arguments));
+    }
+
+    [Fact]
+    public void UpxRuntimeRebuildRejectsPackedStringCrossingSectionEnd()
+    {
+        byte[] packed = [.. MinimalMappedPe(), .. new byte[0x100]];
+        "NO-NULL!"u8.CopyTo(packed.AsSpan(0x3F8));
+        Assert.True(PeView.TryParse(packed, out PeView packedPe));
+
+        byte[] recovered = new byte[0x500];
+        const int extra = 0x20;
+        Put32(recovered, extra, 0x300);
+        Put32(recovered, 0x300, 0x1F8);
+        Put32(recovered, 0x304, 0x100);
+
+        object?[] arguments =
+        [
+            packed, packedPe, recovered, extra, 0x1000u, 0x1200u, 40u, true,
+            new System.Text.StringBuilder(), CancellationToken.None,
+        ];
+        Assert.False(InvokeUpxPrivate("TryRebuildImports", arguments));
+    }
+
+    [Fact]
+    public void UpxExecutionReadyValidationRejectsDirectoryInVirtualOnlyTail()
+    {
+        byte[] output = MinimalMappedPe();
+        int opt = 0x80 + PeConstants.OptHeaderFromSig;
+        int section = opt + 0xF0;
+        Put32(output, section + PeConstants.Sec_VirtualSize, 0x400);
+        Put32(output, opt + PeConstants.DataDirBase64 + PeConstants.DirImport * 8, 0x2200);
+        Put32(output, opt + PeConstants.DataDirBase64 + PeConstants.DirImport * 8 + 4, 40);
+        Assert.True(PeView.TryParse(output, out PeView outputPe));
+
+        object?[] arguments =
+        [
+            new byte[0x1400], output, outputPe, 0x1000u,
+            new System.Text.StringBuilder(), CancellationToken.None,
+        ];
+        Assert.False(InvokeUpxPrivate("ValidateSerializedDirectories", arguments));
+    }
+
+    [Fact]
+    public void UpxRuntimeRebuildRestoresRelocationValuesAndBlocks()
+    {
+        byte[] recovered = new byte[0x500];
+        const int extra = 0x20;
+        Put32(recovered, extra, 0x300);
+        recovered[extra + 4] = 0;
+        recovered[0x300] = 0xF0;
+        recovered[0x301] = 0x04;
+        recovered[0x302] = 0x01; // delta 0x104: initial -4 -> target offset 0x100
+        recovered[0x303] = 0;
+        new byte[] { 0, 0, 0, 0, 0, 0, 0x12, 0x34 }.CopyTo(recovered, 0x100);
+
+        object?[] arguments =
+        [
+            recovered, extra, 0x1000u, 0x1200u, 0x100u, 0x140000000UL, true,
+            0x10, new System.Text.StringBuilder(), CancellationToken.None,
+        ];
+        Assert.True(InvokeUpxPrivate("TryRebuildRelocations", arguments));
+
+        Assert.Equal(0x25, Assert.IsType<int>(arguments[1]));
+        Assert.Equal(0x140002234UL, BitConverter.ToUInt64(recovered, 0x100));
+        Assert.Equal(0x1000u, BitConverter.ToUInt32(recovered, 0x200));
+        Assert.Equal(12u, BitConverter.ToUInt32(recovered, 0x204));
+        Assert.Equal((ushort)0xA100, BitConverter.ToUInt16(recovered, 0x208));
+    }
+
+    [Fact]
+    public void UpxRuntimeRebuildRestoresMovedResourcePayload()
+    {
+        byte[] packed = MinimalMappedPe();
+        const int raw = 0x200;
+        Put16(packed, raw + 14, 1);
+        Put32(packed, raw + 16, 10);
+        Put32(packed, raw + 20, 0x80000018);
+        Put16(packed, raw + 0x18 + 14, 1);
+        Put32(packed, raw + 0x18 + 16, 1);
+        Put32(packed, raw + 0x18 + 20, 0x80000030);
+        Put16(packed, raw + 0x30 + 14, 1);
+        Put32(packed, raw + 0x30 + 16, 1033);
+        Put32(packed, raw + 0x30 + 20, 0x48);
+        Put32(packed, raw + 0x48, 0x2060);
+        Put32(packed, raw + 0x4C, 4);
+        Put32(packed, raw + 0x5C, 0x1280);
+        new byte[] { 1, 2, 3, 4 }.CopyTo(packed, raw + 0x60);
+        Assert.True(PeView.TryParse(packed, out PeView packedPe));
+
+        byte[] recovered = new byte[0x500];
+        Array originalSections = UpxOriginalSections(
+            (0x1200u, 0x200u, 0x200u, 0x200u, 0x4000_0040u));
+        object?[] arguments =
+        [
+            packed, packedPe, recovered, 0x1000u, 0x1200u, 0x100u, 0x2000u, 0x100u,
+            (ushort)0, new System.Text.StringBuilder(), originalSections, CancellationToken.None,
+        ];
+        Assert.True(InvokeUpxPrivate("TryRebuildResources", arguments));
+
+        Assert.Equal(0x1280u, BitConverter.ToUInt32(recovered, 0x200 + 0x48));
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, recovered[0x280..0x284]);
+
+        Put32(packed, raw + 0x5C, 0x1100);
+        arguments[2] = new byte[0x500];
+        Assert.False(InvokeUpxPrivate("TryRebuildResources", arguments));
+
+        Put32(packed, raw + 0x5C, 0x1220);
+        arguments[2] = new byte[0x500];
+        Assert.False(InvokeUpxPrivate("TryRebuildResources", arguments));
+    }
+
     private static byte[]? InvokeUpxLzma(byte[] packed, int outputLength)
     {
         MethodInfo decode = typeof(UpxStaticUnpacker).GetMethod(
@@ -130,6 +324,35 @@ public sealed class RegressionTests : IDisposable
             ?? throw new MissingMethodException(typeof(UpxStaticUnpacker).FullName, "DecodeUpxLzma");
         return (byte[]?)decode.Invoke(
             null, [packed, 0, packed.Length, outputLength, CancellationToken.None]);
+    }
+
+    private static bool InvokeUpxPrivate(string methodName, object?[] arguments)
+    {
+        MethodInfo method = typeof(UpxStaticUnpacker).GetMethod(
+            methodName, BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new MissingMethodException(typeof(UpxStaticUnpacker).FullName, methodName);
+        return Assert.IsType<bool>(method.Invoke(null, arguments));
+    }
+
+    private static Array UpxOriginalSections(
+        params (uint VirtualAddress, uint VirtualSize, uint RawOffset, uint RawSize, uint Characteristics)[] sections)
+    {
+        Type sectionType = typeof(UpxStaticUnpacker).GetNestedType(
+            "OriginalSection", BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(typeof(UpxStaticUnpacker).FullName, "OriginalSection");
+        Array result = Array.CreateInstance(sectionType, sections.Length);
+        for (int i = 0; i < sections.Length; i++)
+        {
+            var section = sections[i];
+            object value = Activator.CreateInstance(
+                sectionType,
+                [
+                    section.VirtualAddress, section.VirtualSize, section.RawOffset,
+                    section.RawSize, section.Characteristics,
+                ])!;
+            result.SetValue(value, i);
+        }
+        return result;
     }
 
     [Fact]
@@ -871,6 +1094,185 @@ public sealed class RegressionTests : IDisposable
         Put32(packed, header + 24, 0x400);
         compressed.CopyTo(packed, 0x200);
         return packed;
+    }
+
+    private static byte[] MinimalRunnableUpxPe()
+    {
+        const int storedHeader = 0x4400;
+        const int originalSectionCount = 4;
+        const int originalFileSize = 0xE00;
+        byte[] plain = new byte[storedHeader + PeConstants.OptHeaderFromSig + 0xF0 +
+                                originalSectionCount * PeConstants.SectionHeaderSize + 14];
+        plain[0] = 0xC3;
+
+        Put32(plain, storedHeader, PeConstants.PeSignature);
+        Put16(plain, storedHeader + 4, PeConstants.Machine_x64);
+        Put16(plain, storedHeader + 6, originalSectionCount);
+        Put16(plain, storedHeader + 20, 0xF0);
+        Put16(plain, storedHeader + 22, PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
+        int opt = storedHeader + PeConstants.OptHeaderFromSig;
+        Put16(plain, opt, PeConstants.Pe32PlusMagic);
+        Put32(plain, opt + 4, 0x200);
+        Put32(plain, opt + PeConstants.Opt_AddressOfEntryPoint, 0x1000);
+        Put32(plain, opt + 20, 0x1000);
+        BitConverter.GetBytes(0x140000000UL).CopyTo(plain, opt + PeConstants.Opt_ImageBase64);
+        Put32(plain, opt + PeConstants.Opt_SectionAlignment, 0x1000);
+        Put32(plain, opt + PeConstants.Opt_FileAlignment, 0x200);
+        Put32(plain, opt + PeConstants.Opt_SizeOfImage, 0x5000);
+        Put32(plain, opt + PeConstants.Opt_SizeOfHeaders, 0x400);
+        Put32(plain, opt + PeConstants.Opt_NumberOfRvaAndSizes64, 16);
+        int dirs = opt + PeConstants.DataDirBase64;
+        Put32(plain, dirs + PeConstants.DirImport * 8, 0x2200);
+        Put32(plain, dirs + PeConstants.DirImport * 8 + 4, 40);
+        Put32(plain, dirs + PeConstants.DirResource * 8, 0x3000);
+        Put32(plain, dirs + PeConstants.DirResource * 8 + 4, 0x104);
+        Put32(plain, dirs + PeConstants.DirBaseReloc * 8, 0x4000);
+        Put32(plain, dirs + PeConstants.DirBaseReloc * 8 + 4, 8);
+
+        int section = opt + 0xF0;
+        PutOriginalSection(
+            plain, section, ".text", 0x1000, 0x200, 0x400, 0x200,
+            PeConstants.SCN_CNT_CODE | PeConstants.SCN_MEM_EXECUTE | PeConstants.SCN_MEM_READ);
+        PutOriginalSection(
+            plain, section + 40, ".rdata", 0x2000, 0x400, 0x600, 0x400,
+            PeConstants.SCN_CNT_INITIALIZED_DATA | PeConstants.SCN_MEM_READ);
+        PutOriginalSection(
+            plain, section + 80, ".rsrc", 0x3000, 0x200, 0xA00, 0x200,
+            PeConstants.SCN_CNT_INITIALIZED_DATA | PeConstants.SCN_MEM_READ);
+        PutOriginalSection(
+            plain, section + 120, ".reloc", 0x4000, 0x200, 0xC00, 0x200,
+            PeConstants.SCN_CNT_INITIALIZED_DATA | PeConstants.SCN_MEM_READ);
+
+        Put32(plain, 0x1200 + 12, 0x2180);
+        Put32(plain, 0x1200 + 16, 0x2100);
+        BitConverter.GetBytes(0x2160UL).CopyTo(plain, 0x1100);
+
+        const int importStream = 0x4000;
+        Put32(plain, importStream, 0x20);
+        Put32(plain, importStream + 4, 0x1100);
+        plain[importStream + 8] = 1;
+        "ExitProcess\0"u8.CopyTo(plain.AsSpan(importStream + 9));
+
+        int extra = section + originalSectionCount * PeConstants.SectionHeaderSize;
+        Put32(plain, extra, importStream);
+        Put32(plain, extra + 4, 0);
+        Put16(plain, extra + 8, 0);
+        Put32(plain, extra + 10, storedHeader);
+
+        byte[] compressed = NrvLiteralStream(plain);
+        int packedResourceRaw = (0x400 + compressed.Length + 0x1FF) & ~0x1FF;
+        byte[] packed = new byte[packedResourceRaw + 0x200];
+        packed[0] = (byte)'M';
+        packed[1] = (byte)'Z';
+        Put32(packed, PeConstants.DosLfanewOffset, 0x80);
+        Put32(packed, 0x80, PeConstants.PeSignature);
+        Put16(packed, 0x84, PeConstants.Machine_x64);
+        Put16(packed, 0x86, 3);
+        Put16(packed, 0x94, 0xF0);
+        Put16(packed, 0x96, PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
+        int packedOpt = 0x80 + PeConstants.OptHeaderFromSig;
+        Put16(packed, packedOpt, PeConstants.Pe32PlusMagic);
+        Put32(packed, packedOpt + PeConstants.Opt_AddressOfEntryPoint, 0x5000);
+        BitConverter.GetBytes(0x140000000UL).CopyTo(packed, packedOpt + PeConstants.Opt_ImageBase64);
+        Put32(packed, packedOpt + PeConstants.Opt_SectionAlignment, 0x1000);
+        Put32(packed, packedOpt + PeConstants.Opt_FileAlignment, 0x200);
+        Put32(packed, packedOpt + PeConstants.Opt_SizeOfImage, 0xB000);
+        Put32(packed, packedOpt + PeConstants.Opt_SizeOfHeaders, 0x400);
+        Put32(packed, packedOpt + PeConstants.Opt_NumberOfRvaAndSizes64, 16);
+        int packedDirs = packedOpt + PeConstants.DataDirBase64;
+        Put32(packed, packedDirs + PeConstants.DirImport * 8, 0xA080);
+        Put32(packed, packedDirs + PeConstants.DirImport * 8 + 4, 0x40);
+        Put32(packed, packedDirs + PeConstants.DirResource * 8, 0xA100);
+        Put32(packed, packedDirs + PeConstants.DirResource * 8 + 4, 0x100);
+
+        int upx0 = packedOpt + 0xF0;
+        PutPackedSection(packed, upx0, "UPX0", 0x1000, 0x4000, 0, 0, 0xE0000080);
+        PutPackedSection(
+            packed, upx0 + 40, "UPX1", 0x5000, 0x5000, 0x400,
+            (uint)(packedResourceRaw - 0x400), 0xE0000040);
+        PutPackedSection(
+            packed, upx0 + 80, ".rsrc", 0xA000, 0x200,
+            (uint)packedResourceRaw, 0x200, 0xC0000040);
+
+        const int packHeader = 0x3E0;
+        "UPX!"u8.CopyTo(packed.AsSpan(packHeader));
+        packed[packHeader + 4] = 13;
+        packed[packHeader + 5] = 36;
+        packed[packHeader + 6] = 3;
+        packed[packHeader + 7] = 9;
+        Put32(packed, packHeader + 8, Adler32ForTest(plain));
+        Put32(packed, packHeader + 12, Adler32ForTest(compressed));
+        Put32(packed, packHeader + 16, (uint)plain.Length);
+        Put32(packed, packHeader + 20, (uint)compressed.Length);
+        Put32(packed, packHeader + 24, originalFileSize);
+        compressed.CopyTo(packed, 0x400);
+
+        int packedResource = packedResourceRaw + 0x100;
+        Put16(packed, packedResource + 14, 1);
+        Put32(packed, packedResource + 16, 10);
+        Put32(packed, packedResource + 20, 0x80000018);
+        Put16(packed, packedResource + 0x18 + 14, 1);
+        Put32(packed, packedResource + 0x18 + 16, 1);
+        Put32(packed, packedResource + 0x18 + 20, 0x80000030);
+        Put16(packed, packedResource + 0x30 + 14, 1);
+        Put32(packed, packedResource + 0x30 + 16, 1033);
+        Put32(packed, packedResource + 0x30 + 20, 0x48);
+        Put32(packed, packedResource + 0x48, 0xA160);
+        Put32(packed, packedResource + 0x4C, 4);
+        Put32(packed, packedResource + 0x5C, 0x3100);
+        new byte[] { 1, 2, 3, 4 }.CopyTo(packed, packedResource + 0x60);
+        "KERNEL32.DLL\0"u8.CopyTo(packed.AsSpan(packedResourceRaw + 0xA0));
+        return packed;
+    }
+
+    private static void PutOriginalSection(
+        byte[] bytes, int offset, string name, uint virtualAddress, uint virtualSize,
+        uint rawOffset, uint rawSize, uint characteristics)
+    {
+        System.Text.Encoding.ASCII.GetBytes(name).CopyTo(bytes, offset);
+        Put32(bytes, offset + PeConstants.Sec_VirtualSize, virtualSize);
+        Put32(bytes, offset + PeConstants.Sec_VirtualAddress, virtualAddress);
+        Put32(bytes, offset + PeConstants.Sec_SizeOfRawData, rawSize);
+        Put32(bytes, offset + PeConstants.Sec_PointerToRawData, rawOffset);
+        Put32(bytes, offset + PeConstants.Sec_Characteristics, characteristics);
+    }
+
+    private static void PutPackedSection(
+        byte[] bytes, int offset, string name, uint virtualAddress, uint virtualSize,
+        uint rawOffset, uint rawSize, uint characteristics) =>
+        PutOriginalSection(
+            bytes, offset, name, virtualAddress, virtualSize, rawOffset, rawSize, characteristics);
+
+    private static byte[] MinimalMappedPe()
+    {
+        byte[] pe = new byte[0x400];
+        pe[0] = (byte)'M';
+        pe[1] = (byte)'Z';
+        Put32(pe, PeConstants.DosLfanewOffset, 0x80);
+        Put32(pe, 0x80, PeConstants.PeSignature);
+        Put16(pe, 0x84, PeConstants.Machine_x64);
+        Put16(pe, 0x86, 1);
+        Put16(pe, 0x94, 0xF0);
+        Put16(pe, 0x96, PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
+        int opt = 0x80 + PeConstants.OptHeaderFromSig;
+        Put16(pe, opt, PeConstants.Pe32PlusMagic);
+        BitConverter.GetBytes(0x140000000UL).CopyTo(pe, opt + PeConstants.Opt_ImageBase64);
+        Put32(pe, opt + PeConstants.Opt_SectionAlignment, 0x1000);
+        Put32(pe, opt + PeConstants.Opt_FileAlignment, 0x200);
+        Put32(pe, opt + PeConstants.Opt_SizeOfImage, 0x3000);
+        Put32(pe, opt + PeConstants.Opt_SizeOfHeaders, 0x200);
+        Put32(pe, opt + PeConstants.Opt_NumberOfRvaAndSizes64, 16);
+        Put32(pe, opt + PeConstants.DataDirBase64 + PeConstants.DirImport * 8, 0x2000);
+        Put32(pe, opt + PeConstants.DataDirBase64 + PeConstants.DirImport * 8 + 4, 0x100);
+        int section = opt + 0xF0;
+        ".data"u8.CopyTo(pe.AsSpan(section));
+        Put32(pe, section + PeConstants.Sec_VirtualSize, 0x200);
+        Put32(pe, section + PeConstants.Sec_VirtualAddress, 0x2000);
+        Put32(pe, section + PeConstants.Sec_SizeOfRawData, 0x200);
+        Put32(pe, section + PeConstants.Sec_PointerToRawData, 0x200);
+        Put32(pe, section + PeConstants.Sec_Characteristics,
+            PeConstants.SCN_CNT_INITIALIZED_DATA | PeConstants.SCN_MEM_READ);
+        return pe;
     }
 
     private static byte[] NrvLiteralStream(byte[] plain)

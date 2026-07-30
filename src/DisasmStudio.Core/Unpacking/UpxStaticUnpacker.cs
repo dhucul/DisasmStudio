@@ -8,16 +8,17 @@ namespace DisasmStudio.Core.Unpacking;
 /// a <c>PackHeader</c> ("UPX!" magic) records the compression method, the uncompressed length, and — crucially
 /// — the <b>Adler-32 checksum of the uncompressed data</b>. That checksum makes decompression
 /// <b>self-verifying</b>: it only accepts plaintext whose checksum matches the UPX header. Reconstructed PE
-/// layout is validated separately and explicitly returned as analysis-only because imports, relocations, and
-/// resources are not rebuilt. Unsupported methods and layouts decline cleanly so the caller can offer the
-/// <i>dynamic</i> run-to-OEP unpacker.
+/// layout is validated separately. For PE images, the same post-decompression sequence as UPX's
+/// <c>PeFile::unpack0</c> restores imports, relocations, and resources before the ordinary file layout is
+/// written. Unsupported methods and metadata layouts remain analysis-only instead of being presented as
+/// runnable.
 ///
 /// Method-14 (UPX-framed LZMA) and PE filter 0x49 are verified against a real win64/PE UPX sample. The Adler-32
 /// gate remains mandatory for every method and layout — a wrong decode is rejected, not written.
 /// </summary>
 public sealed class UpxStaticUnpacker : IStaticUnpacker
 {
-    public string Name => "UPX (static, checksum-verified analysis image)";
+    public string Name => "UPX (static, checksum-verified PE rebuild)";
 
     // UPX method ids (packhead.h).
     private const byte M_NRV2B_LE32 = 2, M_NRV2B_8 = 3;
@@ -78,12 +79,14 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
                 // buffer. Rebuild an ordinary file-layout PE from those records.
                 if (TryReconstructPe(
                         file, pe, h, plain, log, cancellationToken,
-                        out byte[]? image, out uint entryRva) && image is not null)
+                        out byte[]? image, out uint entryRva, out bool canExecute) && image is not null)
                 {
                     log.AppendLine("  Reconstructed a re-openable PE image from the verified plaintext.");
-                    log.AppendLine("  Output is analysis-only: UPX's import/relocation/resource metadata is not rebuilt.");
+                    log.AppendLine(canExecute
+                        ? "  Restored UPX imports, relocations, and resources; output is execution-ready."
+                        : "  Runtime metadata uses an unsupported UPX layout; output is analysis-only.");
                     return new StaticUnpackResult(
-                        true, true, image, entryRva, 1, log.ToString(), null, CanExecute: false);
+                        true, true, image, entryRva, 1, log.ToString(), null, CanExecute: canExecute);
                 }
 
                 log.AppendLine("  Decompression verified, but a re-openable analysis PE couldn't be reconstructed from this layout.");
@@ -226,11 +229,12 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
     private static bool TryReconstructPe(
         byte[] packedFile, PeView packedPe, PackHeader h, byte[] plain, StringBuilder log,
         CancellationToken cancellationToken,
-        out byte[]? image, out uint entryRva)
+        out byte[]? image, out uint entryRva, out bool canExecute)
     {
         cancellationToken.ThrowIfCancellationRequested();
         image = null;
         entryRva = 0;
+        canExecute = false;
         if (plain.Length < 8) return false;
 
         int storedHeader = checked((int)U32(plain, plain.Length - 4));
@@ -365,6 +369,16 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
             required = h.UFileSize;
         }
 
+        bool runtimeMetadataReady = false;
+        byte[] runtimeRecovered = (byte[])recovered.Clone();
+        if (TryRebuildRuntimeMetadata(
+                packedFile, packedPe, runtimeRecovered, storedHeader, sectionTableEnd,
+                rvaMin, sections, log, cancellationToken))
+        {
+            recovered = runtimeRecovered;
+            runtimeMetadataReady = true;
+        }
+
         // UPX's u_file_size excludes the overlay. Determine the latter before allocating so it is appended rather
         // than overwriting the tail of the reconstructed image.
         long packedImageEnd = 0;
@@ -401,9 +415,741 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
             rebuilt.SizeOfImage != sizeOfImage ||
             rebuilt.EntryRva != storedEntry)
             return false;
+        if (runtimeMetadataReady)
+        {
+            canExecute = ValidateSerializedDirectories(
+                recovered, output, rebuilt, rvaMin, log, cancellationToken);
+            if (!canExecute)
+                log.AppendLine(
+                    "  Runtime metadata did not survive the original raw-file layout; output is analysis-only.");
+        }
         image = output;
         entryRva = rebuilt.EntryRva;
         return true;
+    }
+
+    private static bool ValidateSerializedDirectories(
+        byte[] recovered, byte[] output, PeView outputPe, uint rvaMin,
+        StringBuilder log, CancellationToken cancellationToken)
+    {
+        int opt = outputPe.PeOffset + PeConstants.OptHeaderFromSig;
+        int directoryBase = opt + PeConstants.DataDirBaseOffset(outputPe.Is64);
+        uint count = Math.Min(outputPe.NumberOfRvaAndSizes, 16);
+        for (int index = 0; (uint)index < count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!TryGetDirectory(
+                    output, directoryBase, count, index, out uint address, out uint size))
+                return false;
+            if (address == 0 && size == 0) continue;
+            if (address == 0 || size == 0 || size > int.MaxValue)
+            {
+                log.AppendLine($"  Data directory {index} has an incomplete or oversized range.");
+                return false;
+            }
+
+            // IMAGE_DIRECTORY_ENTRY_SECURITY is the sole file-offset directory.
+            if (index == 4)
+            {
+                if ((ulong)address + size > (ulong)output.Length)
+                {
+                    log.AppendLine("  Certificate directory is outside the reconstructed file.");
+                    return false;
+                }
+                continue;
+            }
+
+            if (!TryPackedRvaToRaw(
+                    outputPe, output.Length, address, (int)size, out int raw) ||
+                !TryRvaIndex(address, rvaMin, recovered.Length, out int virtualOffset) ||
+                (ulong)virtualOffset + size > (ulong)recovered.Length ||
+                !output.AsSpan(raw, (int)size)
+                    .SequenceEqual(recovered.AsSpan(virtualOffset, (int)size)))
+            {
+                log.AppendLine(
+                    $"  Data directory {index} is not fully represented by the serialized raw sections.");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Mirrors UPX PeFile::unpack0 after decompression. The compact extra-info record immediately following
+    // the stored section table points at the preprocessed imports and relocations; resources that UPX kept
+    // outside the compressed block live in the packed PE's last data section.
+    private static bool TryRebuildRuntimeMetadata(
+        byte[] packedFile, PeView packedPe, byte[] recovered, int storedHeader, long extraStart,
+        uint rvaMin, IReadOnlyList<OriginalSection> originalSections,
+        StringBuilder log, CancellationToken cancellationToken)
+    {
+        try
+        {
+            int extra = checked((int)extraStart);
+            int opt = storedHeader + PeConstants.OptHeaderFromSig;
+            bool is64 = U16(recovered, opt) == PeConstants.Pe32PlusMagic;
+            int dataDirBase = opt + PeConstants.DataDirBaseOffset(is64);
+            uint directoryCount = U32(
+                recovered, opt + PeConstants.NumberOfRvaAndSizesOffset(is64));
+            if (directoryCount > 16) directoryCount = 16;
+
+            if (TryGetDirectory(recovered, dataDirBase, directoryCount, PeConstants.DirImport,
+                    out uint importRva, out uint importSize) &&
+                importRva != 0 && importSize > 20)
+            {
+                if (!TryRebuildImports(
+                        packedFile, packedPe, recovered, ref extra, rvaMin, importRva, importSize,
+                        is64, log, cancellationToken))
+                    return false;
+            }
+
+            ushort coffFlags = U16(
+                recovered, storedHeader + PeConstants.FileHeaderFromSig + PeConstants.Coff_Characteristics);
+            if (TryGetDirectory(recovered, dataDirBase, directoryCount, PeConstants.DirBaseReloc,
+                    out uint relocRva, out uint relocSize) &&
+                relocRva != 0 && relocSize != 0 &&
+                (coffFlags & PeConstants.IMAGE_FILE_RELOCS_STRIPPED) == 0)
+            {
+                ulong imageBase = is64
+                    ? U64(recovered, opt + PeConstants.Opt_ImageBase64)
+                    : U32(recovered, opt + PeConstants.Opt_ImageBase32);
+                if (relocSize == 8)
+                {
+                    if (!TryRvaIndex(relocRva, rvaMin, recovered.Length, out int relocAt) ||
+                        relocAt + 8 > recovered.Length)
+                        return false;
+                    Array.Clear(recovered, relocAt, 8);
+                    WriteU32(recovered, relocAt + 4, 8);
+                    log.AppendLine("  Restored UPX's empty eight-byte base-relocation block.");
+                }
+                else if (!TryRebuildRelocations(
+                             recovered, ref extra, rvaMin, relocRva, relocSize, imageBase, is64,
+                             dataDirBase, log, cancellationToken))
+                {
+                    return false;
+                }
+            }
+
+            if (TryGetDirectory(recovered, dataDirBase, directoryCount, PeConstants.DirExport,
+                    out uint exportRva, out uint exportSize) &&
+                exportRva != 0 && exportSize != 0)
+            {
+                int packedOpt = packedPe.PeOffset + PeConstants.OptHeaderFromSig;
+                int packedDirs = packedOpt + PeConstants.DataDirBaseOffset(packedPe.Is64);
+                uint packedCount = Math.Min(packedPe.NumberOfRvaAndSizes, 16);
+                TryGetDirectory(
+                    packedFile, packedDirs, packedCount, PeConstants.DirExport,
+                    out uint packedExportRva, out _);
+                if (packedExportRva != exportRva)
+                {
+                    log.AppendLine("  UPX export reconstruction for this layout is not supported.");
+                    return false;
+                }
+            }
+
+            if (TryGetDirectory(recovered, dataDirBase, directoryCount, PeConstants.DirResource,
+                    out uint resourceRva, out uint resourceSize) &&
+                resourceRva != 0 && resourceSize != 0)
+            {
+                int packedOpt = packedPe.PeOffset + PeConstants.OptHeaderFromSig;
+                int packedDirs = packedOpt + PeConstants.DataDirBaseOffset(packedPe.Is64);
+                uint packedCount = Math.Min(packedPe.NumberOfRvaAndSizes, 16);
+                if (!TryGetDirectory(
+                        packedFile, packedDirs, packedCount, PeConstants.DirResource,
+                        out uint packedResourceRva, out uint packedResourceSize) ||
+                    packedResourceRva == 0 || packedResourceSize == 0 ||
+                    !TryReadU16(recovered, ref extra, out ushort iconDirectoryCount) ||
+                    !TryRebuildResources(
+                        packedFile, packedPe, recovered, rvaMin, resourceRva, resourceSize,
+                        packedResourceRva, packedResourceSize, iconDirectoryCount, log,
+                        originalSections, cancellationToken))
+                    return false;
+            }
+
+            // UPX deliberately clears these after rebuilding the import descriptors.
+            ClearDirectory(recovered, dataDirBase, directoryCount, PeConstants.DirIat);
+            ClearDirectory(recovered, dataDirBase, directoryCount, PeConstants.DirBoundImport);
+            WriteU32(recovered, opt + PeConstants.Opt_CheckSum, 0);
+
+            // Current UPX appends the stored-header offset as an extra-info integrity marker.
+            if (extra + 4 > recovered.Length || U32(recovered, extra) != (uint)storedHeader)
+            {
+                log.AppendLine("  UPX extra-info trailer is missing or inconsistent.");
+                return false;
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            log.AppendLine("  Runtime metadata rebuild declined: " + ex.Message);
+            return false;
+        }
+    }
+
+    private enum ImportKind { Name, Ordinal, PackedOrdinal }
+
+    private sealed record ImportItem(ImportKind Kind, byte[]? Name, ushort Ordinal, uint PackedRva);
+
+    private sealed record ImportDll(byte[] Name, uint IatRva, List<ImportItem> Items);
+
+    private static bool TryRebuildImports(
+        byte[] packedFile, PeView packedPe, byte[] recovered, ref int extra, uint rvaMin,
+        uint importRva, uint importSize, bool is64, StringBuilder log,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadU32(recovered, ref extra, out uint importDataOffset) ||
+            !TryReadU32(recovered, ref extra, out uint namesRva) ||
+            importDataOffset >= recovered.Length)
+            return false;
+
+        int packedOpt = packedPe.PeOffset + PeConstants.OptHeaderFromSig;
+        int packedDirs = packedOpt + PeConstants.DataDirBaseOffset(packedPe.Is64);
+        if (!TryGetDirectory(
+                packedFile, packedDirs, Math.Min(packedPe.NumberOfRvaAndSizes, 16),
+                PeConstants.DirImport, out uint packedImportRva, out _) ||
+            packedImportRva == 0)
+            return false;
+
+        int p = (int)importDataOffset;
+        var dlls = new List<ImportDll>();
+        uint descriptorSlots = importSize / 20;
+        if (descriptorSlots < 2) return false; // at least one DLL plus the null descriptor
+        int maxDlls = (int)Math.Min(descriptorSlots - 1, 4096u);
+        while (p + 4 <= recovered.Length && U32(recovered, p) != 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (dlls.Count >= maxDlls || p + 8 > recovered.Length) return false;
+            uint dllNameRva = U32(recovered, p);
+            uint iatRva = checked(U32(recovered, p + 4) + rvaMin);
+            p += 8;
+            if (!TryReadPackedAscii(
+                    packedFile, packedPe, checked(packedImportRva + dllNameRva),
+                    out byte[] dllName))
+                return false;
+
+            var items = new List<ImportItem>();
+            while (p < recovered.Length && recovered[p] != 0)
+            {
+                byte kind = recovered[p];
+                if (kind == 1)
+                {
+                    if (!TryReadAscii(recovered, p + 1, out byte[] name, out int next)) return false;
+                    items.Add(new ImportItem(ImportKind.Name, name, 0, 0));
+                    p = next;
+                }
+                else if (kind == 0xFF)
+                {
+                    if (p + 3 > recovered.Length) return false;
+                    items.Add(new ImportItem(ImportKind.Ordinal, null, U16(recovered, p + 1), 0));
+                    p += 3;
+                }
+                else
+                {
+                    if (p + 5 > recovered.Length) return false;
+                    items.Add(new ImportItem(
+                        ImportKind.PackedOrdinal, null, 0, U32(recovered, p + 1)));
+                    p += 5;
+                }
+            }
+            if (p >= recovered.Length) return false;
+            p++; // per-DLL terminator
+            dlls.Add(new ImportDll(dllName, iatRva, items));
+        }
+        if (p + 4 > recovered.Length) return false;
+
+        int descriptor;
+        if (!TryRvaIndex(importRva, rvaMin, recovered.Length, out descriptor)) return false;
+        if (importSize > int.MaxValue ||
+            (long)descriptor + importSize > recovered.Length)
+            return false;
+        int thunkSize = is64 ? 8 : 4;
+        ulong ordinalMask = is64 ? 1UL << 63 : 1UL << 31;
+
+        int dllNamesCursor = 0;
+        int importedNamesStart = 0;
+        int importedNamesCursor = 0;
+        if (namesRva != 0)
+        {
+            if (!TryRvaIndex(namesRva, rvaMin, recovered.Length, out dllNamesCursor)) return false;
+            long totalDllNameBytes = dlls.Sum(d => (long)d.Name.Length);
+            if (totalDllNameBytes > int.MaxValue) return false;
+            importedNamesStart = checked(dllNamesCursor + AlignUp((int)totalDllNameBytes, 2));
+            importedNamesCursor = importedNamesStart;
+        }
+
+        for (int dllIndex = 0; dllIndex < dlls.Count; dllIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ImportDll dll = dlls[dllIndex];
+            int desc = checked(descriptor + dllIndex * 20);
+            if (desc < 0 || desc + 20 > recovered.Length) return false;
+
+            if (namesRva != 0)
+            {
+                if (!TryCopy(recovered, dllNamesCursor, dll.Name)) return false;
+                WriteU32(recovered, desc + 12, checked((uint)(rvaMin + dllNamesCursor)));
+                dllNamesCursor += dll.Name.Length;
+            }
+            else
+            {
+                uint existingNameRva = U32(recovered, desc + 12);
+                if (!TryRvaIndex(existingNameRva, rvaMin, recovered.Length, out int nameIndex) ||
+                    !TryCopy(recovered, nameIndex, dll.Name))
+                    return false;
+            }
+
+            WriteU32(recovered, desc + 16, dll.IatRva);
+            if (!is64) WriteU32(recovered, desc, dll.IatRva);
+            if (!TryRvaIndex(dll.IatRva, rvaMin, recovered.Length, out int thunk)) return false;
+
+            for (int itemIndex = 0; itemIndex < dll.Items.Count; itemIndex++)
+            {
+                ImportItem item = dll.Items[itemIndex];
+                int thunkAt = checked(thunk + itemIndex * thunkSize);
+                if (thunkAt < 0 || thunkAt + thunkSize > recovered.Length) return false;
+
+                if (item.Kind == ImportKind.Name)
+                {
+                    byte[] name = item.Name!;
+                    if (namesRva != 0)
+                    {
+                        if (((importedNamesCursor - importedNamesStart) & 1) != 0)
+                            importedNamesCursor--;
+                        if (importedNamesCursor < 0 ||
+                            importedNamesCursor + 2 + name.Length > recovered.Length)
+                            return false;
+                        recovered[importedNamesCursor] = 0;
+                        recovered[importedNamesCursor + 1] = 0;
+                        Array.Copy(name, 0, recovered, importedNamesCursor + 2, name.Length);
+                        WriteThunk(
+                            recovered, thunkAt, checked((ulong)(rvaMin + importedNamesCursor)), is64);
+                        importedNamesCursor += 2 + name.Length;
+                    }
+                    else
+                    {
+                        ulong nameRva = ReadThunk(recovered, thunkAt, is64);
+                        if (nameRva > uint.MaxValue ||
+                            !TryRvaIndex((uint)nameRva, rvaMin, recovered.Length, out int nameAt) ||
+                            nameAt + 2 > recovered.Length ||
+                            !TryCopy(recovered, nameAt + 2, name))
+                            return false;
+                    }
+                }
+                else if (item.Kind == ImportKind.Ordinal)
+                {
+                    WriteThunk(recovered, thunkAt, ordinalMask | item.Ordinal, is64);
+                }
+                else
+                {
+                    if (!TryPackedRvaToRaw(
+                            packedPe, packedFile.Length,
+                            checked(packedImportRva + item.PackedRva), thunkSize,
+                            out int packedThunk))
+                        return false;
+                    WriteThunk(
+                        recovered, thunkAt,
+                        is64 ? U64(packedFile, packedThunk) : U32(packedFile, packedThunk), is64);
+                }
+            }
+
+            int nullThunk = checked(thunk + dll.Items.Count * thunkSize);
+            if (nullThunk < 0 || nullThunk + thunkSize > recovered.Length) return false;
+            WriteThunk(recovered, nullThunk, 0, is64);
+        }
+
+        int finalDescriptor = checked(descriptor + dlls.Count * 20);
+        if (finalDescriptor < descriptor ||
+            (long)finalDescriptor + 20 > (long)descriptor + importSize ||
+            finalDescriptor + 20 > recovered.Length)
+            return false;
+        Array.Clear(recovered, finalDescriptor, 20);
+        log.AppendLine($"  Rebuilt {dlls.Count} UPX import descriptor(s).");
+        return true;
+    }
+
+    private static bool TryRebuildRelocations(
+        byte[] recovered, ref int extra, uint rvaMin, uint relocRva, uint relocCapacity,
+        ulong imageBase, bool is64, int dataDirBase, StringBuilder log,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadU32(recovered, ref extra, out uint compressedRelocs) ||
+            compressedRelocs == 0 || compressedRelocs >= recovered.Length ||
+            extra >= recovered.Length)
+            return false;
+        byte bigRelocs = recovered[extra++];
+        if ((bigRelocs & 6) != 0) return false;
+
+        int fix = (int)compressedRelocs;
+        uint pc = unchecked((uint)-4);
+        var relocations = new List<uint>();
+        while (fix < recovered.Length && recovered[fix] != 0)
+        {
+            if ((relocations.Count & 0xFFF) == 0) cancellationToken.ThrowIfCancellationRequested();
+            uint delta;
+            byte first = recovered[fix];
+            if (first < 0xF0)
+            {
+                delta = first;
+                fix++;
+            }
+            else
+            {
+                if (fix + 3 > recovered.Length) return false;
+                delta = (uint)((first & 0x0F) * 0x10000 + U16(recovered, fix + 1));
+                fix += 3;
+                if (delta == 0)
+                {
+                    if (fix + 4 > recovered.Length) return false;
+                    delta = U32(recovered, fix);
+                    fix += 4;
+                }
+            }
+            if (delta < 4) return false;
+            pc = unchecked(pc + delta);
+            int valueSize = is64 ? 8 : 4;
+            if ((ulong)pc + (uint)valueSize > (ulong)recovered.Length) return false;
+
+            Array.Reverse(recovered, (int)pc, valueSize);
+            if (is64)
+                WriteU64(recovered, (int)pc, unchecked(U64(recovered, (int)pc) + imageBase + rvaMin));
+            else
+                WriteU32(recovered, (int)pc,
+                    unchecked(U32(recovered, (int)pc) + (uint)imageBase + rvaMin));
+            relocations.Add(checked(rvaMin + pc));
+        }
+        if (fix >= recovered.Length) return false;
+
+        byte[] blocks = BuildRelocationBlocks(relocations, is64 ? 10 : 3);
+        if (blocks.Length > relocCapacity ||
+            !TryRvaIndex(relocRva, rvaMin, recovered.Length, out int relocAt) ||
+            relocAt + blocks.Length > recovered.Length)
+            return false;
+        Array.Copy(blocks, 0, recovered, relocAt, blocks.Length);
+        if (blocks.Length < relocCapacity &&
+            (ulong)relocAt + relocCapacity <= (ulong)recovered.Length)
+            Array.Clear(recovered, relocAt + blocks.Length, (int)relocCapacity - blocks.Length);
+        WriteU32(recovered, dataDirBase + PeConstants.DirBaseReloc * 8 + 4, (uint)blocks.Length);
+        log.AppendLine($"  Rebuilt {relocations.Count} base relocation(s) into 0x{blocks.Length:X} bytes.");
+        return true;
+    }
+
+    private sealed record ResourceLeaf(int DataEntryOffset, uint PackedDataRva, uint Size, uint Type);
+
+    private static bool TryRebuildResources(
+        byte[] packedFile, PeView packedPe, byte[] recovered, uint rvaMin,
+        uint resourceRva, uint resourceSize, uint packedResourceRva, uint packedResourceSize,
+        ushort iconDirectoryCount, StringBuilder log,
+        IReadOnlyList<OriginalSection> originalSections, CancellationToken cancellationToken)
+    {
+        if (!TryPackedRvaToRaw(
+                packedPe, packedFile.Length, packedResourceRva, 16, out int packedResourceRaw))
+            return false;
+
+        var leaves = new List<ResourceLeaf>();
+        var visited = new HashSet<int>();
+        int directoryExtent = 0;
+        if (!TryParseResourceDirectory(
+                packedFile, packedResourceRaw, (int)Math.Min(packedResourceSize, int.MaxValue),
+                0, 0, 0, visited, leaves, ref directoryExtent, cancellationToken))
+            return false;
+        directoryExtent = AlignUp(directoryExtent, 4);
+        if (directoryExtent <= 0 ||
+            directoryExtent > packedResourceSize ||
+            (long)packedResourceRaw + directoryExtent > packedFile.Length ||
+            !TryRvaIndex(resourceRva, rvaMin, recovered.Length, out int resourceAt) ||
+            (long)resourceAt + directoryExtent > recovered.Length)
+            return false;
+
+        bool foundResourceSection = false;
+        OriginalSection resourceSection = default;
+        foreach (OriginalSection section in originalSections)
+        {
+            ulong span = Math.Max(section.VirtualSize, section.RawSize);
+            if (resourceRva < section.VirtualAddress ||
+                (ulong)resourceRva >= (ulong)section.VirtualAddress + span)
+                continue;
+            resourceSection = section;
+            foundResourceSection = true;
+            break;
+        }
+        if (!foundResourceSection || resourceSection.RawSize == 0 ||
+            resourceRva < resourceSection.VirtualAddress)
+            return false;
+        ulong resourceDirectoryEnd = (ulong)resourceRva + resourceSize;
+        ulong resourceVirtualEnd = (ulong)resourceSection.VirtualAddress +
+                                   Math.Max(resourceSection.VirtualSize, resourceSection.RawSize);
+        ulong resourceRawEnd = (ulong)resourceSection.VirtualAddress + resourceSection.RawSize;
+        ulong restoredLimit = Math.Min(
+            (ulong)resourceRva + AlignUp(resourceSize, 4), resourceRawEnd);
+        if (resourceDirectoryEnd > resourceVirtualEnd ||
+            (ulong)resourceRva + (uint)directoryExtent > resourceRawEnd)
+            return false;
+
+        byte[] directory = new byte[directoryExtent];
+        Array.Copy(packedFile, packedResourceRaw, directory, 0, directory.Length);
+        bool iconPatched = false;
+        int restored = 0;
+        var restoredRanges = new List<(ulong Start, ulong End, int PackedData, int Size)>();
+        foreach (ResourceLeaf leaf in leaves)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (leaf.PackedDataRva <= packedResourceRva) continue;
+            uint alignedSize = AlignUp(leaf.Size, 4);
+            if (!TryPackedRvaToRawBounds(
+                    packedPe, packedFile.Length, leaf.PackedDataRva, checked((int)alignedSize),
+                    out int packedData, out int packedRawStart, out _) ||
+                packedData - packedRawStart < 4)
+                return false;
+            uint originalRva = U32(packedFile, packedData - 4);
+            ulong originalEnd = (ulong)originalRva + alignedSize;
+            if (!TryRvaIndex(originalRva, rvaMin, recovered.Length, out int originalAt) ||
+                (ulong)originalAt + alignedSize > (ulong)recovered.Length ||
+                originalRva < resourceRva || originalEnd > restoredLimit ||
+                ((ulong)originalRva < (ulong)resourceRva + (uint)directoryExtent &&
+                 originalEnd > resourceRva) ||
+                leaf.DataEntryOffset < 0 || leaf.DataEntryOffset + 4 > directory.Length)
+                return false;
+            foreach ((ulong Start, ulong End, int PackedData, int Size) range in restoredRanges)
+            {
+                bool exactAlias = range.Start == originalRva && range.End == originalEnd;
+                if (exactAlias)
+                {
+                    if (range.Size != (int)alignedSize ||
+                        !packedFile.AsSpan(range.PackedData, range.Size)
+                            .SequenceEqual(packedFile.AsSpan(packedData, (int)alignedSize)))
+                        return false;
+                    continue;
+                }
+                if ((ulong)originalRva < range.End && originalEnd > range.Start)
+                    return false;
+            }
+            restoredRanges.Add((originalRva, originalEnd, packedData, (int)alignedSize));
+            Array.Copy(packedFile, packedData, recovered, originalAt, (int)alignedSize);
+            WriteU32(directory, leaf.DataEntryOffset, originalRva);
+            if (!iconPatched && iconDirectoryCount != 0 && leaf.Type == 14 &&
+                originalAt + 6 <= recovered.Length)
+            {
+                WriteU16(recovered, originalAt + 4, iconDirectoryCount);
+                iconPatched = true;
+            }
+            restored++;
+        }
+
+        Array.Copy(directory, 0, recovered, resourceAt, directory.Length);
+        log.AppendLine(
+            $"  Rebuilt the resource directory and restored {restored} non-compressed resource payload(s).");
+        return true;
+    }
+
+    private static bool TryParseResourceDirectory(
+        byte[] file, int baseRaw, int available, int relative, int level, uint rootType,
+        HashSet<int> visited, List<ResourceLeaf> leaves, ref int extent,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (level > 2 || relative < 0 || relative > available - 16 || !visited.Add(relative))
+            return false;
+        int at = baseRaw + relative;
+        int count = U16(file, at + 12) + U16(file, at + 14);
+        long directoryEnd = (long)relative + 16L + count * 8L;
+        if (count > 0x10000 || directoryEnd > available) return false;
+        extent = Math.Max(extent, (int)directoryEnd);
+
+        for (int i = 0; i < count; i++)
+        {
+            int entry = at + 16 + i * 8;
+            uint name = U32(file, entry);
+            uint child = U32(file, entry + 4);
+            uint type = level == 0 && (name & 0x8000_0000) == 0 ? name : rootType;
+            if ((name & 0x8000_0000) != 0)
+            {
+                int nameOffset = checked((int)(name & 0x7FFF_FFFF));
+                if (nameOffset < 0 || nameOffset > available - 2) return false;
+                int nameBytes = checked(2 + U16(file, baseRaw + nameOffset) * 2);
+                if (nameOffset + nameBytes > available) return false;
+                extent = Math.Max(extent, nameOffset + nameBytes);
+            }
+
+            bool isDirectory = (child & 0x8000_0000) != 0;
+            int childOffset = checked((int)(child & 0x7FFF_FFFF));
+            if (level < 2)
+            {
+                if (!isDirectory ||
+                    !TryParseResourceDirectory(
+                        file, baseRaw, available, childOffset, level + 1, type,
+                        visited, leaves, ref extent, cancellationToken))
+                    return false;
+            }
+            else
+            {
+                if (isDirectory || childOffset < 0 || childOffset > available - 16) return false;
+                extent = Math.Max(extent, childOffset + 16);
+                int dataEntry = baseRaw + childOffset;
+                leaves.Add(new ResourceLeaf(
+                    childOffset, U32(file, dataEntry), U32(file, dataEntry + 4), type));
+            }
+        }
+        return true;
+    }
+
+    private static byte[] BuildRelocationBlocks(List<uint> relocations, int type)
+    {
+        relocations.Sort();
+        using var output = new MemoryStream();
+        int index = 0;
+        while (index < relocations.Count)
+        {
+            uint page = relocations[index] & 0xFFFFF000;
+            int first = index;
+            while (index < relocations.Count && (relocations[index] & 0xFFFFF000) == page)
+                index++;
+            int entries = index - first;
+            int size = AlignUp(8 + entries * 2, 4);
+            byte[] block = new byte[size];
+            WriteU32(block, 0, page);
+            WriteU32(block, 4, (uint)size);
+            for (int i = 0; i < entries; i++)
+                WriteU16(block, 8 + i * 2,
+                    checked((ushort)(((uint)type << 12) | (relocations[first + i] & 0xFFF))));
+            output.Write(block);
+        }
+        return output.ToArray();
+    }
+
+    private static bool TryGetDirectory(
+        byte[] data, int directoryBase, uint count, int index, out uint rva, out uint size)
+    {
+        rva = size = 0;
+        if (index < 0 || (uint)index >= count) return false;
+        int at = checked(directoryBase + index * 8);
+        if (at < 0 || at + 8 > data.Length) return false;
+        rva = U32(data, at);
+        size = U32(data, at + 4);
+        return true;
+    }
+
+    private static void ClearDirectory(byte[] data, int directoryBase, uint count, int index)
+    {
+        if ((uint)index >= count) return;
+        int at = directoryBase + index * 8;
+        if (at >= 0 && at + 8 <= data.Length) Array.Clear(data, at, 8);
+    }
+
+    private static bool TryPackedRvaToRaw(
+        PeView pe, int fileLength, uint rva, int size, out int raw)
+    {
+        return TryPackedRvaToRawBounds(
+            pe, fileLength, rva, size, out raw, out _, out _);
+    }
+
+    private static bool TryPackedRvaToRawBounds(
+        PeView pe, int fileLength, uint rva, int size,
+        out int raw, out int rawStart, out int rawEnd)
+    {
+        raw = rawStart = rawEnd = 0;
+        if (size < 0) return false;
+        if (rva < pe.SizeOfHeaders)
+        {
+            if ((ulong)rva + (uint)size > (ulong)fileLength) return false;
+            raw = (int)rva;
+            rawStart = 0;
+            rawEnd = (int)Math.Min(pe.SizeOfHeaders, (uint)fileLength);
+            return true;
+        }
+        foreach (SectionHeader section in pe.Sections)
+        {
+            ulong span = Math.Max(section.VirtualSize, section.SizeOfRawData);
+            if (rva < section.VirtualAddress ||
+                (ulong)rva + (uint)size > (ulong)section.VirtualAddress + span)
+                continue;
+            ulong candidate = (ulong)section.PointerToRawData + rva - section.VirtualAddress;
+            if (candidate + (uint)size > (ulong)fileLength ||
+                candidate + (uint)size >
+                (ulong)section.PointerToRawData + section.SizeOfRawData)
+                return false;
+            raw = (int)candidate;
+            rawStart = (int)section.PointerToRawData;
+            rawEnd = (int)Math.Min(
+                (ulong)fileLength,
+                (ulong)section.PointerToRawData + section.SizeOfRawData);
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryReadPackedAscii(
+        byte[] packedFile, PeView packedPe, uint rva, out byte[] value)
+    {
+        value = [];
+        if (!TryPackedRvaToRawBounds(
+                packedPe, packedFile.Length, rva, 1,
+                out int raw, out _, out int rawEnd) ||
+            !TryReadAscii(packedFile, raw, rawEnd, out value, out _))
+            return false;
+        return true;
+    }
+
+    private static bool TryReadAscii(byte[] data, int start, out byte[] value, out int next)
+        => TryReadAscii(data, start, data.Length, out value, out next);
+
+    private static bool TryReadAscii(
+        byte[] data, int start, int endExclusive, out byte[] value, out int next)
+    {
+        value = [];
+        next = start;
+        if (start < 0 || start >= data.Length ||
+            endExclusive <= start || endExclusive > data.Length)
+            return false;
+        int end = start;
+        while (end < endExclusive && data[end] != 0 && end - start <= 0x10000) end++;
+        if (end >= endExclusive || end - start > 0x10000) return false;
+        value = new byte[end - start + 1];
+        Array.Copy(data, start, value, 0, value.Length);
+        next = end + 1;
+        return true;
+    }
+
+    private static bool TryCopy(byte[] destination, int offset, byte[] source)
+    {
+        if (offset < 0 || (long)offset + source.Length > destination.Length) return false;
+        Array.Copy(source, 0, destination, offset, source.Length);
+        return true;
+    }
+
+    private static bool TryRvaIndex(uint rva, uint rvaMin, int length, out int index)
+    {
+        index = 0;
+        if (rva < rvaMin || (ulong)rva - rvaMin >= (ulong)length) return false;
+        index = (int)(rva - rvaMin);
+        return true;
+    }
+
+    private static bool TryReadU16(byte[] data, ref int offset, out ushort value)
+    {
+        value = 0;
+        if (offset < 0 || offset + 2 > data.Length) return false;
+        value = U16(data, offset);
+        offset += 2;
+        return true;
+    }
+
+    private static bool TryReadU32(byte[] data, ref int offset, out uint value)
+    {
+        value = 0;
+        if (offset < 0 || offset + 4 > data.Length) return false;
+        value = U32(data, offset);
+        offset += 4;
+        return true;
+    }
+
+    private static ulong ReadThunk(byte[] data, int offset, bool is64) =>
+        is64 ? U64(data, offset) : U32(data, offset);
+
+    private static void WriteThunk(byte[] data, int offset, ulong value, bool is64)
+    {
+        if (is64) WriteU64(data, offset, value);
+        else WriteU32(data, offset, (uint)value);
     }
 
     private static bool Unfilter(
@@ -650,12 +1396,21 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
     private static uint U32(byte[] b, int o) =>
         o >= 0 && o + 4 <= b.Length ? BitConverter.ToUInt32(b, o) : 0;
 
+    private static ulong U64(byte[] b, int o) =>
+        o >= 0 && o + 8 <= b.Length ? BitConverter.ToUInt64(b, o) : 0;
+
     private static uint U32Be(byte[] b, int o) =>
         o >= 0 && o + 4 <= b.Length
             ? ((uint)b[o] << 24) | ((uint)b[o + 1] << 16) | ((uint)b[o + 2] << 8) | b[o + 3]
             : 0;
 
     private static bool IsPowerOfTwo(uint value) => value != 0 && (value & (value - 1)) == 0;
+
+    private static int AlignUp(int value, int alignment) =>
+        checked((int)AlignUp((long)value, (uint)alignment));
+
+    private static uint AlignUp(uint value, uint alignment) =>
+        checked((uint)AlignUp((long)value, alignment));
 
     private static long AlignUp(long value, uint alignment)
     {
@@ -668,5 +1423,19 @@ public sealed class UpxStaticUnpacker : IStaticUnpacker
     {
         if (off < 0 || off + 4 > b.Length) return;
         b[off] = (byte)v; b[off + 1] = (byte)(v >> 8); b[off + 2] = (byte)(v >> 16); b[off + 3] = (byte)(v >> 24);
+    }
+
+    private static void WriteU16(byte[] b, int off, ushort v)
+    {
+        if (off < 0 || off + 2 > b.Length) return;
+        b[off] = (byte)v;
+        b[off + 1] = (byte)(v >> 8);
+    }
+
+    private static void WriteU64(byte[] b, int off, ulong v)
+    {
+        if (off < 0 || off + 8 > b.Length) return;
+        WriteU32(b, off, (uint)v);
+        WriteU32(b, off + 4, (uint)(v >> 32));
     }
 }
