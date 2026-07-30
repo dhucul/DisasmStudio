@@ -40,27 +40,31 @@ public static class VmpStaticUnpacker
 
     /// <summary>Cheap, non-throwing probe: does this file carry the VMProtect LZMA output-compression layer?
     /// Used to auto-select the static strategy. No decompression is performed.</summary>
-    public static bool LooksApplicable(byte[] file)
+    public static bool LooksApplicable(
+        byte[] file, CancellationToken cancellationToken = default)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!PeView.TryParse(file, out var pe) || pe.SizeOfImage == 0) return false;
             var (pattern, literal) = BuildPackerInfoPattern(pe);
             if (pattern.Length == 0) return false;
-            return FindMasked(file, pattern, literal) >= 8;
+            return FindMasked(file, pattern, literal, cancellationToken) >= 8;
         }
+        catch (OperationCanceledException) { throw; }
         catch { return false; }
     }
 
     /// <summary>Statically unpack the file. Returns <see cref="VmpStaticResult.Applicable"/> = false (with a
     /// reason) when the LZMA output layer isn't present.</summary>
-    public static VmpStaticResult Unpack(byte[] file)
+    public static VmpStaticResult Unpack(byte[] file, CancellationToken cancellationToken = default)
     {
         var log = new StringBuilder();
         try
         {
-            return UnpackCore(file, log);
+            return UnpackCore(file, log, cancellationToken);
         }
+        catch (OperationCanceledException) { throw; }
         catch (NotApplicableException ex)
         {
             log.AppendLine(ex.Message);
@@ -74,8 +78,10 @@ public static class VmpStaticUnpacker
         }
     }
 
-    private static VmpStaticResult UnpackCore(byte[] file, StringBuilder log)
+    private static VmpStaticResult UnpackCore(
+        byte[] file, StringBuilder log, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!PeView.TryParse(file, out var pe))
             throw new NotApplicableException("Not applicable: not a valid PE.");
         uint sizeOfImage = pe.SizeOfImage;
@@ -94,6 +100,7 @@ public static class VmpStaticUnpacker
         // Raw section bytes → their virtual addresses.
         foreach (var s in pe.Sections)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (s.PointerToRawData == 0 || s.SizeOfRawData == 0) continue;
             long srcEnd = (long)s.PointerToRawData + s.SizeOfRawData;
             long dstEnd = (long)s.VirtualAddress + s.SizeOfRawData;
@@ -107,6 +114,7 @@ public static class VmpStaticUnpacker
         int secBase = pe.PeOffset + PeConstants.OptHeaderFromSig + pe.SizeOfOptionalHeader;
         for (int i = 0; i < pe.Sections.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int sOff = secBase + i * PeConstants.SectionHeaderSize;
             var s = pe.Sections[i];
             WriteU32(image, sOff + PeConstants.Sec_PointerToRawData, s.VirtualAddress);
@@ -122,7 +130,7 @@ public static class VmpStaticUnpacker
             throw new NotApplicableException("Not applicable: no virtual-only target sections — not VMProtect's packed-output variant. " +
                                              "Reconstructed the section layout, but there is no LZMA layer to decompress.");
 
-        int matchIdx = FindMasked(file, pattern, literal);
+        int matchIdx = FindMasked(file, pattern, literal, cancellationToken);
         if (matchIdx < 0)
             throw new NotApplicableException("Not applicable: PACKER_INFO RVA pattern not found. The file may be VMProtect-virtualized " +
                                              "but not output-packed, or uses an unrecognized packer layout — use a dynamic strategy.");
@@ -142,6 +150,7 @@ public static class VmpStaticUnpacker
         int decoded = 0;
         for (int i = 1; i <= numBlocks; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int entryOff = piBase + i * 8;
             if (entryOff + 8 > file.Length)
                 throw new InvalidOperationException($"PACKER_INFO[{i}] is out of file bounds.");
@@ -153,7 +162,8 @@ public static class VmpStaticUnpacker
                 throw new InvalidOperationException($"Block {i}: destination RVA 0x{dst:X} is outside the unpacked image.");
 
             long outHint = DestSize(pe, dst);
-            byte[] decompressed = LzmaCodec.Decode(props, file, (int)compRaw, file.Length - (int)compRaw, outHint);
+            byte[] decompressed = LzmaCodec.Decode(
+                props, file, (int)compRaw, file.Length - (int)compRaw, outHint, cancellationToken);
 
             int avail = image.Length - (int)dst;
             if (decompressed.Length > avail)
@@ -191,7 +201,8 @@ public static class VmpStaticUnpacker
 
     /// <summary>First offset where <paramref name="pattern"/> matches, comparing only the bytes flagged in
     /// <paramref name="literal"/> (the rest are wildcards). Anchored on the first literal byte for speed.</summary>
-    private static int FindMasked(byte[] data, byte[] pattern, bool[] literal)
+    private static int FindMasked(
+        byte[] data, byte[] pattern, bool[] literal, CancellationToken cancellationToken = default)
     {
         int n = pattern.Length;
         if (n == 0 || data.Length < n) return -1;
@@ -201,6 +212,7 @@ public static class VmpStaticUnpacker
         int last = data.Length - n;
         for (int i = 0; i <= last; i++)
         {
+            if ((i & 0xFFF) == 0) cancellationToken.ThrowIfCancellationRequested();
             if (data[i + anchor] != anchorByte) continue;
             bool ok = true;
             for (int j = 0; j < n; j++)

@@ -20,22 +20,31 @@ public static class LzmaCodec
     /// <param name="input">The raw compressed stream (no .lzma alone-header, no size prefix).</param>
     /// <param name="outSizeHint">Exact uncompressed size when known — the decoder then stops precisely;
     /// pass -1 to decode until the end-of-stream marker.</param>
-    public static byte[] Decode(ReadOnlySpan<byte> props, ReadOnlySpan<byte> input, long outSizeHint)
+    public static byte[] Decode(
+        ReadOnlySpan<byte> props, ReadOnlySpan<byte> input, long outSizeHint,
+        CancellationToken cancellationToken = default, bool requireInputFullyConsumed = false)
     {
         var arr = input.ToArray();
-        return Decode(props, arr, 0, arr.Length, outSizeHint);
+        return Decode(props, arr, 0, arr.Length, outSizeHint, cancellationToken, requireInputFullyConsumed);
     }
 
     /// <summary>Decode a raw LZMA stream that lives at <paramref name="offset"/> in <paramref name="input"/>
     /// (no copy — the unpacker hands the tail of a large mapped file).</summary>
-    public static byte[] Decode(ReadOnlySpan<byte> props, byte[] input, int offset, int count, long outSizeHint)
+    public static byte[] Decode(
+        ReadOnlySpan<byte> props, byte[] input, int offset, int count, long outSizeHint,
+        CancellationToken cancellationToken = default, bool requireInputFullyConsumed = false)
     {
         if (props.Length < 5) throw new ArgumentException("LZMA properties must be at least 5 bytes.", nameof(props));
+        cancellationToken.ThrowIfCancellationRequested();
         var dec = new LzmaDecoder();
         dec.SetDecoderProperties(props[..5].ToArray());
         using var inStream = new MemoryStream(input, offset, count, writable: false);
         using var outStream = new MemoryStream(outSizeHint > 0 && outSizeHint < int.MaxValue ? (int)outSizeHint : 0);
-        dec.Code(inStream, outStream, count, outSizeHint);
+        dec.Code(inStream, outStream, count, outSizeHint, cancellationToken);
+        if (requireInputFullyConsumed && inStream.Position != count)
+            throw new InvalidDataException(
+                $"LZMA stream left {count - inStream.Position} compressed byte(s) unconsumed.");
+        cancellationToken.ThrowIfCancellationRequested();
         return outStream.ToArray();
     }
 }
@@ -514,8 +523,11 @@ internal sealed class LzmaDecoder
 
     /// <summary>Decode the LZMA stream. <paramref name="outSize"/> is the expected uncompressed length, or
     /// -1 to run until the end-of-stream marker.</summary>
-    public void Code(Stream inStream, Stream outStream, long inSize, long outSize)
+    public void Code(
+        Stream inStream, Stream outStream, long inSize, long outSize,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Init(inStream, outStream);
 
         LzmaBase.State state = new();
@@ -536,6 +548,7 @@ internal sealed class LzmaDecoder
         }
         while (nowPos64 < outSize64)
         {
+            if ((nowPos64 & 0xFFF) == 0) cancellationToken.ThrowIfCancellationRequested();
             uint posState = (uint)nowPos64 & m_PosStateMask;
             if (m_IsMatchDecoders[(state.Index << LzmaBase.kNumPosStatesBitsMax) + posState].Decode(m_RangeDecoder) == 0)
             {

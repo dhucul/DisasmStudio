@@ -3,8 +3,10 @@ using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.IL;
+using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Core.Unpacking.Lzma;
 using Iced.Intel;
+using System.Reflection;
 using Xunit;
 
 namespace DisasmStudio.Core.Tests;
@@ -33,6 +35,101 @@ public sealed class RegressionTests : IDisposable
     {
         byte[] properties = [0x5D, 0x00, 0x00, 0x00, 0x20]; // 512 MiB, over the 256 MiB limit
         Assert.Throws<InvalidDataException>(() => LzmaCodec.Decode(properties, [0, 0, 0, 0, 0], -1));
+    }
+
+    [Fact]
+    public void UpxLzmaDecodesCompactTwoByteProperties()
+    {
+        // Official UPX method-14 decoder test vector: compact properties 1A 03 followed by a raw range stream.
+        byte[] packed = [0x1A, 0x03, 0x00, 0x7F, 0xED, 0x3C, 0x00, 0x00, 0x00];
+        byte[] plain = InvokeUpxLzma(packed, 16)!;
+
+        Assert.Equal(Enumerable.Repeat((byte)0xFF, 16), plain);
+    }
+
+    [Fact]
+    public void UpxLzmaRejectsInvalidCompactProperties()
+    {
+        Assert.Null(InvokeUpxLzma([0x1F, 0x03, 0x00], 16)); // pb=7 is outside LZMA's 0..4 range
+    }
+
+    [Fact]
+    public void UpxLzmaRejectsTruncatedOrTrailingInput()
+    {
+        byte[] packed = [0x1A, 0x03, 0x00, 0x7F, 0xED, 0x3C, 0x00, 0x00, 0x00];
+        var truncated = Assert.Throws<TargetInvocationException>(
+            () => InvokeUpxLzma(packed[..^1], 16));
+        Assert.IsType<EndOfStreamException>(truncated.InnerException);
+
+        var trailing = Assert.Throws<TargetInvocationException>(
+            () => InvokeUpxLzma([.. packed, 0x00], 16));
+        Assert.IsType<InvalidDataException>(trailing.InnerException);
+    }
+
+    [Fact]
+    public void UpxStaticUnpackVerifiesAndReconstructsAnalysisImage()
+    {
+        byte[] packed = MinimalStaticallyUnpackableUpxPe();
+
+        StaticUnpackResult result = new UpxStaticUnpacker().Unpack(packed);
+
+        Assert.True(result.Applicable);
+        Assert.True(result.Ok, result.Error);
+        Assert.False(result.CanExecute);
+        byte[] output = Assert.IsType<byte[]>(result.Image);
+        Assert.Equal(0x400, output.Length);
+        Assert.True(PeView.TryParse(output, out var rebuilt));
+        Assert.Equal(0x1000u, rebuilt.EntryRva);
+        Assert.Single(rebuilt.Sections);
+    }
+
+    [Fact]
+    public void UpxStaticUnpackRejectsNrvReadPastCompressedBlock()
+    {
+        byte[] packed = MinimalStaticallyUnpackableUpxPe();
+        const int header = 0x1E0;
+        uint shortened = BitConverter.ToUInt32(packed, header + 20) - 1;
+        Put32(packed, header + 20, shortened);
+        Put32(packed, header + 12,
+            Adler32ForTest(packed.AsSpan(0x200, (int)shortened)));
+
+        StaticUnpackResult result = new UpxStaticUnpacker().Unpack(packed);
+
+        Assert.False(result.Ok);
+        Assert.Null(result.Image);
+    }
+
+    [Fact]
+    public void UpxStaticUnpackRejectsSectionOverlappingHeaders()
+    {
+        byte[] packed = MinimalStaticallyUnpackableUpxPe(originalRawOffset: 0x100);
+
+        StaticUnpackResult result = new UpxStaticUnpacker().Unpack(packed);
+
+        Assert.False(result.Ok);
+        Assert.Contains("raw-data range", result.Log);
+    }
+
+    [Fact]
+    public void UpxStaticUnpackHonorsPreCancelledToken()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        byte[] packed = MinimalStaticallyUnpackableUpxPe();
+
+        Assert.Throws<OperationCanceledException>(
+            () => StaticUnpackerRegistry.FindApplicable(packed, cancellation.Token));
+        Assert.Throws<OperationCanceledException>(
+            () => new UpxStaticUnpacker().Unpack(packed, cancellation.Token));
+    }
+
+    private static byte[]? InvokeUpxLzma(byte[] packed, int outputLength)
+    {
+        MethodInfo decode = typeof(UpxStaticUnpacker).GetMethod(
+            "DecodeUpxLzma", BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new MissingMethodException(typeof(UpxStaticUnpacker).FullName, "DecodeUpxLzma");
+        return (byte[]?)decode.Invoke(
+            null, [packed, 0, packed.Length, outputLength, CancellationToken.None]);
     }
 
     [Fact]
@@ -698,6 +795,110 @@ public sealed class RegressionTests : IDisposable
             else pe[entryOffset] = 0xC3;
         }
         return pe;
+    }
+
+    private static byte[] MinimalStaticallyUnpackableUpxPe(uint originalRawOffset = 0x200)
+    {
+        const int storedHeader = 0x300;
+        byte[] plain = new byte[0x500];
+        Put32(plain, storedHeader, PeConstants.PeSignature);
+        Put16(plain, storedHeader + 4, PeConstants.Machine_x64);
+        Put16(plain, storedHeader + 6, 1);
+        Put16(plain, storedHeader + 20, 0xF0);
+        Put16(plain, storedHeader + 22,
+            PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
+        int opt = storedHeader + PeConstants.OptHeaderFromSig;
+        Put16(plain, opt, PeConstants.Pe32PlusMagic);
+        Put32(plain, opt + 4, 0x200);
+        Put32(plain, opt + PeConstants.Opt_AddressOfEntryPoint, 0x1000);
+        Put32(plain, opt + 20, 0x1000);
+        BitConverter.GetBytes(0x140000000UL).CopyTo(plain, opt + PeConstants.Opt_ImageBase64);
+        Put32(plain, opt + PeConstants.Opt_SectionAlignment, 0x1000);
+        Put32(plain, opt + PeConstants.Opt_FileAlignment, 0x200);
+        Put32(plain, opt + PeConstants.Opt_SizeOfImage, 0x2000);
+        Put32(plain, opt + PeConstants.Opt_SizeOfHeaders, 0x200);
+        Put32(plain, opt + PeConstants.Opt_NumberOfRvaAndSizes64, 16);
+        int section = opt + 0xF0;
+        ".text"u8.CopyTo(plain.AsSpan(section));
+        Put32(plain, section + PeConstants.Sec_VirtualSize, 0x200);
+        Put32(plain, section + PeConstants.Sec_VirtualAddress, 0x1000);
+        Put32(plain, section + PeConstants.Sec_SizeOfRawData, 0x200);
+        Put32(plain, section + PeConstants.Sec_PointerToRawData, originalRawOffset);
+        Put32(plain, section + PeConstants.Sec_Characteristics,
+            PeConstants.SCN_CNT_CODE | PeConstants.SCN_MEM_EXECUTE | PeConstants.SCN_MEM_READ);
+        Put32(plain, plain.Length - 4, storedHeader);
+
+        byte[] compressed = NrvLiteralStream(plain);
+        byte[] packed = new byte[0x200 + compressed.Length];
+        packed[0] = (byte)'M'; packed[1] = (byte)'Z';
+        Put32(packed, PeConstants.DosLfanewOffset, 0x80);
+        Put32(packed, 0x80, PeConstants.PeSignature);
+        Put16(packed, 0x84, PeConstants.Machine_x64);
+        Put16(packed, 0x86, 2);
+        Put16(packed, 0x94, 0xF0);
+        Put16(packed, 0x96, PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
+        int packedOpt = 0x80 + PeConstants.OptHeaderFromSig;
+        Put16(packed, packedOpt, PeConstants.Pe32PlusMagic);
+        Put32(packed, packedOpt + PeConstants.Opt_AddressOfEntryPoint, 0x2000);
+        BitConverter.GetBytes(0x140000000UL).CopyTo(packed, packedOpt + PeConstants.Opt_ImageBase64);
+        Put32(packed, packedOpt + PeConstants.Opt_SectionAlignment, 0x1000);
+        Put32(packed, packedOpt + PeConstants.Opt_FileAlignment, 0x200);
+        Put32(packed, packedOpt + PeConstants.Opt_SizeOfImage, 0x3000);
+        Put32(packed, packedOpt + PeConstants.Opt_SizeOfHeaders, 0x200);
+        int upx0 = packedOpt + 0xF0;
+        "UPX0"u8.CopyTo(packed.AsSpan(upx0));
+        Put32(packed, upx0 + PeConstants.Sec_VirtualSize, 0x1000);
+        Put32(packed, upx0 + PeConstants.Sec_VirtualAddress, 0x1000);
+        Put32(packed, upx0 + PeConstants.Sec_Characteristics, 0xE0000080);
+        int upx1 = upx0 + PeConstants.SectionHeaderSize;
+        "UPX1"u8.CopyTo(packed.AsSpan(upx1));
+        Put32(packed, upx1 + PeConstants.Sec_VirtualSize, (uint)compressed.Length);
+        Put32(packed, upx1 + PeConstants.Sec_VirtualAddress, 0x2000);
+        Put32(packed, upx1 + PeConstants.Sec_SizeOfRawData, (uint)compressed.Length);
+        Put32(packed, upx1 + PeConstants.Sec_PointerToRawData, 0x200);
+        Put32(packed, upx1 + PeConstants.Sec_Characteristics, 0xE0000040);
+
+        int header = 0x1E0;
+        "UPX!"u8.CopyTo(packed.AsSpan(header));
+        packed[header + 4] = 13;
+        packed[header + 5] = 36;
+        packed[header + 6] = 3; // M_NRV2B_8
+        packed[header + 7] = 9;
+        Put32(packed, header + 8, Adler32ForTest(plain));
+        Put32(packed, header + 12, Adler32ForTest(compressed));
+        Put32(packed, header + 16, (uint)plain.Length);
+        Put32(packed, header + 20, (uint)compressed.Length);
+        Put32(packed, header + 24, 0x400);
+        compressed.CopyTo(packed, 0x200);
+        return packed;
+    }
+
+    private static byte[] NrvLiteralStream(byte[] plain)
+    {
+        var compressed = new List<byte>(plain.Length + (plain.Length + 7) / 8);
+        for (int offset = 0; offset < plain.Length; offset += 8)
+        {
+            compressed.Add(0xFF);
+            int count = Math.Min(8, plain.Length - offset);
+            for (int i = 0; i < count; i++) compressed.Add(plain[offset + i]);
+        }
+        // The decoder asks for the next control bit before noticing that the requested output is complete.
+        compressed.Add(0xFF);
+        return compressed.ToArray();
+    }
+
+    private static uint Adler32ForTest(byte[] bytes) => Adler32ForTest(bytes.AsSpan());
+
+    private static uint Adler32ForTest(ReadOnlySpan<byte> bytes)
+    {
+        const uint mod = 65521;
+        uint a = 1, sum = 0;
+        foreach (byte value in bytes)
+        {
+            a = (a + value) % mod;
+            sum = (sum + a) % mod;
+        }
+        return sum << 16 | a;
     }
 
     private static void Put16(byte[] bytes, int offset, ushort value) =>

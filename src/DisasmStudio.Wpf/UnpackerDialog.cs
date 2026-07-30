@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 using DisasmStudio.Core.Devirt;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
@@ -47,21 +48,38 @@ internal sealed class UnpackerDialog : Window
     private CancellationTokenSource? _cts;
     private UnpackSession? _session;
     private readonly int _staticIndex;
-    private byte[]? _fileBytes;
+    private bool _strategyTouched;
+    private bool _selectingDetectedStrategy;
+    private readonly Lazy<byte[]> _fileBytes;
+    private readonly CancellationTokenSource _probeCts = new();
+    private Task? _probeTask;
 
     /// <summary>Set to the rebuilt file's path when the user chooses to reopen it; null otherwise.</summary>
     public string? OpenPath { get; private set; }
 
     protected override void OnClosing(CancelEventArgs e)
     {
+        _probeCts.Cancel();
         _cts?.Cancel();
         _session?.Cancel();
         base.OnClosing(e);
     }
 
+    protected override void OnClosed(EventArgs e)
+    {
+        Task probe = _probeTask ?? Task.CompletedTask;
+        _ = probe.ContinueWith(
+            static (_, state) => ((CancellationTokenSource)state!).Dispose(),
+            _probeCts, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        base.OnClosed(e);
+    }
+
     public UnpackerDialog(Window owner, string targetPath, int bitness, ulong imageBase, PackerVerdict verdict)
     {
         _target = targetPath;
+        _fileBytes = new Lazy<byte[]>(
+            () => File.ReadAllBytes(_target), LazyThreadSafetyMode.ExecutionAndPublication);
         _bitness = bitness;
         _imageBase = imageBase;
         _verdict = verdict;
@@ -121,7 +139,11 @@ internal sealed class UnpackerDialog : Window
         opt.Children.Add(Label("Manual OEP address (hex) — used only with the Manual strategy"));
         _manualOep = new TextBox { FontFamily = Mono, IsEnabled = false, Margin = new Thickness(0, 0, 0, 8) };
         opt.Children.Add(_manualOep);
-        _strategy.SelectionChanged += (_, _) => UpdateOptionEnablement();
+        _strategy.SelectionChanged += (_, _) =>
+        {
+            if (!_selectingDetectedStrategy) _strategyTouched = true;
+            UpdateOptionEnablement();
+        };
 
         _sandbox = new CheckBox
         {
@@ -207,7 +229,7 @@ internal sealed class UnpackerDialog : Window
 
         // Probe (off the UI thread) for VMProtect's "Pack the Output File" LZMA layer; if present, pre-select
         // the Static strategy, which recovers the decompressed image without ever running the target.
-        _ = ProbeStaticApplicabilityAsync();
+        _probeTask = ProbeStaticApplicabilityAsync(_probeCts.Token);
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)
@@ -237,7 +259,7 @@ internal sealed class UnpackerDialog : Window
         }
         catch (Exception ex) { Append("Invalid output path: " + ex.Message); return; }
 
-        // Static VMProtect "Pack the Output File" unpack: no process, no debugger — handled entirely in Core.
+        // Static UPX / VMProtect outer-layer recovery: no process, no debugger — handled entirely in Core.
         if (_strategy.SelectedIndex == _staticIndex)
         {
             _running = true;
@@ -356,13 +378,13 @@ internal sealed class UnpackerDialog : Window
                 _devirt.IsEnabled = true;
             }
             EnableProbeButton(result);
-            SetInputsEnabled(true);   // let the user adjust strategy and retry
         }
         _running = false;
+        SetInputsEnabled(true);
         _start.IsEnabled = !result.Ok;
     }
 
-    /// <summary>Run the static VMProtect output-decompression in Core (no debugger). Returns true on success.</summary>
+    /// <summary>Run static UPX / VMProtect output recovery in Core (no debugger). Returns true on success.</summary>
     private async Task<bool> RunStaticAsync(string outPath, CancellationToken cancellationToken)
     {
         Append("Static unpack — reversing the packer without launching the target (no debugger)…");
@@ -371,7 +393,7 @@ internal sealed class UnpackerDialog : Window
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { Append("ERROR reading input file: " + ex.Message); return false; }
 
-        var unpacker = StaticUnpackerRegistry.FindApplicable(file);
+        var unpacker = StaticUnpackerRegistry.FindApplicable(file, cancellationToken);
         if (unpacker is null)
         {
             Append("");
@@ -384,7 +406,7 @@ internal sealed class UnpackerDialog : Window
 
         Append($"Static unpacker: {unpacker.Name}.");
         StaticUnpackResult result;
-        try { result = await Task.Run(() => unpacker.Unpack(file), cancellationToken); }
+        try { result = await Task.Run(() => unpacker.Unpack(file, cancellationToken), cancellationToken); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { Append("ERROR: " + ex.Message); return false; }
 
@@ -412,10 +434,13 @@ internal sealed class UnpackerDialog : Window
 
         Append("");
         Append($"SUCCESS — decoded {result.Blocks} block(s); wrote {outPath}.");
-        Append("Static unpacking reverses the outer packer only: virtualized functions stay VM bytecode and the entry " +
-               "may still be a stub. Open it to analyze the recovered code, verify it with \"Verify run\", or feed it to Devirt…");
+        if (result.CanExecute)
+            Append("The reconstructed image passed the execution-ready checks; \"Verify run\" is available.");
+        else
+            Append("This is an analysis-only image: open it to inspect recovered code or feed it to Devirt. " +
+                   "Execution is disabled because packer-specific runtime metadata was not fully rebuilt.");
         _open.IsEnabled = true;
-        _verify.IsEnabled = true;
+        _verify.IsEnabled = result.CanExecute;
         return true;
     }
 
@@ -472,32 +497,43 @@ internal sealed class UnpackerDialog : Window
     };
 
     /// <summary>Off-thread probe for a statically-unpackable layer (UPX / VMProtect); if present, pre-select Static.</summary>
-    private async Task ProbeStaticApplicabilityAsync()
+    private async Task ProbeStaticApplicabilityAsync(CancellationToken cancellationToken)
     {
-        IStaticUnpacker? unpacker;
-        try { unpacker = await Task.Run(() => StaticUnpackerRegistry.FindApplicable(EnsureFileBytes())); }
-        catch { return; }
-        if (unpacker is null) return;
-        _ = Dispatcher.BeginInvoke(() =>
+        try
         {
-            if (_running || _strategy.SelectedIndex == _staticIndex) return;
-            _strategy.SelectedIndex = _staticIndex;
-            Append($"Detected a statically-unpackable layer ({unpacker.Name}) — selected the Static strategy: it reverses " +
-                   "the packer without running the target, so there's no anti-debug to fight.");
-        });
+            IStaticUnpacker? unpacker = await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return StaticUnpackerRegistry.FindApplicable(EnsureFileBytes(), cancellationToken);
+            }, cancellationToken).ConfigureAwait(false);
+            if (unpacker is null) return;
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_running || _strategyTouched || _strategy.SelectedIndex == _staticIndex) return;
+                _selectingDetectedStrategy = true;
+                try { _strategy.SelectedIndex = _staticIndex; }
+                finally { _selectingDetectedStrategy = false; }
+                Append($"Detected a statically-unpackable layer ({unpacker.Name}) — selected the Static strategy: it reverses " +
+                       "the packer without running the target, so there's no anti-debug to fight.");
+            }, DispatcherPriority.Normal, cancellationToken);
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) when (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) { }
+        catch { /* applicability probing must never fault the dialog */ }
     }
 
-    private byte[] EnsureFileBytes() => _fileBytes ??= File.ReadAllBytes(_target);
+    private byte[] EnsureFileBytes() => _fileBytes.Value;
 
-    /// <summary>Enable/disable the dynamic-only options to match the selected strategy. The Static path
-    /// launches no process, so sandbox / anti-debug / manual-OEP do not apply to it.</summary>
+    /// <summary>Enable the one strategy-specific input. Dynamic checkboxes stay editable while idle even when
+    /// Static is selected, so a user can prepare their next dynamic attempt without first changing strategies.</summary>
     private void UpdateOptionEnablement()
     {
         bool isStatic = _strategy.SelectedIndex == _staticIndex;
         _manualOep.IsEnabled = !isStatic && _strategy.SelectedIndex == 3;
-        _sandbox.IsEnabled = !isStatic;
-        _apiHooks.IsEnabled = !isStatic;
-        _rdtsc.IsEnabled = !isStatic;
+        _sandbox.IsEnabled = true;
+        _apiHooks.IsEnabled = true;
+        _rdtsc.IsEnabled = true;
     }
 
     private void EnableProbeButton(UnpackResult result)
@@ -659,6 +695,8 @@ internal sealed class UnpackerDialog : Window
         _strategy.IsEnabled = on;
         _manualOep.IsEnabled = on && _strategy.SelectedIndex == 3;
         _sandbox.IsEnabled = on;
+        _apiHooks.IsEnabled = on;
+        _rdtsc.IsEnabled = on;
         _output.IsEnabled = on;
         _start.IsEnabled = on;
         if (on) UpdateOptionEnablement();

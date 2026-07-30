@@ -5,11 +5,15 @@ namespace DisasmStudio.Core.Unpacking;
 /// unpacker or the dynamic path.</param>
 /// <param name="Ok">True when a reconstructed image was produced (and, where the format carries a checksum,
 /// verified).</param>
-/// <param name="Image">The reconstructed image in virtual layout (RVA-indexed), ready to write/open; null on failure.</param>
+/// <param name="Image">A reconstructed image ready to write and reopen. Its section layout may be virtualized
+/// for analysis or restored to ordinary file layout, depending on the unpacker; null on failure.</param>
 /// <param name="EntryRva">The recovered entry-point RVA (0 when unknown / still the packer stub).</param>
 /// <param name="Blocks">Number of compressed blocks decoded.</param>
+/// <param name="CanExecute">True only when the output is rebuilt strongly enough to offer execution. False means
+/// the image is intentionally analysis-only even though it is safe to write and open.</param>
 public sealed record StaticUnpackResult(
-    bool Applicable, bool Ok, byte[]? Image, uint EntryRva, int Blocks, string Log, string? Error)
+    bool Applicable, bool Ok, byte[]? Image, uint EntryRva, int Blocks, string Log, string? Error,
+    bool CanExecute = false)
 {
     public static StaticUnpackResult NotApplicable(string why) => new(false, false, null, 0, 0, why, why);
     public static StaticUnpackResult Fail(string log, string error) => new(true, false, null, 0, 0, log, error);
@@ -28,11 +32,11 @@ public interface IStaticUnpacker
     string Name { get; }
 
     /// <summary>Cheap, non-throwing probe: does this file look like my format?</summary>
-    bool LooksApplicable(byte[] file);
+    bool LooksApplicable(byte[] file, CancellationToken cancellationToken = default);
 
     /// <summary>Attempt the unpack. Returns <see cref="StaticUnpackResult.Applicable"/> = false when the format
     /// isn't actually present.</summary>
-    StaticUnpackResult Unpack(byte[] file);
+    StaticUnpackResult Unpack(byte[] file, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Wraps the existing <see cref="VmpStaticUnpacker"/> (VMProtect "Pack the Output File" LZMA layer)
@@ -41,12 +45,16 @@ public sealed class VmpStaticUnpackerAdapter : IStaticUnpacker
 {
     public string Name => "VMProtect (packed output / LZMA)";
 
-    public bool LooksApplicable(byte[] file) => VmpStaticUnpacker.LooksApplicable(file);
+    public bool LooksApplicable(byte[] file, CancellationToken cancellationToken = default) =>
+        VmpStaticUnpacker.LooksApplicable(file, cancellationToken);
 
-    public StaticUnpackResult Unpack(byte[] file)
+    public StaticUnpackResult Unpack(byte[] file, CancellationToken cancellationToken = default)
     {
-        var r = VmpStaticUnpacker.Unpack(file);
-        return new StaticUnpackResult(r.Applicable, r.Ok, r.Image, r.EntryRva, r.Blocks, r.Log, r.Error);
+        var r = VmpStaticUnpacker.Unpack(file, cancellationToken);
+        // This reverses the compression layer for analysis, but intentionally leaves the protector entry stub
+        // and its runtime-specific IAT state intact.
+        return new StaticUnpackResult(r.Applicable, r.Ok, r.Image, r.EntryRva, r.Blocks, r.Log, r.Error,
+            CanExecute: false);
     }
 }
 
@@ -63,11 +71,14 @@ public static class StaticUnpackerRegistry
 
     public static IReadOnlyList<IStaticUnpacker> Unpackers => All;
 
-    public static IStaticUnpacker? FindApplicable(byte[] file)
+    public static IStaticUnpacker? FindApplicable(
+        byte[] file, CancellationToken cancellationToken = default)
     {
         foreach (var u in All)
         {
-            try { if (u.LooksApplicable(file)) return u; }
+            cancellationToken.ThrowIfCancellationRequested();
+            try { if (u.LooksApplicable(file, cancellationToken)) return u; }
+            catch (OperationCanceledException) { throw; }
             catch { /* a probe must never throw the selection */ }
         }
         return null;
