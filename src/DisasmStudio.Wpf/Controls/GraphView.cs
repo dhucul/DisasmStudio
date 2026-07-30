@@ -146,8 +146,8 @@ public sealed class GraphView : FrameworkElement
         _decoder = decoder;
         if (!function.BlocksBuilt)
         {
-            using var cfgDis = NeutralDisasm.For(result.Image, result.Names, decoder);
-            CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis, result.NoReturn);
+            using var cfgDis = NeutralDisasm.For(result.AnalysisImage, result.Names, decoder);
+            CfgBuilder.Build(result.AnalysisImage, function, result.JumpTables, cfgDis, result.NoReturn);
         }
 
         _blocks.Clear();
@@ -266,7 +266,7 @@ public sealed class GraphView : FrameworkElement
     private void BuildLines(AnalysisResult result)
     {
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        using INeutralDisassembler dis = NeutralDisasm.For(result.Image, result.Names, _decoder);
+        using INeutralDisassembler dis = NeutralDisasm.For(result.AnalysisImage, result.Names, _decoder);
 
         foreach (var block in _blocks)
         {
@@ -477,7 +477,7 @@ public sealed class GraphView : FrameworkElement
     private ulong? FollowTargetOf(ulong? va)
     {
         if (_result is null || va is not { } address) return null;
-        using var dis = NeutralDisasm.For(_result.Image, _result.Names, _decoder);
+        using var dis = NeutralDisasm.For(_result.AnalysisImage, _result.Names, _decoder);
         return dis.TryDecode(address, out var insn) && insn.DirectTarget is ulong t && _result.Image.IsMappedVa(t) ? t : null;
     }
 

@@ -1,4 +1,5 @@
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Core.Unpacking;
 
 namespace DisasmStudio.Core.Analysis;
 
@@ -6,6 +7,25 @@ namespace DisasmStudio.Core.Analysis;
 public sealed class AnalysisResult
 {
     public required IBinaryImage Image { get; init; }
+
+    private IBinaryImage? _analysisImage;
+
+    /// <summary>
+    /// Image view used for code reachability and lazy CFG/decompiler work. Usually identical to
+    /// <see cref="Image"/>; for packed files it restricts executable ranges to the on-disk loader stub while
+    /// <see cref="Image"/> continues to expose the complete original file to hex/section/resource views.
+    /// </summary>
+    public IBinaryImage AnalysisImage
+    {
+        get => _analysisImage ?? Image;
+        init => _analysisImage = value;
+    }
+
+    /// <summary>The single packer verdict computed while preparing this analysis, if the image was a PE.</summary>
+    public PackerVerdict? PackerVerdict { get; init; }
+
+    /// <summary>True when <see cref="AnalysisImage"/> narrowed executable ranges around the packed entry stub.</summary>
+    public bool PackedAnalysisRestricted { get; init; }
 
     /// <summary>Every instruction's VA in image order — the spine of the linear view.
     /// Settable so a local patch repair can splice in a re-decoded region without a full re-analysis.</summary>
@@ -45,7 +65,7 @@ public sealed class AnalysisResult
         for (int i = lo - 1; i >= 0; i--)
         {
             var fn = _functions[i];
-            try { CfgBuilder.Build(Image, fn, JumpTables, noReturn: NoReturn); }
+            try { CfgBuilder.Build(AnalysisImage, fn, JumpTables, noReturn: NoReturn); }
             catch { continue; }
             if (fn.Blocks.Any(b => va >= b.Start && va < b.End)) return fn;
         }

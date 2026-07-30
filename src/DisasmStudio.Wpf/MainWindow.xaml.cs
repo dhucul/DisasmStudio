@@ -1438,8 +1438,8 @@ public partial class MainWindow : Window
         {
             try
             {
-                using var cfgDis = NeutralDisasm.For(_result.Image, _result.Names, _dbg.LiveDecoder);
-                CfgBuilder.Build(_result.Image, fn, null, cfgDis, _result.NoReturn);
+                using var cfgDis = NeutralDisasm.For(_result.AnalysisImage, _result.Names, _dbg.LiveDecoder);
+                CfgBuilder.Build(_result.AnalysisImage, fn, null, cfgDis, _result.NoReturn);
             }
             catch { /* fall through to Step Out */ }
             // FindFunction returns the nearest preceding function start; only trust it if the IP is actually
@@ -2991,15 +2991,18 @@ public partial class MainWindow : Window
 
         // Nudge toward the right tool for the freshly-loaded PE: the managed decompiler for .NET, the unpacker
         // when it looks natively packed.
-        if (image.Format == BinaryFormat.Pe)
+        if (image.Format == BinaryFormat.Pe && _result?.PackerVerdict is { } verdict)
         {
-            try
+            if (verdict.Name == ".NET")
+                StatusText.Text = verdict.Notes;
+            else if (verdict.IsPacked)
             {
-                if (ManagedPeInfo.TryRead(image) is { } net)
-                    StatusText.Text = $"{net.Describe()} managed assembly — open the C# tab to decompile, or the .NET tab to extract embedded resources/assemblies.";
-                else { var v = PackerDetector.Detect(image); if (v.IsPacked) StatusText.Text = $"{v.Notes}  Use Unpack… to recover it."; }
+                string analysisScope = _result.PackedAnalysisRestricted
+                    ? "Static analysis focuses on the file-backed loader stub."
+                    : "Full static analysis was retained because no safe file-backed entry-stub window was available.";
+                StatusText.Text = $"{verdict.Notes}  Opened without unpacking; {analysisScope} " +
+                                  "Use Unpack… only if you want to recover the original code.";
             }
-            catch { /* detection is best-effort */ }
         }
     }
 

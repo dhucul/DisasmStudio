@@ -1,6 +1,7 @@
 using System.Text;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Core.Unpacking;
 
 namespace DisasmStudio.Core.Analysis;
 
@@ -19,9 +20,11 @@ public static class ArmAnalyzer
     private const long Budget = 40_000_000;
 
     public static AnalysisResult Analyze(IBinaryImage image, IProgress<string>? progress = null,
-        CancellationToken token = default)
+        CancellationToken token = default, IBinaryImage? resultImage = null,
+        PackerVerdict? packerVerdict = null, bool packedAnalysisRestricted = false,
+        IEnumerable<string>? initialWarnings = null)
     {
-        var warnings = new List<string>();
+        var warnings = initialWarnings?.ToList() ?? [];
         using var dis = new ArmDisassembler(image, image.Arch, null);   // flow-only decoder (no name substitution needed)
         var code = new CodeBitmap(image);
         var xrefs = new XrefDatabase();
@@ -107,7 +110,10 @@ public static class ArmAnalyzer
 
         return new AnalysisResult
         {
-            Image = image,
+            Image = resultImage ?? image,
+            AnalysisImage = image,
+            PackerVerdict = packerVerdict,
+            PackedAnalysisRestricted = packedAnalysisRestricted,
             Linear = linear,
             Functions = functions,
             FunctionByVa = byVa,

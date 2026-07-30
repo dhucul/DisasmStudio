@@ -20,7 +20,7 @@ public static class SourceExporter
     /// handles both x86/x64 (Iced) and ARM/Thumb/AArch64 (Capstone) images with identical output.</summary>
     public static void WriteAsm(TextWriter w, AnalysisResult r, IProgress<int>? progress = null, CancellationToken ct = default)
     {
-        using var dis = NeutralDisasm.For(r.Image, r.Names);
+        using var dis = NeutralDisasm.For(r.AnalysisImage, r.Names);
         {
             int digits = AddrDigits(r);
             WriteAsmHeader(w, r);
@@ -39,13 +39,13 @@ public static class SourceExporter
     /// <summary>Write only the instructions belonging to one function (up to the next function start).</summary>
     public static void WriteAsmFunction(TextWriter w, AnalysisResult r, Function fn)
     {
-        using var dis = NeutralDisasm.For(r.Image, r.Names);
+        using var dis = NeutralDisasm.For(r.AnalysisImage, r.Names);
         {
             int digits = AddrDigits(r);
 
             // Bound the listing to the function's own reachable extent — not the rest of the image (which
             // is what an unbounded "next function start" would do for the highest-address function).
-            CfgBuilder.Build(r.Image, fn, r.JumpTables, noReturn: r.NoReturn);
+            CfgBuilder.Build(r.AnalysisImage, fn, r.JumpTables, noReturn: r.NoReturn);
             ulong end = fn.Va + 1;
             foreach (var bb in fn.Blocks) if (bb.End > end) end = bb.End;
             foreach (var f in r.Functions) if (f.Va > fn.Va && f.Va < end) end = f.Va;   // stop early if functions overlap

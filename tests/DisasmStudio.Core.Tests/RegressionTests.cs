@@ -134,6 +134,86 @@ public sealed class RegressionTests : IDisposable
     }
 
     [Fact]
+    public void KnownPackedPeOpensByAnalyzingItsEntryStub()
+    {
+        string path = Write("packed.exe", MinimalUpxPe());
+        using var image = PeImage.Load(path);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+
+        Assert.Same(image, result.Image);
+        Assert.NotSame(image, result.AnalysisImage);
+        Assert.True(result.PackedAnalysisRestricted);
+        Assert.Equal("UPX", result.PackerVerdict?.Name);
+        Assert.Contains(result.Warnings, warning => warning.Contains("UPX", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(image.EntryVa, result.FunctionByVa.Keys);
+        Assert.True(result.Linear.Count < 20_000,
+            $"Packed payload should not become a multi-hundred-thousand-line code listing (actual {result.Linear.Count:N0}).");
+    }
+
+    [Fact]
+    public void PackedAnalysisBoundaryIsUsedByLazyDecompiler()
+    {
+        string path = Write("packed-jump.exe", MinimalUpxPe(jumpOutsideWindow: true));
+        using var image = PeImage.Load(path);
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+        Function entry = result.FunctionByVa[image.EntryVa];
+
+        DecompiledFunction decompiled = Decompiler.Decompile(entry, result);
+
+        Assert.NotEmpty(entry.Blocks);
+        Assert.All(entry.Blocks.SelectMany(block => block.InstrVas),
+            va => Assert.True(result.AnalysisImage.IsExecutableVa(va),
+                $"Lazy CFG escaped the packed analysis range at {va:X}."));
+        string pseudoC = string.Concat(decompiled.PseudoC.SelectMany(line => line.Tokens).Select(token => token.Text));
+        Assert.DoesNotContain("decompilation error", pseudoC, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Arm64PackedPeUsesEntryStubAnalysis()
+    {
+        string path = Write("packed-arm64.exe", MinimalUpxPe(machine: 0xAA64));
+        using var image = PeImage.Load(path);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+
+        Assert.Same(image, result.Image);
+        Assert.NotSame(image, result.AnalysisImage);
+        Assert.True(result.PackedAnalysisRestricted);
+        Assert.Equal(Architecture.Arm64, result.AnalysisImage.Arch);
+        Assert.Contains(image.EntryVa, result.FunctionByVa.Keys);
+    }
+
+    [Fact]
+    public void PackedPeWithoutFileBackedEntryFallsBackSafely()
+    {
+        string path = Write("packed-no-entry.dll", MinimalUpxPe(includeEntry: false));
+        using var image = PeImage.Load(path);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+
+        Assert.Same(image, result.AnalysisImage);
+        Assert.False(result.PackedAnalysisRestricted);
+        Assert.Equal("UPX", result.PackerVerdict?.Name);
+        Assert.DoesNotContain(result.Warnings,
+            warning => warning.Contains("limited to", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void HeuristicPackedPeAlsoUsesEntryStubAnalysis()
+    {
+        string path = Write("renamed-packer.exe", MinimalUpxPe(knownSectionNames: false, highEntropy: true));
+        using var image = PeImage.Load(path);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+
+        Assert.Null(result.PackerVerdict?.Name);
+        Assert.True(result.PackerVerdict?.IsPacked == true);
+        Assert.True(result.PackedAnalysisRestricted);
+        Assert.NotSame(image, result.AnalysisImage);
+    }
+
+    [Fact]
     public void MinimalElf32HeaderLoads()
     {
         byte[] elf = new byte[0x34];
@@ -555,6 +635,68 @@ public sealed class RegressionTests : IDisposable
         Put16(pe, 0x98, 0x20B);
         BitConverter.GetBytes(0x140000000UL).CopyTo(pe, 0xB0);
         Put32(pe, 0xD4, 0x200);
+        return pe;
+    }
+
+    private static byte[] MinimalUpxPe(ushort machine = 0x8664, bool includeEntry = true,
+        bool knownSectionNames = true, bool highEntropy = false, bool jumpOutsideWindow = false)
+    {
+        const int headers = 0x200;
+        const int packedSize = 0x80_000;
+        const uint packedRva = 0x81_000;
+        byte[] pe = new byte[headers + packedSize];
+        if (highEntropy)
+            for (int i = headers; i < pe.Length; i++) pe[i] = (byte)(i - headers);
+        pe[0] = (byte)'M'; pe[1] = (byte)'Z';
+        Put32(pe, 0x3C, 0x80);
+        Put32(pe, 0x80, 0x00004550);
+        Put16(pe, 0x84, machine);
+        Put16(pe, 0x86, 2);
+        Put16(pe, 0x94, 0xF0);
+        Put16(pe, 0x96, 0x0022);
+        Put16(pe, 0x98, 0x20B);
+        uint entryRva = includeEntry ? packedRva + packedSize - 0x1000 : 0;
+        Put32(pe, 0xA8, entryRva);
+        BitConverter.GetBytes(0x140000000UL).CopyTo(pe, 0xB0);
+        Put32(pe, 0xB8, 0x1000);
+        Put32(pe, 0xBC, 0x200);
+        Put32(pe, 0xD0, packedRva + packedSize);
+        Put32(pe, 0xD4, headers);
+
+        int upx0 = 0x188;
+        (knownSectionNames ? "UPX0"u8 : "STUB0"u8).CopyTo(pe.AsSpan(upx0));
+        Put32(pe, upx0 + 8, 0x80_000);
+        Put32(pe, upx0 + 12, 0x1000);
+        Put32(pe, upx0 + 20, headers);
+        Put32(pe, upx0 + 36, 0xE0000080);
+
+        int upx1 = upx0 + 40;
+        (knownSectionNames ? "UPX1"u8 : "CRYPT"u8).CopyTo(pe.AsSpan(upx1));
+        Put32(pe, upx1 + 8, packedSize);
+        Put32(pe, upx1 + 12, packedRva);
+        Put32(pe, upx1 + 16, packedSize);
+        Put32(pe, upx1 + 20, headers);
+        Put32(pe, upx1 + 36, 0xE0000040);
+
+        if (includeEntry)
+        {
+            // A tiny valid loader stub at the entry; the preceding bytes stand in for the compressed payload.
+            int entryOffset = headers + packedSize - 0x1000;
+            if (machine == 0xAA64)
+            {
+                // ret
+                pe[entryOffset] = 0xC0; pe[entryOffset + 1] = 0x03;
+                pe[entryOffset + 2] = 0x5F; pe[entryOffset + 3] = 0xD6;
+            }
+            else if (jumpOutsideWindow)
+            {
+                // jmp to the beginning of UPX1, well before the retained 64 KiB look-behind window.
+                pe[entryOffset] = 0xE9;
+                long displacement = (long)packedRva - ((long)entryRva + 5);
+                Put32(pe, entryOffset + 1, unchecked((uint)(int)displacement));
+            }
+            else pe[entryOffset] = 0xC3;
+        }
         return pe;
     }
 

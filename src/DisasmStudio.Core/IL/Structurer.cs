@@ -216,6 +216,14 @@ public sealed class Structurer
                 return null;
 
             case GotoStmt g:
+                // A bounded CFG can intentionally stop at an external/unanalysed target (for example a
+                // packed loader stub jumping into the compressed payload). Preserve that edge as a goto,
+                // but never try to structure a block that is not part of the lifted function.
+                if (!_byStart.ContainsKey(g.Target))
+                {
+                    seq.Items.Add(g);
+                    return null;
+                }
                 return FollowEdge(seq, g.Target, loop) ? null : g.Target;
 
             case null:   // fall-through block
@@ -242,7 +250,7 @@ public sealed class Structurer
                 }
                 foreach (var c in order)
                 {
-                    var caseBody = (c == merge || _emitted.Contains(c) || childStop.Contains(c))
+                    var caseBody = (!_byStart.ContainsKey(c) || c == merge || _emitted.Contains(c) || childStop.Contains(c))
                         ? GotoSeq(c) : EmitSeq(c, childStop, loop, depth + 1);
                     stmt.Cases.Add(new SwitchCase { Values = byTarget[c], Body = caseBody });
                 }
@@ -275,6 +283,7 @@ public sealed class Structurer
     private Stmt? BranchRegion(ulong target, ulong merge, HashSet<ulong> childStop, Loop? loop, int depth)
     {
         if (target == merge) return null;
+        if (!_byStart.ContainsKey(target)) return GotoSeq(target);
         if (loop is not null && target == loop.Header) return new SeqStmt { Items = { new ContinueStmt() } };
         if (loop is { HasFollow: true } && target == loop.Follow) return new SeqStmt { Items = { new BreakStmt() } };
         if (_emitted.Contains(target)) return GotoSeq(target);

@@ -120,7 +120,7 @@ public sealed class DecompilerView : Grid
     private bool IsCondJumpAt(ulong va)
     {
         if (_result is null) return false;
-        using var dis = NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder);
+        using var dis = NeutralDisasm.For(_result.AnalysisImage, _result.Names, LiveDecoder);
         return dis.TryDecode(va, out var i) && i.Flow == FlowKind.CondJump;
     }
 
@@ -228,11 +228,11 @@ public sealed class DecompilerView : Grid
     {
         // A new image (e.g. the static↔live debugger swap) invalidates the decoder and the per-function
         // cache — both were built over the old address space.
-        if (_dis is not null && !ReferenceEquals(_result?.Image, result.Image)) { _dis = null; _cache.Clear(); }
+        if (_dis is not null && !ReferenceEquals(_result?.AnalysisImage, result.AnalysisImage)) { _dis = null; _cache.Clear(); }
         _result = result;
         // Follow-call needs a decoder that can read the shown bytes: the live decoder while debugging (process
         // memory), else the file-backed one. The image-swap reset above rebuilds it on the static↔live switch.
-        _dis ??= LiveDecoder ?? new Disassembler(result.Image);
+        _dis ??= LiveDecoder ?? new Disassembler(result.AnalysisImage);
         _addrDigits = Math.Max(8, result.Image.MaxVa.ToString("X").Length);
 
         if (_cache.TryGetValue(function.Va, out var cached)) { _shownFn = function.Va; Show(cached); return; }
@@ -243,12 +243,12 @@ public sealed class DecompilerView : Grid
         {
             if (LiveDecoder is null)
             {
-                CfgBuilder.Build(result.Image, function, result.JumpTables, noReturn: result.NoReturn);
+                CfgBuilder.Build(result.AnalysisImage, function, result.JumpTables, noReturn: result.NoReturn);
             }
             else
             {
-                using var cfgDis = NeutralDisasm.For(result.Image, result.Names, LiveDecoder);
-                CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis, result.NoReturn);
+                using var cfgDis = NeutralDisasm.For(result.AnalysisImage, result.Names, LiveDecoder);
+                CfgBuilder.Build(result.AnalysisImage, function, result.JumpTables, cfgDis, result.NoReturn);
             }
         }
 
@@ -577,7 +577,7 @@ public sealed class DecompilerView : Grid
     private void DrawBranchArrows(DrawingContext dc, int rows)
     {
         if (_result is null || _lines.Count == 0) return;
-        using var dis = NeutralDisasm.For(_result.Image, _result.Names, LiveDecoder);
+        using var dis = NeutralDisasm.For(_result.AnalysisImage, _result.Names, LiveDecoder);
 
         double xCode = AddrX - 3;          // arrows meet the code at the left edge of the address column
         double minX = BpGutterW + 2;       // don't cross into the breakpoint strip

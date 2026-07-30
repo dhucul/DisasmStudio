@@ -24,12 +24,13 @@ public static class Decompiler
     /// when supplied, reads live process memory (ARM already reads via the image, so only the Iced path needs it).</summary>
     private static LiftedFunction LiftLow(Function fn, AnalysisResult result, IInstructionDecoder? decoder = null)
     {
-        if (result.Image.IsArm)
+        var image = result.AnalysisImage;
+        if (image.IsArm)
         {
-            using var arm = new ArmLifter(result.Image, result.Names, result.JumpTables);
+            using var arm = new ArmLifter(image, result.Names, result.JumpTables);
             return arm.Lift(fn);
         }
-        return new Lifter(result.Image, result.Names, result.JumpTables, decoder).Lift(fn);
+        return new Lifter(image, result.Names, result.JumpTables, decoder).Lift(fn);
     }
 
     /// <summary><paramref name="decoder"/> lets the caller decompile over a running process: the default
@@ -42,7 +43,7 @@ public static class Decompiler
             // An IAT slot misfiled as a function — some images keep the import table inside .text, so a
             // call-through target looks like code. It's a pointer, not an instruction stream; say so
             // plainly instead of disassembling the pointer bytes into noise.
-            if (result.Image.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
+            if (result.AnalysisImage.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
                 return Note(fn.Va, $"// import slot -> {imp.Module}!{imp.Name} (data, not code)");
 
             BuildCfg(fn, result, decoder);
@@ -50,8 +51,8 @@ public static class Decompiler
             if (fn.Blocks.Count > MaxBlocks) return Note(fn.Va, $"// function too large to decompile ({fn.Blocks.Count} blocks)");
 
             var low = LiftLow(fn, result, decoder);
-            var model = ArchModel.For(result.Image);
-            var mid = MediumLifter.Transform(low, result.Image, model);
+            var model = ArchModel.For(result.AnalysisImage);
+            var mid = MediumLifter.Transform(low, result.AnalysisImage, model);
             var (root, labels) = Structurer.Structure(mid);
             var comments = result.Comments;
 
@@ -81,7 +82,7 @@ public static class Decompiler
         if (fn.Blocks.Count == 0) return new EmulationResult { Status = EmuStatus.NoCode };
         if (fn.Blocks.Count > MaxBlocks) return new EmulationResult { Status = EmuStatus.NoCode };
         var low = LiftLow(fn, result, decoder);
-        return IlEmulator.Run(low, result.Image, opts);
+        return IlEmulator.Run(low, result.AnalysisImage, opts);
     }
 
     private static DecompiledFunction Note(ulong va, string msg)
@@ -106,7 +107,7 @@ public static class Decompiler
     {
         try
         {
-            if (result.Image.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
+            if (result.AnalysisImage.ImportsByIatVa.TryGetValue(fn.Va, out var imp))
                 return NoteLines(fn.Va, $"/* import slot -> {imp.Module}!{imp.Name} (data, not code) */");
 
             BuildCfg(fn, result, decoder);
@@ -114,8 +115,8 @@ public static class Decompiler
             if (fn.Blocks.Count > MaxBlocks) return NoteLines(fn.Va, $"/* function too large to decompile ({fn.Blocks.Count} blocks) */");
 
             var low = LiftLow(fn, result, decoder);
-            var model = ArchModel.For(result.Image);
-            var mid = MediumLifter.Transform(low, result.Image, model);
+            var model = ArchModel.For(result.AnalysisImage);
+            var mid = MediumLifter.Transform(low, result.AnalysisImage, model);
             var (root, labels) = Structurer.Structure(mid);
             return StructEmitter.Emit(mid, root, labels, pseudoC: true, result.Comments, model, compilable: true);
         }
@@ -129,11 +130,11 @@ public static class Decompiler
     {
         if (decoder is null)
         {
-            CfgBuilder.Build(result.Image, fn, result.JumpTables, noReturn: result.NoReturn);
+            CfgBuilder.Build(result.AnalysisImage, fn, result.JumpTables, noReturn: result.NoReturn);
             return;
         }
 
-        using var dis = NeutralDisasm.For(result.Image, result.Names, decoder);
-        CfgBuilder.Build(result.Image, fn, result.JumpTables, dis, result.NoReturn);
+        using var dis = NeutralDisasm.For(result.AnalysisImage, result.Names, decoder);
+        CfgBuilder.Build(result.AnalysisImage, fn, result.JumpTables, dis, result.NoReturn);
     }
 }

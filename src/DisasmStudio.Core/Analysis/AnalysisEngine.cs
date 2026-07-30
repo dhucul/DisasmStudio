@@ -2,6 +2,7 @@ using System.Text;
 using DisasmStudio.Core.Analysis.Signatures;
 using DisasmStudio.Core.Disasm;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Core.Unpacking;
 using Iced.Intel;
 
 namespace DisasmStudio.Core.Analysis;
@@ -27,12 +28,43 @@ public static class AnalysisEngine
     public static AnalysisResult Analyze(IBinaryImage image, AnalysisOptions? options = null,
         IProgress<string>? progress = null, CancellationToken token = default)
     {
-        // Non-x86 raw images use self-contained pipelines; the x86/x64 Iced passes below don't apply.
-        if (image.IsArm) return ArmAnalyzer.Analyze(image, progress, token);       // ARM/Thumb/AArch64 (Capstone)
+        // 8051 is always a raw image, so PE packer detection cannot apply.
         if (image.Is8051) return I8051Analyzer.Analyze(image, progress, token);     // Intel 8051/MCS-51
 
         options ??= AnalysisOptions.None;
         var warnings = new List<string>();
+        IBinaryImage resultImage = image;
+        PackerVerdict? packerVerdict = null;
+        bool packedAnalysisRestricted = false;
+
+        // A packer's compressed bytes are data even when its PE section is marked executable. Decoding a
+        // multi-megabyte UPX/ASPack/etc. payload as instructions makes opening appear to hang and produces a
+        // useless listing. Keep the original image for the UI/hex view, but run static code discovery through
+        // a narrow read-only view of the loader stub. This does not unpack or alter the file.
+        try
+        {
+            if (image.Format == BinaryFormat.Pe)
+            {
+                packerVerdict = PackerDetector.Detect(image);
+                if (packerVerdict.IsPacked && PackedAnalysisImage.TryCreate(image, out var packedView))
+                {
+                    image = packedView;
+                    packedAnalysisRestricted = true;
+                    warnings.Add($"{packerVerdict.Name ?? "Packed"} image opened as-is — static analysis is limited to the on-disk loader stub.");
+                }
+                else if (packerVerdict.IsPacked)
+                {
+                    warnings.Add($"{packerVerdict.Name ?? "Packed"} image opened as-is — no safe file-backed entry-stub window was available, so full static analysis was retained.");
+                }
+            }
+        }
+        catch { /* packer recognition is best-effort and must never prevent ordinary loading */ }
+
+        // ARM-family images use their own Capstone pipeline, but only after the same packed-PE preparation so
+        // an ARM64 UPX payload does not bypass the loader-stub restriction.
+        if (image.IsArm)
+            return ArmAnalyzer.Analyze(image, progress, token, resultImage, packerVerdict,
+                packedAnalysisRestricted, warnings);
 
         progress?.Report("Disassembling (linear sweep)…");
         var sweepIndex = new LinearIndex();   // full instruction stream — used for backtracking analyses
@@ -255,7 +287,10 @@ public static class AnalysisEngine
 
         return new AnalysisResult
         {
-            Image = image,
+            Image = resultImage,
+            AnalysisImage = image,
+            PackerVerdict = packerVerdict,
+            PackedAnalysisRestricted = packedAnalysisRestricted,
             Linear = linear,
             Functions = functions,
             FunctionByVa = byVa,
