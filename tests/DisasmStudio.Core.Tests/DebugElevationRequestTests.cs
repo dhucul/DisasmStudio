@@ -15,7 +15,8 @@ public sealed class DebugElevationRequestTests
             StopAtLoaderBreakpoint: true,
             WorkingDirectory: @"C:\Program Files\Example App",
             SessionPath: @"C:\Users\tester\AppData\Local\DisasmStudio\ElevationHandoffs\abc.dsproj",
-            SessionSha256: new string('A', 64));
+            SessionSha256: new string('A', 64),
+            ReadyEventName: @"Local\DisasmStudio.ElevationReady.0123456789abcdef0123456789abcdef");
 
         Assert.True(DebugElevationRequest.TryParse(expected.ToArguments(), out var actual));
         Assert.Equal(expected, actual);
@@ -46,6 +47,9 @@ public sealed class DebugElevationRequestTests
     [InlineData("--elevated-debug", "native", @"C:\target.exe", "--session", "a")]
     [InlineData("--elevated-debug", "native", @"C:\target.exe", "--session-sha256", "ABC")]
     [InlineData("--elevated-debug", "native", @"C:\target.exe", "--session-sha256", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
+    [InlineData("--elevated-debug", "native", @"C:\target.exe", "--ready-event")]
+    [InlineData("--elevated-debug", "native", @"C:\target.exe", "--ready-event", "Global\\Other.Event")]
+    [InlineData("--elevated-debug", "native", @"C:\target.exe", "--ready-event", "Local\\DisasmStudio.ElevationReady.not-a-guid")]
     public void HandoffRejectsMalformedOrAmbiguousArguments(params string[] args)
         => Assert.False(DebugElevationRequest.TryParse(args, out _));
 
@@ -56,10 +60,13 @@ public sealed class DebugElevationRequestTests
         var invalidMode = new DebugElevationRequest(@"C:\target.exe", (ElevatedDebugMode)99, false, false);
         var unsignedSession = new DebugElevationRequest(
             @"C:\target.exe", ElevatedDebugMode.Native, false, false, SessionPath: @"C:\session.dsproj");
+        var invalidReadyEvent = new DebugElevationRequest(
+            @"C:\target.exe", ElevatedDebugMode.Native, false, false, ReadyEventName: "invalid");
 
         Assert.Throws<InvalidOperationException>(missingTarget.ToArguments);
         Assert.Throws<InvalidOperationException>(invalidMode.ToArguments);
         Assert.Throws<InvalidOperationException>(unsignedSession.ToArguments);
+        Assert.Throws<InvalidOperationException>(invalidReadyEvent.ToArguments);
     }
 
     [Theory]

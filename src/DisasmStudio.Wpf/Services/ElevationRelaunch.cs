@@ -13,7 +13,7 @@ internal enum ElevationRelaunchResult
     Failed,
 }
 
-/// <summary>Starts a second copy through the Windows UAC broker while leaving this instance untouched.</summary>
+/// <summary>Starts a second copy through the Windows UAC broker; the caller owns its current-window lifecycle.</summary>
 internal static class ElevationRelaunch
 {
     private const int ErrorCancelled = 1223;
@@ -31,8 +31,12 @@ internal static class ElevationRelaunch
         }
     }
 
-    public static ElevationRelaunchResult TryStart(DebugElevationRequest request, out string? error)
+    public static ElevationRelaunchResult TryStart(
+        DebugElevationRequest request,
+        out Process? process,
+        out string? error)
     {
+        process = null;
         error = null;
         try
         {
@@ -50,13 +54,12 @@ internal static class ElevationRelaunch
             };
             foreach (string arg in request.ToArguments()) psi.ArgumentList.Add(arg);
 
-            Process? process = Process.Start(psi);
+            process = Process.Start(psi);
             if (process is null)
             {
                 error = "Windows did not start the elevated process.";
                 return ElevationRelaunchResult.Failed;
             }
-            process.Dispose();
             return ElevationRelaunchResult.Started;
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == ErrorCancelled)

@@ -137,6 +137,8 @@ public partial class MainWindow : Window
     private bool _staticStringsScanning;
     private bool _refreshStaticStringsAfterDebug;
     private DebugStartFailure? _debugStartFailure;
+    private bool _closingForElevationHandoff;
+    private string? _elevationReadyEventName;
     private sealed record StaticStringSnapshot(List<FoundString> Strings, Dictionary<ulong, ulong> PointerSlots);
 
     public MainWindow()
@@ -173,10 +175,12 @@ public partial class MainWindow : Window
             SyncAccordionToSelection();
             if (Application.Current is App { PendingDebugElevationRequest: { } request })
             {
+                _elevationReadyEventName = request.ReadyEventName;
                 if (!File.Exists(request.TargetPath))
                 {
                     TryDeleteElevationSnapshot(request.SessionPath);
                     StatusText.Text = $"Elevated debug target was not found: {request.TargetPath}";
+                    FailElevationHandoff();
                     return;
                 }
 
@@ -185,6 +189,7 @@ public partial class MainWindow : Window
                     if (!IsElevationSnapshotPath(sessionPath) || !File.Exists(sessionPath))
                     {
                         StatusText.Text = "The elevated session snapshot is unavailable; debug was not started.";
+                        FailElevationHandoff();
                         return;
                     }
                     try
@@ -202,15 +207,21 @@ public partial class MainWindow : Window
                 if (_image is null || !PathsEqual(_image.FilePath, request.TargetPath))
                 {
                     StatusText.Text = "Elevated debug was not started because the target did not finish loading.";
+                    FailElevationHandoff();
                     return;
                 }
 
                 HideDebuggerCheck.IsChecked = request.HideFromDebugger;
                 LoaderBreakCheck.IsChecked = request.StopAtLoaderBreakpoint;
-                StartDebugRun(
+                bool started = StartDebugRun(
                     forceNative: request.Mode == ElevatedDebugMode.Native,
                     launchWorkingDirectory: request.WorkingDirectory,
                     reuseDllConfiguration: request.SessionPath is { Length: > 0 });
+                if (!started)
+                {
+                    StatusText.Text = "The elevated debugger could not start the restored session.";
+                    FailElevationHandoff();
+                }
                 return;
             }
             var args = Environment.GetCommandLineArgs();
@@ -447,30 +458,30 @@ public partial class MainWindow : Window
 
     // ---- debugger ----
     private void OnDebugRun(object sender, RoutedEventArgs e)
-        => StartDebugRun(forceNative: false);
+        => _ = StartDebugRun(forceNative: false);
 
-    private void StartDebugRun(bool forceNative, string? launchWorkingDirectory = null, bool reuseDllConfiguration = false)
+    private bool StartDebugRun(bool forceNative, string? launchWorkingDirectory = null, bool reuseDllConfiguration = false)
     {
-        if (_mdbg is not null) { if (_mdbg.IsStopped) _mdbg.Go(); return; }   // managed: continue from a stop
-        if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return; }   // native: continue only from a stop (else it skips the next stop)
-        if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_mdbg is not null) { if (_mdbg.IsStopped) _mdbg.Go(); return true; }   // managed: continue from a stop
+        if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return true; }   // native: continue only from a stop (else it skips the next stop)
+        if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return false; }
+        if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return false; }
         // A .NET assembly → source-level (C# line) debugging via the out-of-process ICorDebug host, not the
         // native Win32 debugger. The loaded image is the managed module (its .exe apphost is what we launch).
-        if (_managed is not null && !forceNative) { StartManagedDebug(); return; }
+        if (_managed is not null && !forceNative) { StartManagedDebug(); return _mdbg is not null; }
         if (_image.IsDll)
         {
             if (reuseDllConfiguration && _dllDebug is { } saved && PathsEqual(saved.DllPath, _image.FilePath))
             {
                 BeginDebug(d => d.LaunchDll(saved.HostExe, saved.CommandLine, saved.WorkingDir,
                     saved.DllPath, saved.BreakRva, saved.BreakIsEntry));
-                return;
+                return true;
             }
             // A DLL can't be launched directly — host it in an EXE (rundll32 by default, or a custom host)
             // that LoadLibrary's it, and break at the DLL's DllMain (or a chosen export) once it maps.
             var exports = _image.Symbols.Where(s => s.Kind == NamedSymbolKind.Export)
                                         .Select(s => (s.Name, s.Va)).OrderBy(e => e.Name, StringComparer.Ordinal).ToList();
-            if (Dialogs.AskDebugDll(this, _image.FilePath, _image.Bitness, exports) is not { } opt) return;
+            if (Dialogs.AskDebugDll(this, _image.FilePath, _image.Bitness, exports) is not { } opt) return false;
 
             // A chosen export → break at that export (rundll32 calls it; a custom host is presumably the real
             // consumer that calls it). "Just load" → break at DllMain (RVA 0 = no DllMain → stop at the load event).
@@ -482,10 +493,11 @@ public partial class MainWindow : Window
             var p = new DllDebugState(opt.HostExe, opt.CommandLine, opt.WorkingDir, _image.FilePath, breakRva, breakIsEntry);
             _dllDebug = p;
             BeginDebug(d => d.LaunchDll(p.HostExe, p.CommandLine, p.WorkingDir, p.DllPath, p.BreakRva, p.BreakIsEntry));
-            return;
+            return true;
         }
         _dllDebug = null;
         BeginDebug(d => d.Launch(_image.FilePath, launchWorkingDirectory));
+        return true;
     }
 
     private void OnAttach(object sender, RoutedEventArgs e)
@@ -1671,7 +1683,11 @@ public partial class MainWindow : Window
         bool consoleApp = IsConsoleSubsystem(dll);
 
         var mdbg = new ManagedDebugSession(Dispatcher, hostPath, consoleApp);
-        mdbg.Launched += () => StatusText.Text = $"Managed debug: running {module}…";
+        mdbg.Launched += () =>
+        {
+            StatusText.Text = $"Managed debug: running {module}…";
+            SignalElevationReady();
+        };
         mdbg.Stopped += OnManagedStopped;
         mdbg.Exited += OnManagedExited;
         mdbg.Error += OnManagedError;
@@ -1821,6 +1837,7 @@ public partial class MainWindow : Window
         if (code != Mdbg.LaunchFailedExitCode)
             StatusText.Text = $"Managed target exited (code {code}).";
         EndManagedDebug();
+        if (_elevationReadyEventName is not null) FailElevationHandoff();
     }
 
     /// <summary>Managed-debug error handler. A target whose manifest requests administrator rights can't be
@@ -1831,6 +1848,11 @@ public partial class MainWindow : Window
         {
             EndManagedDebug();
             StatusText.Text = "The target requires administrator rights.";
+            if (_elevationReadyEventName is not null)
+            {
+                FailElevationHandoff();
+                return;
+            }
             if (_image is null || ElevationRelaunch.IsCurrentProcessElevated())
             {
                 StatusText.Text = "The managed target still could not be launched from the elevated debugger.";
@@ -1839,25 +1861,35 @@ public partial class MainWindow : Window
             if (MessageBox.Show(this,
                 "This program requests administrator rights, and DisasmStudio is running as a standard user — so it can't launch it.\n\n" +
                 "Open an elevated DisasmStudio window and retry this debug launch?\n\n" +
-                "This standard-rights window will remain open.",
+                "If you approve UAC, this standard-rights window will close. If you decline, it will remain open.",
                 "Administrator rights required", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
                 RelaunchElevated(ElevatedDebugMode.Auto);
             return;
         }
         StatusText.Text = "Managed debug: " + msg;
+        if (_elevationReadyEventName is not null) FailElevationHandoff();
     }
 
-    /// <summary>Open an elevated copy with a debug handoff. This instance always remains available.</summary>
-    private void RelaunchElevated(ElevatedDebugMode mode)
+    /// <summary>Open an elevated copy with a debug handoff. Keep this instance hidden-but-alive until the
+    /// elevated debugger confirms readiness; close only after that acknowledgement, or restore on failure.</summary>
+    private async void RelaunchElevated(ElevatedDebugMode mode)
     {
         if (_image is null) return;
 
         string? snapshotPath = null;
+        EventWaitHandle? readyEvent = null;
         DebugElevationRequest request;
         try
         {
             var snapshot = SaveElevationSnapshot();
             snapshotPath = snapshot.Path;
+            string readyEventName = $@"Local\DisasmStudio.ElevationReady.{Guid.NewGuid():N}";
+            readyEvent = new EventWaitHandle(
+                initialState: false,
+                EventResetMode.ManualReset,
+                readyEventName,
+                out bool createdNew);
+            if (!createdNew) throw new IOException("Could not create a unique elevation readiness event.");
             request = new DebugElevationRequest(
                 _image.FilePath,
                 mode,
@@ -1865,29 +1897,106 @@ public partial class MainWindow : Window
                 LoaderBreakCheck.IsChecked == true,
                 Environment.CurrentDirectory,
                 snapshot.Path,
-                snapshot.Sha256);
+                snapshot.Sha256,
+                readyEventName);
         }
         catch (Exception ex)
         {
+            readyEvent?.Dispose();
             StatusText.Text = "Could not prepare the elevated debug session: " + ex.Message;
             TryDeleteElevationSnapshot(snapshotPath);
             return;
         }
 
-        var result = ElevationRelaunch.TryStart(request, out string? error);
+        bool restoreWindow = IsVisible;
+        if (restoreWindow) Hide();   // never show two DisasmStudio sessions while UAC/the elevated copy starts
+        var result = ElevationRelaunch.TryStart(
+            request,
+            out System.Diagnostics.Process? elevatedProcess,
+            out string? error);
         if (result != ElevationRelaunchResult.Started) TryDeleteElevationSnapshot(snapshotPath);
-        switch (result)
+        if (result != ElevationRelaunchResult.Started)
         {
-            case ElevationRelaunchResult.Started:
-                StatusText.Text = "Elevated DisasmStudio started; this window remains at standard rights.";
-                break;
-            case ElevationRelaunchResult.Cancelled:
-                StatusText.Text = "Administrator access was declined; DisasmStudio is still running normally.";
-                break;
-            default:
-                StatusText.Text = "Could not start elevated DisasmStudio: " + error;
-                break;
+            readyEvent?.Dispose();
+            RestoreAfterElevationFailure(restoreWindow);
+            StatusText.Text = result == ElevationRelaunchResult.Cancelled
+                ? "Administrator access was declined; DisasmStudio is still running normally."
+                : "Could not start elevated DisasmStudio: " + error;
+            return;
         }
+
+        if (readyEvent is null || elevatedProcess is null)
+        {
+            readyEvent?.Dispose();
+            elevatedProcess?.Dispose();
+            TryDeleteElevationSnapshot(snapshotPath);
+            RestoreAfterElevationFailure(restoreWindow);
+            StatusText.Text = "The elevated process started without a valid readiness channel.";
+            return;
+        }
+
+        bool ready = false;
+        using (readyEvent)
+        using (elevatedProcess)
+        using (var waitCancellation = new CancellationTokenSource())
+        {
+            Task<bool> readyTask = Task.Run(() =>
+                WaitHandle.WaitAny([readyEvent, waitCancellation.Token.WaitHandle]) == 0);
+            Task exitTask;
+            try { exitTask = elevatedProcess.WaitForExitAsync(); }
+            catch { exitTask = Task.CompletedTask; }
+
+            Task first = await Task.WhenAny(readyTask, exitTask);
+            if (ReferenceEquals(first, readyTask))
+            {
+                try { ready = await readyTask && !elevatedProcess.HasExited; }
+                catch { ready = false; }
+            }
+            waitCancellation.Cancel();
+            try { await readyTask; } catch { }
+        }
+
+        if (ready)
+        {
+            _closingForElevationHandoff = true;
+            Close();
+            return;
+        }
+
+        TryDeleteElevationSnapshot(snapshotPath);
+        RestoreAfterElevationFailure(restoreWindow);
+        StatusText.Text = "The elevated debugger exited before the restored session became ready.";
+    }
+
+    private void RestoreAfterElevationFailure(bool restoreWindow)
+    {
+        if (!restoreWindow || IsVisible) return;
+        Show();
+        Activate();
+    }
+
+    private void SignalElevationReady()
+    {
+        string? eventName = _elevationReadyEventName;
+        if (eventName is null) return;
+        try
+        {
+            using var readyEvent = EventWaitHandle.OpenExisting(eventName);
+            readyEvent.Set();
+            _elevationReadyEventName = null;
+        }
+        catch
+        {
+            FailElevationHandoff();
+        }
+    }
+
+    private void FailElevationHandoff()
+    {
+        if (_elevationReadyEventName is null) return;
+        _elevationReadyEventName = null;
+        _closingForElevationHandoff = true;
+        Dispatcher.BeginInvoke(Close);
     }
 
     private void EndManagedDebug()
@@ -2307,6 +2416,7 @@ public partial class MainWindow : Window
             _ => "",
         };
         StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
+        SignalElevationReady();
     }
 
     /// <summary>Common UI teardown when a debug session ends — whether the debuggee exited or we detached from
@@ -2389,6 +2499,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_elevationReadyEventName is not null)
+        {
+            FailElevationHandoff();
+            return;
+        }
+
         StatusText.Text = $"Debuggee exited (code {code}).";
 
         if (_restartPending)
@@ -2407,16 +2523,22 @@ public partial class MainWindow : Window
         string operation = failure.Operation == DebugStartOperation.Attach ? "attach" : "launch";
         StatusText.Text = $"Debugger could not {operation} the target (Win32 error {failure.Win32Error}).";
 
-        if (failure.Operation != DebugStartOperation.Launch || !failure.MayRequireElevation
-            || _image is null || ElevationRelaunch.IsCurrentProcessElevated())
+        if (_elevationReadyEventName is not null)
+        {
+            FailElevationHandoff();
             return;
+        }
+
+        if (failure.Operation != DebugStartOperation.Launch || !failure.MayRequireElevation || _image is null)
+            return;
+        if (ElevationRelaunch.IsCurrentProcessElevated()) return;
 
         string reason = failure.Win32Error == DebugStartFailure.ElevationRequired
             ? "This target requests administrator rights."
             : "Windows denied the debug launch; administrator rights may be required.";
         if (MessageBox.Show(this,
             $"{reason}\n\nOpen an elevated DisasmStudio window and retry this debug launch?\n\n" +
-            "This standard-rights window will remain open, and declining UAC will not close it.",
+            "If you approve UAC, this standard-rights window will close. Declining UAC will leave it open.",
             "Administrator rights may be required", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
             return;
 
@@ -3365,7 +3487,7 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        if (!e.Cancel && !ConfirmDiscardSessionChanges()) e.Cancel = true;
+        if (!e.Cancel && !_closingForElevationHandoff && !ConfirmDiscardSessionChanges()) e.Cancel = true;
         base.OnClosing(e);
     }
 

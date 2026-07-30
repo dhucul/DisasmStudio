@@ -19,7 +19,8 @@ public sealed record DebugElevationRequest(
     bool StopAtLoaderBreakpoint,
     string? WorkingDirectory = null,
     string? SessionPath = null,
-    string? SessionSha256 = null)
+    string? SessionSha256 = null,
+    string? ReadyEventName = null)
 {
     public const string Switch = "--elevated-debug";
     private const string HideSwitch = "--hide-from-debugger";
@@ -27,6 +28,8 @@ public sealed record DebugElevationRequest(
     private const string WorkingDirectorySwitch = "--working-directory";
     private const string SessionSwitch = "--session";
     private const string SessionSha256Switch = "--session-sha256";
+    private const string ReadyEventSwitch = "--ready-event";
+    private const string ReadyEventPrefix = @"Local\DisasmStudio.ElevationReady.";
 
     public string[] ToArguments()
     {
@@ -62,6 +65,13 @@ public sealed record DebugElevationRequest(
         }
         else if (SessionSha256 is not null)
             throw new InvalidOperationException("A session digest cannot be supplied without a session path.");
+        if (ReadyEventName is not null)
+        {
+            if (!IsReadyEventName(ReadyEventName))
+                throw new InvalidOperationException("The elevation readiness event name is invalid.");
+            args.Add(ReadyEventSwitch);
+            args.Add(ReadyEventName);
+        }
         return [.. args];
     }
 
@@ -86,6 +96,7 @@ public sealed record DebugElevationRequest(
         string? workingDirectory = null;
         string? sessionPath = null;
         string? sessionSha256 = null;
+        string? readyEventName = null;
         for (int i = 3; i < args.Count; i++)
         {
             if (string.Equals(args[i], HideSwitch, StringComparison.OrdinalIgnoreCase))
@@ -110,18 +121,34 @@ public sealed record DebugElevationRequest(
                     return false;
                 sessionSha256 = args[i];
             }
+            else if (string.Equals(args[i], ReadyEventSwitch, StringComparison.OrdinalIgnoreCase))
+            {
+                if (readyEventName is not null || ++i >= args.Count || !IsReadyEventName(args[i]))
+                    return false;
+                readyEventName = args[i];
+            }
             else
                 return false;
         }
 
         if ((sessionPath is null) != (sessionSha256 is null)) return false;
         request = new DebugElevationRequest(
-            args[2], mode, hide, loader, workingDirectory, sessionPath, sessionSha256);
+            args[2], mode, hide, loader, workingDirectory, sessionPath, sessionSha256, readyEventName);
         return true;
     }
 
     private static bool IsSha256(string? value)
         => value is { Length: 64 } && value.All(Uri.IsHexDigit);
+
+    private static bool IsReadyEventName(string? value)
+    {
+        if (value is null || !value.StartsWith(ReadyEventPrefix, StringComparison.Ordinal)) return false;
+        ReadOnlySpan<char> suffix = value.AsSpan(ReadyEventPrefix.Length);
+        if (suffix.Length != 32) return false;
+        foreach (char c in suffix)
+            if (!Uri.IsHexDigit(c)) return false;
+        return true;
+    }
 }
 
 public enum DebugStartOperation
