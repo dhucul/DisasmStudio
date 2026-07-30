@@ -16,6 +16,7 @@ public sealed class CodeBitmap
     private readonly ulong[] _end;
     private readonly ulong[][] _words;
     private readonly HashSet<ulong> _noReturnFalls = [];
+    private readonly Dictionary<ulong, int> _unreachableInstructions = [];
     private int _last;
 
     public CodeBitmap(IBinaryImage image)
@@ -65,6 +66,12 @@ public sealed class CodeBitmap
     internal IReadOnlySet<ulong> NoReturnFalls => _noReturnFalls;
 
     internal void MarkNoReturnFall(ulong va) => _noReturnFalls.Add(va);
+
+    internal bool TryGetUnreachableInstruction(ulong va, out int length) =>
+        _unreachableInstructions.TryGetValue(va, out length);
+
+    internal void MarkUnreachableInstruction(ulong va, int length) =>
+        _unreachableInstructions.TryAdd(va, length);
 
     /// <summary>Next code byte at/after <paramref name="va"/>, else <paramref name="limit"/>.</summary>
     public ulong NextCode(ulong va, ulong limit) => Scan(va, limit, set: true);
@@ -242,7 +249,17 @@ public static class CodeMap
                     work.Push(fall);
                     break;
                 case FlowControl.UnconditionalBranch:
-                    if (FlowAnalysis.DirectBranchTarget(ins) is ulong tj) work.Push(tj);
+                    if (FlowAnalysis.DirectBranchTarget(ins) is ulong tj)
+                    {
+                        work.Push(tj);
+                        // Preserve one clean decode candidate skipped by a short forward jump for the linear
+                        // listing. It stays outside the reachable-code bitmap and CFG because the bytes may
+                        // still be inline data.
+                        if (image.IsExecutableVa(tj) && tj > fall && tj - fall <= 15
+                            && dis.TryDecodeAt(fall, out var skipped)
+                            && skipped.Length == (int)(tj - fall))
+                            code.MarkUnreachableInstruction(fall, skipped.Length);
+                    }
                     break;
                 case FlowControl.IndirectBranch:
                     if (jumpTables.TryGetValue(va, out var cases)) foreach (var c in cases) work.Push(c);
@@ -336,7 +353,9 @@ public static class CodeMap
             byte b = ByteAt(image, cur);
             if ((b == 0xCC || b == 0x00) && lastWasTerminator) { runEnd = cur; return sawTerminator; } // padding after a function
             if (!dis.TryDecodeAt(cur, out var ins) || ins.Length == 0) return false;     // invalid → data
-            cur += (ulong)ins.Length;
+            ulong next = cur + (ulong)ins.Length;
+            if (code.NextCode(cur, next) != next) return false;                         // overlaps known code
+            cur = next;
             bool term = ins.FlowControl is FlowControl.Return or FlowControl.UnconditionalBranch or FlowControl.Interrupt;
             sawTerminator |= term;
             lastWasTerminator = term;

@@ -2430,7 +2430,7 @@ public partial class MainWindow : Window
         var idx = _result.Linear;
         long line = idx.IndexOf(changeStart);
         if (idx.VaAt(line) > changeStart && line > 0) line--;
-        if (idx.IsDataAt(line)) { Linear.Refresh(); Hex.InvalidateView(); return; }   // data byte: no boundary change
+        if (!idx.IsReachableCodeAt(line)) { Linear.Refresh(); Hex.InvalidateView(); return; }
 
         ulong from = idx.VaAt(line);
         var d = new Disassembler(_image);
@@ -2441,7 +2441,7 @@ public partial class MainWindow : Window
             if (cur >= changeEnd)                              // resynced with an existing code boundary?
             {
                 long l2 = idx.IndexOf(cur);
-                if (idx.VaAt(l2) == cur && !idx.IsDataAt(l2)) break;
+                if (idx.VaAt(l2) == cur && idx.IsReachableCodeAt(l2)) break;
             }
             if (!d.TryDecodeAt(cur, out var ins) || ins.Length == 0) break;
             starts.Add(cur);

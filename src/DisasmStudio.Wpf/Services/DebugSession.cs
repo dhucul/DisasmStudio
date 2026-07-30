@@ -182,7 +182,11 @@ public sealed class DebugSession
         // Gate breakpoint arming on "this VA is a genuine code instruction start" per the analysis's linear
         // index — so capture never writes a 0xCC into a jump/lookup table that sits in an executable section.
         var linear = LiveResult.Linear;
-        bool isCodeStart(ulong va) { long line = linear.IndexOf(va); return linear.VaAt(line) == va && !linear.IsDataAt(line); }
+        bool isCodeStart(ulong va)
+        {
+            long line = linear.IndexOf(va);
+            return linear.VaAt(line) == va && linear.IsReachableCodeAt(line);
+        }
         // Reachability gate (used only when the analysis over-identifies code): a function is "real" if it is
         //   - in the x64 .pdata table (FunctionStarts) — the authoritative function list, which includes
         //     indirect-only functions (vtable methods/callbacks) but never data tables; or

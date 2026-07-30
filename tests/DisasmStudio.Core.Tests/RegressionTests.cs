@@ -1,5 +1,6 @@
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
+using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.IL;
 using DisasmStudio.Core.Unpacking.Lzma;
@@ -368,6 +369,116 @@ public sealed class RegressionTests : IDisposable
 
         Assert.True(code.IsCode(0x100A));
         Assert.True(code.IsCode(0x100D));
+    }
+
+    [Fact]
+    public void ShortJumpSkippedInstructionRendersAsUnreachableDisassembly()
+    {
+        byte[] bytes =
+        [
+            0xEB, 0x02,             // 1000: jmp short 1004
+            0x33, 0xC0,             // 1002: xor eax,eax (not reached)
+            0x48, 0x83, 0xC4, 0x28, // 1004: add rsp,28h
+            0xC3,                   // 1008: ret
+        ];
+        string path = Write("unreachable-short-jump.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 64);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+        long line = result.Linear.IndexOf(0x1002);
+
+        Assert.Equal(0x1002UL, result.Linear.VaAt(line));
+        Assert.False(result.Linear.IsDataAt(line));
+        Assert.True(result.Linear.IsUnreachableAt(line));
+        Assert.False(result.Linear.IsReachableCodeAt(line));
+        Assert.Equal(LinearLineKind.UnreachableDecode, result.Linear.KindAt(line));
+
+        Function function = result.FunctionByVa[0x1000];
+        CfgBuilder.Build(image, function, noReturn: result.NoReturn);
+        Assert.DoesNotContain(function.Blocks.SelectMany(b => b.InstrVas), va => va == 0x1002);
+
+        using var writer = new StringWriter();
+        SourceExporter.WriteAsm(writer, result);
+        string exportedLine = Assert.Single(writer.ToString().Split(Environment.NewLine),
+            x => x.Contains(LinearIndex.UnreachableComment, StringComparison.Ordinal));
+        Assert.Contains("xor", exportedLine.ToLowerInvariant());
+        Assert.Contains("may be inline data", exportedLine);
+    }
+
+    [Fact]
+    public void LinearIndexPreservesBit62AndRejectsReservedBit63()
+    {
+        const ulong highVa = (1UL << 62) + 0x1234;
+        var index = new LinearIndex();
+
+        index.AddUnreachable(highVa);
+        index.Add(highVa + 2, isData: true);
+
+        Assert.Equal(highVa, index.VaAt(0));
+        Assert.True(index.IsUnreachableAt(0));
+        Assert.Equal(highVa + 2, index.VaAt(1));
+        Assert.True(index.IsDataAt(1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => index.Add(1UL << 63));
+    }
+
+    [Fact]
+    public void LinearIndexClonePreservesUnreachableKindOutsideReplacement()
+    {
+        var index = new LinearIndex();
+        index.Add(0x1000);
+        index.AddUnreachable(0x1002);
+        index.Add(0x1004, isData: true);
+
+        LinearIndex clone = index.CloneWithRegion(0x1000, 0x1001, [0x1000]);
+
+        long line = clone.IndexOf(0x1002);
+        Assert.Equal(0x1002UL, clone.VaAt(line));
+        Assert.Equal(LinearLineKind.UnreachableDecode, clone.KindAt(line));
+    }
+
+    [Fact]
+    public void UnreachableCandidateDoesNotHideOverlappingReachableInstruction()
+    {
+        byte[] bytes =
+        [
+            0xEB, 0x02, // 1000: jmp 1004
+            0xEB, 0x00, // 1002: candidate, but a separate symbol enters at 1003
+            0xC3,
+            0xCC,
+        ];
+        NamedSymbol[] symbols = [new(0x1003, "overlap", NamedSymbolKind.Function)];
+        string path = Write("unreachable-overlap.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 64, 0x1000, symbols);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+        long dataLine = result.Linear.IndexOf(0x1002);
+        long codeLine = result.Linear.IndexOf(0x1003);
+
+        Assert.Equal(0x1002UL, result.Linear.VaAt(dataLine));
+        Assert.True(result.Linear.IsDataAt(dataLine));
+        Assert.False(result.Linear.IsUnreachableAt(dataLine));
+        Assert.Equal(0x1003UL, result.Linear.VaAt(codeLine));
+        Assert.True(result.Linear.IsReachableCodeAt(codeLine));
+    }
+
+    [Fact]
+    public void UnreachableCandidateRequiresRecoveredJumpTarget()
+    {
+        byte[] bytes =
+        [
+            0xEB, 0x02, // 1000: jmp 1004
+            0x33, 0xC0, // clean skipped decode
+            0x0F,       // truncated/invalid target
+        ];
+        string path = Write("unreachable-invalid-target.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 64);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+        long line = result.Linear.IndexOf(0x1002);
+
+        Assert.Equal(0x1002UL, result.Linear.VaAt(line));
+        Assert.True(result.Linear.IsDataAt(line));
+        Assert.False(result.Linear.IsUnreachableAt(line));
     }
 
     [Fact]

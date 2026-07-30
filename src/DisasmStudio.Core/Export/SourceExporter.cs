@@ -90,7 +90,10 @@ public static class SourceExporter
         var toks = dis.Format(va);   // reused between calls — concatenate now, before the next Format
         if (toks.Count == 0) { w.WriteLine($"{addr}    ??"); return; }
         string text = string.Concat(toks.Select(t => t.Text));
-        if (r.Comments.TryGetValue(va, out var c)) text += "   ; " + c;
+        string? comment = r.Linear.IsUnreachableAt(line) ? LinearIndex.UnreachableComment : null;
+        if (r.Comments.TryGetValue(va, out var c))
+            comment = comment is null ? c : comment + "; " + c;
+        if (comment is not null) text += "   ; " + comment;
         w.WriteLine($"{addr}    {text}");
     }
 

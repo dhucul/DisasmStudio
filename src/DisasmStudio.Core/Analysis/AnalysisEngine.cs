@@ -370,6 +370,21 @@ public static class AnalysisEngine
                     continue;
                 }
 
+                if (isCode && code.TryGetUnreachableInstruction(va, out int unreachableLength)
+                    && dis.TryDecodeAt(va, out var unreachable)
+                    && unreachable.Length == unreachableLength
+                    && va <= ulong.MaxValue - (ulong)unreachableLength)
+                {
+                    ulong unreachableEnd = va + (ulong)unreachableLength;
+                    bool interiorHasCode = code.NextCode(va, unreachableEnd) != unreachableEnd;
+                    if (!interiorHasCode && unreachableEnd <= end && code.IsCode(unreachableEnd))
+                    {
+                        index.AddUnreachable(va);
+                        va = unreachableEnd;
+                        continue;
+                    }
+                }
+
                 // Data run: a code section's gap stops at the next code byte; a data region runs to its end.
                 // Parsed structure fields (header / .pdata / .reloc) inside the run are emitted at their own
                 // boundaries; everything else falls to strings / dd-dq pointers / db rows.

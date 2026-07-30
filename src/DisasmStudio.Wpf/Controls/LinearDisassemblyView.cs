@@ -445,6 +445,11 @@ public sealed class LinearDisassemblyView : Grid
     private void FollowCaret()
     {
         if (_result is null || _dis is null || _caretInstr < 0) return;
+        if (_result.Linear.IsUnreachableAt(_caretInstr))
+        {
+            StatusRequested?.Invoke("Follow: this is an unreached decode candidate, not recovered control flow.");
+            return;
+        }
         if (_result.Linear.IsDataAt(_caretInstr)) { StatusRequested?.Invoke("Follow: data line — nothing to follow."); return; }
         ulong va = _result.Linear.VaAt(_caretInstr);
         if (!_dis.TryDecode(va, out var instr)) { StatusRequested?.Invoke("Follow: this line can't be decoded."); return; }
@@ -463,7 +468,8 @@ public sealed class LinearDisassemblyView : Grid
     /// (data, an indirect/non-branch instruction, or a target outside the image).</summary>
     private ulong? CaretFollowTarget()
     {
-        if (_result is null || _dis is null || _caretInstr < 0 || _result.Linear.IsDataAt(_caretInstr)) return null;
+        if (_result is null || _dis is null || _caretInstr < 0
+            || !_result.Linear.IsReachableCodeAt(_caretInstr)) return null;
         ulong va = _result.Linear.VaAt(_caretInstr);
         if (!_dis.TryDecode(va, out var instr)) return null;
         return instr.DirectTarget is ulong t && _result.Image.IsMappedVa(t) ? t : null;
@@ -478,7 +484,15 @@ public sealed class LinearDisassemblyView : Grid
 
     /// <summary>True when the instruction at <paramref name="va"/> is a conditional jump — the only kind whose
     /// line the "Toggle jump" colour mark applies to.</summary>
-    private bool IsCondJumpAt(ulong va) => _dis is not null && _dis.TryDecode(va, out var i) && i.Flow == FlowKind.CondJump;
+    private bool IsCondJumpAt(ulong va)
+    {
+        if (_result is null || _dis is null) return false;
+        long line = _result.Linear.IndexOf(va);
+        return _result.Linear.VaAt(line) == va
+            && _result.Linear.IsReachableCodeAt(line)
+            && _dis.TryDecode(va, out var i)
+            && i.Flow == FlowKind.CondJump;
+    }
 
     // ---- hit testing ----
     private void OnClick(Point p, bool extend = false)
@@ -510,7 +524,8 @@ public sealed class LinearDisassemblyView : Grid
         if (_result is null || _dis is null || p.X > GutterW) return false;
         long display = ToDisplay(Math.Clamp(_topDisplay + (long)(p.Y / _rowHeight), 0, Math.Max(0, VisibleCount - 1)));
         var (isLabel, line) = ContentAt(display);
-        if (isLabel || RegionStartAt(line) >= 0 || line < 0 || line >= _result.Linear.Count || _result.Linear.IsDataAt(line)) return false;
+        if (isLabel || RegionStartAt(line) >= 0 || line < 0 || line >= _result.Linear.Count
+            || !_result.Linear.IsReachableCodeAt(line)) return false;
         instrLine = line;
         return true;
     }
@@ -571,7 +586,10 @@ public sealed class LinearDisassemblyView : Grid
         }
         if (!_dis!.TryDecode(va, out var instr)) return $"{addr}  ??";
         string text = string.Concat(_dis.Format(va).Select(t => t.Text));
-        if (_result.Comments.TryGetValue(va, out var c)) text += "   ; " + c;
+        string? comment = _result.Linear.IsUnreachableAt(line) ? LinearIndex.UnreachableComment : null;
+        if (_result.Comments.TryGetValue(va, out var c))
+            comment = comment is null ? c : comment + "; " + c;
+        if (comment is not null) text += "   ; " + comment;
         return $"{addr}  {Hex(_result.Image.ReadBytesAtVa(va, instr.Length))}  {text}";
     }
 
@@ -634,7 +652,7 @@ public sealed class LinearDisassemblyView : Grid
                 dc.DrawRectangle(SyntaxTheme.Selection, null, new Rect(GutterW, y, width - GutterW, _rowHeight));
 
             if (_result.Linear.IsDataAt(instrLine)) DrawData(dc, instrLine, va, y, dpi);
-            else DrawInstruction(dc, va, y, dpi);
+            else DrawInstruction(dc, instrLine, va, y, dpi);
         }
 
         DrawBranchArrows(dc, rows);
@@ -656,7 +674,7 @@ public sealed class LinearDisassemblyView : Grid
         Draw(dc, name + ":", AddrX, y, brush, dpi);
     }
 
-    private void DrawInstruction(DrawingContext dc, ulong va, double y, double dpi)
+    private void DrawInstruction(DrawingContext dc, long line, ulong va, double y, double dpi)
     {
         Draw(dc, va.ToString("X" + _addrDigits), AddrX, y, SyntaxTheme.Address, dpi);
 
@@ -679,8 +697,11 @@ public sealed class LinearDisassemblyView : Grid
         foreach (var tok in _dis.Format(va))
             x = Draw(dc, tok.Text, x, y, SyntaxTheme.BrushFor(tok.Kind), dpi);
 
-        // Inline comment (referenced string, etc.).
-        if (_result.Comments.TryGetValue(va, out var comment))
+        // Inline comment (reachability status, referenced string, etc.).
+        string? comment = _result.Linear.IsUnreachableAt(line) ? LinearIndex.UnreachableComment : null;
+        if (_result.Comments.TryGetValue(va, out var existing))
+            comment = comment is null ? existing : comment + "; " + existing;
+        if (comment is not null)
             Draw(dc, "   ; " + comment, x + _charWidth, y, SyntaxTheme.Comment, dpi);
     }
 
@@ -795,7 +816,7 @@ public sealed class LinearDisassemblyView : Grid
         for (long visible = scanLo; visible < scanHi; visible++)
         {
             var (isLabel, instrLine) = ContentAt(ToDisplay(visible));
-            if (isLabel || _result.Linear.IsDataAt(instrLine)) continue;
+            if (isLabel || !_result.Linear.IsReachableCodeAt(instrLine)) continue;
             int ri = RegionStartAt(instrLine);
             if (ri >= 0 && _collapsed.Contains(_regions[ri].Va)) continue;   // collapsed header — no arrow
             ulong va = _result.Linear.VaAt(instrLine);

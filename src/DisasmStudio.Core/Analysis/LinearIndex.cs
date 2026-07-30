@@ -1,9 +1,11 @@
 namespace DisasmStudio.Core.Analysis;
 
+public enum LinearLineKind { Code, Data, UnreachableDecode }
+
 /// <summary>
 /// The ordered start VA of every line in the linear view — code instructions and data runs — stored
 /// as fixed-size chunks so even a many-million-line image never allocates one giant array on the LOH.
-/// Each entry packs a code/data flag in the unused top bit (image VAs are well under 2^63), so a line
+/// Each entry packs the data flag in the unused top bit; rare unreachable-decode lines use a sparse side set, so a line
 /// costs ~8 bytes and classification is free. Line <c>k</c> → <see cref="VaAt"/> is O(1) and the view
 /// decodes/renders only the rows on screen.
 /// </summary>
@@ -15,19 +17,33 @@ public sealed class LinearIndex
     private const ulong DataFlag = 1UL << 63;
     private const ulong AddrMask = ~DataFlag;
 
+    public const string UnreachableComment =
+        "unreached decode candidate (no recovered control-flow path; may be inline data)";
+
     private readonly List<ulong[]> _chunks = [];
+    private readonly HashSet<long> _unreachableLines = [];
     private int _countInLast;
 
     public long Count { get; private set; }
 
-    public void Add(ulong va, bool isData = false)
+    public void Add(ulong va, bool isData = false) =>
+        Add(va, isData ? LinearLineKind.Data : LinearLineKind.Code);
+
+    public void AddUnreachable(ulong va) => Add(va, LinearLineKind.UnreachableDecode);
+
+    public void Add(ulong va, LinearLineKind kind)
     {
+        if ((va & DataFlag) != 0)
+            throw new ArgumentOutOfRangeException(nameof(va), "Linear-index VAs must be below 2^63.");
+        if (!Enum.IsDefined(kind)) throw new ArgumentOutOfRangeException(nameof(kind));
+
         if (_chunks.Count == 0 || _countInLast == ChunkSize)
         {
             _chunks.Add(new ulong[ChunkSize]);
             _countInLast = 0;
         }
-        _chunks[^1][_countInLast++] = isData ? (va | DataFlag) : va;
+        if (kind == LinearLineKind.UnreachableDecode) _unreachableLines.Add(Count);
+        _chunks[^1][_countInLast++] = kind == LinearLineKind.Data ? va | DataFlag : va;
         Count++;
     }
 
@@ -38,6 +54,21 @@ public sealed class LinearIndex
     /// <summary>True if line <paramref name="line"/> is a data run (rendered as db/dd/dq/string) rather than an instruction.</summary>
     public bool IsDataAt(long line) => line >= 0 && line < Count && (RawAt(line) & DataFlag) != 0;
 
+    /// <summary>True for a presentation-only decode candidate that is not recovered CFG/code-map code.</summary>
+    public bool IsUnreachableAt(long line) =>
+        line >= 0 && line < Count && _unreachableLines.Contains(line);
+
+    public bool IsReachableCodeAt(long line) =>
+        line >= 0 && line < Count && !IsDataAt(line) && !IsUnreachableAt(line);
+
+    public LinearLineKind KindAt(long line)
+    {
+        if (line < 0 || line >= Count) throw new ArgumentOutOfRangeException(nameof(line));
+        return IsDataAt(line) ? LinearLineKind.Data
+            : IsUnreachableAt(line) ? LinearLineKind.UnreachableDecode
+            : LinearLineKind.Code;
+    }
+
     /// <summary>A copy with all entries in [<paramref name="start"/>, <paramref name="end"/>) replaced by
     /// <paramref name="codeStarts"/> (instruction starts of the re-decoded region). Used for local patch
     /// repair — no re-sweep of the whole image, just a copy of the (cheap) index.</summary>
@@ -45,10 +76,12 @@ public sealed class LinearIndex
     {
         var ni = new LinearIndex();
         long i = 0;
-        for (; i < Count && VaAt(i) < start; i++) ni.Add(VaAt(i), IsDataAt(i));
+        for (; i < Count && VaAt(i) < start; i++)
+            ni.Add(VaAt(i), KindAt(i));
         foreach (var s in codeStarts) ni.Add(s);          // re-decoded region is code
         while (i < Count && VaAt(i) < end) i++;            // drop the old region's entries
-        for (; i < Count; i++) ni.Add(VaAt(i), IsDataAt(i));
+        for (; i < Count; i++)
+            ni.Add(VaAt(i), KindAt(i));
         return ni;
     }
 

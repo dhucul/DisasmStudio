@@ -16,7 +16,8 @@ public static class LiveAnalysis
 
         var idx = new LinearIndex();
         long n = staticResult.Linear.Count;
-        for (long i = 0; i < n; i++) idx.Add(staticResult.Linear.VaAt(i) + slide, staticResult.Linear.IsDataAt(i));
+        for (long i = 0; i < n; i++)
+            idx.Add(staticResult.Linear.VaAt(i) + slide, staticResult.Linear.KindAt(i));
 
         var names = new Dictionary<ulong, string>();
         foreach (var kv in staticResult.Names) names[kv.Key + slide] = kv.Value;
