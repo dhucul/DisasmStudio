@@ -45,7 +45,7 @@ public sealed class AnalysisResult
         for (int i = lo - 1; i >= 0; i--)
         {
             var fn = _functions[i];
-            try { CfgBuilder.Build(Image, fn, JumpTables); }
+            try { CfgBuilder.Build(Image, fn, JumpTables, noReturn: NoReturn); }
             catch { continue; }
             if (fn.Blocks.Any(b => va >= b.Start && va < b.End)) return fn;
         }
@@ -53,6 +53,9 @@ public sealed class AnalysisResult
     }
 
     public required XrefDatabase Xrefs { get; init; }
+
+    /// <summary>Functions and call sites proven not to return normally.</summary>
+    public NoReturnInfo NoReturn { get; init; } = NoReturnInfo.Empty;
 
     private IReadOnlyList<FoundString> _strings = [];
     public required IReadOnlyList<FoundString> Strings

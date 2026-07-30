@@ -147,7 +147,7 @@ public sealed class GraphView : FrameworkElement
         if (!function.BlocksBuilt)
         {
             using var cfgDis = NeutralDisasm.For(result.Image, result.Names, decoder);
-            CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis);
+            CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis, result.NoReturn);
         }
 
         _blocks.Clear();

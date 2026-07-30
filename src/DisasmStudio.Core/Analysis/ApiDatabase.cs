@@ -4,8 +4,9 @@ namespace DisasmStudio.Core.Analysis;
 /// <see cref="FlagSet"/> decodes its value into symbolic constants (e.g. an access mask → KEY_READ).</summary>
 public sealed record ApiParam(string Type, string Name, string? Decode = null);
 
-/// <summary>A Win32 API prototype.</summary>
-public sealed record ApiSignature(string Module, string ReturnType, string Name, IReadOnlyList<ApiParam> Params);
+/// <summary>A Win32 API prototype, including whether normal control flow can return to its caller.</summary>
+public sealed record ApiSignature(string Module, string ReturnType, string Name, IReadOnlyList<ApiParam> Params,
+    bool NoReturn = false);
 
 /// <summary>
 /// A bundled database of common Win32 API prototypes, used to annotate call sites the way IDA Pro and
@@ -33,6 +34,8 @@ public static class ApiDatabase
     private static ApiParam P(string type, string name) => new(type, name);
     private static ApiParam PA(string type, string name, string flags) => new(type, name, flags);
     private static void Add(string module, string ret, string name, params ApiParam[] ps) => _byName[name] = new ApiSignature(module, ret, name, ps);
+    private static void AddNoReturn(string module, string ret, string name, params ApiParam[] ps) =>
+        _byName[name] = new ApiSignature(module, ret, name, ps, NoReturn: true);
 
     /// <summary>Register both the ANSI (…A) and wide (…W) variants of an API that shares its layout.</summary>
     private static void AddAW(string module, string ret, string baseName, params ApiParam[] ps)
@@ -83,7 +86,8 @@ public static class ApiDatabase
         Add("kernel32", "BOOL", "TerminateProcess", P("HANDLE", "hProcess"), P("UINT", "uExitCode"));
         Add("kernel32", "HANDLE", "GetCurrentProcess");
         Add("kernel32", "DWORD", "GetCurrentProcessId");
-        Add("kernel32", "void", "ExitProcess", P("UINT", "uExitCode"));
+        AddNoReturn("kernel32", "void", "ExitProcess", P("UINT", "uExitCode"));
+        AddNoReturn("kernel32", "void", "ExitThread", P("DWORD", "dwExitCode"));
         Add("kernel32", "DWORD", "WaitForSingleObject", P("HANDLE", "hHandle"), P("DWORD", "dwMilliseconds"));
         Add("kernel32", "void", "Sleep", P("DWORD", "dwMilliseconds"));
         AddAW("kernel32", "HANDLE", "CreateMutex", P("LPVOID", "lpMutexAttributes"), P("BOOL", "bInitialOwner"), P("LPCSTR", "lpName"));

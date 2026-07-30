@@ -210,6 +210,213 @@ public sealed class RegressionTests : IDisposable
     }
 
     [Fact]
+    public void NoReturnAnalysisPropagatesThroughDirectCallsAndStopsCfgFallthrough()
+    {
+        byte[] bytes =
+        [
+            0xE8, 0x0B, 0x00, 0x00, 0x00,             // 1000: call 1010
+            0xB8, 0x2A, 0x00, 0x00, 0x00,             // unreachable mov eax,42
+            0xC3,                                     // unreachable ret
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+            0xEB, 0xFE,                               // 1010: jmp 1010
+        ];
+        string path = Write("noreturn-direct.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 64);
+
+        NoReturnInfo info = NoReturnAnalyzer.Analyze(image, [0x1000, 0x1010]);
+
+        Assert.Contains(0x1000UL, info.Functions);
+        Assert.Contains(0x1010UL, info.Functions);
+        Assert.Contains(0x1000UL, info.CallSites);
+
+        var caller = new Function { Va = 0x1000, Name = "caller", IsNoReturn = true };
+        CfgBuilder.Build(image, caller, noReturn: info);
+        BasicBlock block = Assert.Single(caller.Blocks);
+        Assert.Equal([0x1000UL], block.InstrVas);
+        Assert.Empty(block.Out);
+
+        var code = CodeMap.Compute(image, [0x1000], new Dictionary<ulong, ulong[]>(), info);
+        Assert.True(code.IsCode(0x1000));
+        Assert.True(code.IsCode(0x1010));
+        Assert.False(code.IsCode(0x1005));
+
+        CodeMap.GapScan(image, code, new Dictionary<ulong, ulong[]>(), info);
+        for (ulong va = 0x1005; va <= 0x100A; va++)
+            Assert.False(code.IsCode(va)); // gap recovery must not resurrect any no-return fallthrough byte
+    }
+
+    [Fact]
+    public void AnalysisEnginePublishesNoReturnFunctionsAndClassifiesFallthroughAsData()
+    {
+        byte[] bytes =
+        [
+            0xE8, 0x0B, 0x00, 0x00, 0x00,             // 1000: call 1010
+            0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3,       // unreachable
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+            0xEB, 0xFE,                               // 1010: jmp 1010
+        ];
+        string path = Write("noreturn-engine.bin", bytes);
+        NamedSymbol[] symbols =
+        [
+            new(0x1000, "caller", NamedSymbolKind.Function),
+            new(0x1010, "halt_forever", NamedSymbolKind.Function),
+        ];
+        using var image = RawImage.Load(path, 0x1000, 64, 0x1000, symbols);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image);
+
+        Assert.True(result.FunctionByVa[0x1000].IsNoReturn);
+        Assert.True(result.FunctionByVa[0x1010].IsNoReturn);
+        Assert.Contains(0x1000UL, result.NoReturn.CallSites);
+        long fallthroughLine = result.Linear.IndexOf(0x1005);
+        Assert.Equal(0x1005UL, result.Linear.VaAt(fallthroughLine));
+        Assert.True(result.Linear.IsDataAt(fallthroughLine));
+    }
+
+    [Fact]
+    public void NoReturnAnalysisRetainsFallthroughWhenCalleeCanReturn()
+    {
+        byte[] bytes =
+        [
+            0xE8, 0x0B, 0x00, 0x00, 0x00,             // 1000: call 1010
+            0xC3,                                     // 1005: ret
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+            0xC3,                                     // 1010: ret
+        ];
+        string path = Write("returns-direct.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 64);
+
+        NoReturnInfo info = NoReturnAnalyzer.Analyze(image, [0x1000, 0x1010]);
+
+        Assert.Empty(info.Functions);
+        Assert.Empty(info.CallSites);
+        var caller = new Function { Va = 0x1000, Name = "caller" };
+        CfgBuilder.Build(image, caller, noReturn: info);
+        Assert.Equal([0x1000UL, 0x1005UL], Assert.Single(caller.Blocks).InstrVas);
+    }
+
+    [Fact]
+    public void KnownExitProcessImportTerminatesControlFlow()
+    {
+        byte[] bytes = Enumerable.Repeat((byte)0xCC, 0x28).ToArray();
+        new byte[] { 0xFF, 0x15, 0x1A, 0x00, 0x00, 0x00, 0xC3 }.CopyTo(bytes, 0);
+        string path = Write("noreturn-import.bin", bytes);
+        using var raw = RawImage.Load(path, 0x1000, 64);
+        using var image = new ImportedImage(raw, new ImportEntry("kernel32.dll", "ExitProcess", 0x1020));
+
+        NoReturnInfo info = NoReturnAnalyzer.Analyze(image, [0x1000]);
+
+        Assert.Contains(0x1000UL, info.Functions);
+        Assert.Contains(0x1000UL, info.CallSites);
+        var caller = new Function { Va = 0x1000, Name = "caller", IsNoReturn = true };
+        CfgBuilder.Build(image, caller, noReturn: info);
+        Assert.Equal([0x1000UL], Assert.Single(caller.Blocks).InstrVas);
+    }
+
+    [Theory]
+    [InlineData("ExitProcess")]
+    [InlineData("__imp_ExitProcess@4")]
+    [InlineData("libc!abort")]
+    [InlineData("exit@@GLIBC_2.2.5")]
+    [InlineData("std::terminate()")]
+    public void KnownNoReturnNamesTolerateCommonDecoration(string name)
+    {
+        Assert.True(KnownNoReturnNames.IsKnown(name));
+        Assert.True(ApiDatabase.Lookup("ExitProcess")!.NoReturn);
+        Assert.False(ApiDatabase.Lookup("TerminateProcess")!.NoReturn);
+    }
+
+    [Fact]
+    public void NoReturnInfoDoesNotExposeMutableSets()
+    {
+        var info = new NoReturnInfo([0x1000], [0x1010]);
+
+        Assert.False(info.Functions is HashSet<ulong>);
+        Assert.False(info.CallSites is HashSet<ulong>);
+        Assert.Throws<NotSupportedException>(() => ((ISet<ulong>)info.Functions).Add(0x2000));
+        Assert.Throws<NotSupportedException>(() => ((ISet<ulong>)info.CallSites).Clear());
+    }
+
+    [Fact]
+    public void ReturningSoftwareInterruptDoesNotMakeFunctionNoReturn()
+    {
+        string path = Write("returning-interrupt.bin", [0xCD, 0x80, 0xC3]); // int 80h; ret
+        using var image = RawImage.Load(path, 0x1000, 64);
+
+        NoReturnInfo info = NoReturnAnalyzer.Analyze(image, [0x1000]);
+
+        Assert.Empty(info.Functions);
+        Assert.Empty(info.CallSites);
+    }
+
+    [Fact]
+    public void GapScanIgnoresUnreachedNoReturnCallSiteDecodedInsideCodeBytes()
+    {
+        byte[] bytes =
+        [
+            0xC7, 0x80, 0x00, 0x00, 0x00, 0xE8, 0x00, 0x00, 0x00, 0x00,
+            0x48, 0x89, 0xC8, 0xC3, // 100A: mov rax,rcx; ret
+            0xCC,                   // confirmed boundary for gap-run recovery
+        ];
+        string path = Write("noreturn-speculative-call.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 64);
+        var code = new CodeBitmap(image);
+        code.Mark(0x1000, 10); // the E8 at 1005 is an operand byte, not a reached call instruction
+        var speculative = new NoReturnInfo([], [0x1005]);
+
+        CodeMap.GapScan(image, code, new Dictionary<ulong, ulong[]>(), speculative);
+
+        Assert.True(code.IsCode(0x100A));
+        Assert.True(code.IsCode(0x100D));
+    }
+
+    [Fact]
+    public void Arm64NoReturnCallSuppressesLinearFallthrough()
+    {
+        byte[] bytes =
+        [
+            0x04, 0x00, 0x00, 0x94, // 1000: bl 1010
+            0x40, 0x05, 0x80, 0x52, // unreachable mov w0,#42
+            0xC0, 0x03, 0x5F, 0xD6, // unreachable ret
+            0x1F, 0x20, 0x03, 0xD5, // unreachable nop
+            0x00, 0x00, 0x00, 0x14, // 1010: b 1010
+        ];
+        string path = Write("noreturn-arm64.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 64, 0x1000, Architecture.Arm64, null);
+
+        AnalysisResult result = ArmAnalyzer.Analyze(image);
+
+        Assert.True(result.FunctionByVa[0x1000].IsNoReturn);
+        Assert.True(result.FunctionByVa[0x1010].IsNoReturn);
+        long fallthroughLine = result.Linear.IndexOf(0x1004);
+        Assert.Equal(0x1004UL, result.Linear.VaAt(fallthroughLine));
+        Assert.True(result.Linear.IsDataAt(fallthroughLine));
+    }
+
+    [Fact]
+    public void I8051NoReturnCallSuppressesLinearFallthrough()
+    {
+        byte[] bytes =
+        [
+            0x12, 0x00, 0x08, // 1000: lcall 1008
+            0x74, 0x2A,       // unreachable mov A,#2Ah
+            0x22,             // unreachable ret
+            0x00, 0x00,
+            0x80, 0xFE,       // 1008: sjmp 1008
+        ];
+        string path = Write("noreturn-8051.bin", bytes);
+        using var image = RawImage.Load(path, 0x1000, 16, 0x1000, Architecture.I8051, null);
+
+        AnalysisResult result = I8051Analyzer.Analyze(image);
+
+        Assert.True(result.FunctionByVa[0x1000].IsNoReturn);
+        Assert.True(result.FunctionByVa[0x1008].IsNoReturn);
+        long fallthroughLine = result.Linear.IndexOf(0x1003);
+        Assert.Equal(0x1003UL, result.Linear.VaAt(fallthroughLine));
+        Assert.True(result.Linear.IsDataAt(fallthroughLine));
+    }
+
+    [Fact]
     public void I8051RelativeTargetIncludesImageBase()
     {
         string path = Write("jump.8051", [0x80, 0x02]); // sjmp +2 -> offset 4
@@ -245,4 +452,49 @@ public sealed class RegressionTests : IDisposable
 
     private static void Put32(byte[] bytes, int offset, uint value) =>
         BitConverter.GetBytes(value).CopyTo(bytes, offset);
+
+    private sealed class ImportedImage(RawImage inner, ImportEntry import) : IBinaryImage, IDisposable
+    {
+        private readonly IReadOnlyList<ImportEntry> _imports = [import];
+        private readonly IReadOnlyDictionary<ulong, ImportEntry> _byIat =
+            new Dictionary<ulong, ImportEntry> { [import.IatVa] = import };
+
+        public void Dispose() { } // the test owns and disposes the wrapped RawImage
+        public string FilePath => inner.FilePath;
+        public BinaryFormat Format => inner.Format;
+        public string FormatName => inner.FormatName;
+        public int Bitness => inner.Bitness;
+        public string ArchName => inner.ArchName;
+        public Architecture Arch => inner.Arch;
+        public ulong ImageBase => inner.ImageBase;
+        public ulong EntryVa => inner.EntryVa;
+        public bool IsDll => inner.IsDll;
+        public IReadOnlyList<Section> Sections => inner.Sections;
+        public IReadOnlyList<NamedSymbol> Symbols => inner.Symbols;
+        public IReadOnlyList<ImportEntry> Imports => _imports;
+        public Section? HeaderRegion => inner.HeaderRegion;
+        public ResourceTree? Resources => inner.Resources;
+        public IReadOnlyList<ulong> FunctionStarts => inner.FunctionStarts;
+        public IReadOnlyDictionary<ulong, ImportEntry> ImportsByIatVa => _byIat;
+        public ulong MinVa => inner.MinVa;
+        public ulong MaxVa => inner.MaxVa;
+        public int VaToOffset(ulong va) => inner.VaToOffset(va);
+        public bool IsMappedVa(ulong va) => inner.IsMappedVa(va);
+        public bool IsExecutableVa(ulong va) => inner.IsExecutableVa(va);
+        public Section? SectionAt(ulong va) => inner.SectionAt(va);
+        public byte ReadByteAtOffset(int offset) => inner.ReadByteAtOffset(offset);
+        public int BackingLength => inner.BackingLength;
+        public byte[] ReadBytesAtVa(ulong va, int count) => inner.ReadBytesAtVa(va, count);
+        public int ReadVa(ulong va, Span<byte> dest) => inner.ReadVa(va, dest);
+        public void Patch(int offset, ReadOnlySpan<byte> bytes) => inner.Patch(offset, bytes);
+        public bool PatchVa(ulong va, ReadOnlySpan<byte> bytes) => inner.PatchVa(va, bytes);
+        public void RevertPatch(int offset, int count) => inner.RevertPatch(offset, count);
+        public bool IsPatchedAt(int offset) => inner.IsPatchedAt(offset);
+        public bool IsDirty => inner.IsDirty;
+        public int PatchCount => inner.PatchCount;
+        public IReadOnlyDictionary<int, byte> Patches => inner.Patches;
+        public bool Undo() => inner.Undo();
+        public bool CanUndo => inner.CanUndo;
+        public void SavePatchedAs(string path) => inner.SavePatchedAs(path);
+    }
 }

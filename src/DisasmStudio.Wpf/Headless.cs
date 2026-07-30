@@ -105,7 +105,13 @@ public static class Headless
         var img = r.Image;
         int cap = opt.Limit > 0 ? opt.Limit : int.MaxValue;
         var funcs = r.Functions.OrderBy(f => f.Va).Take(cap)
-            .Select(f => new { va = Hex(f.Va), name = f.Name, section = img.SectionAt(f.Va)?.Name ?? "" }).ToList();
+            .Select(f => new
+            {
+                va = Hex(f.Va),
+                name = f.Name,
+                section = img.SectionAt(f.Va)?.Name ?? "",
+                noreturn = f.IsNoReturn,
+            }).ToList();
         var strings = r.Strings.Take(cap).Select(s => new { va = Hex(s.Va), text = s.Text, wide = s.Wide }).ToList();
         var imports = img.Imports.Take(cap).Select(i => new { va = Hex(i.IatVa), module = i.Module, name = i.Name }).ToList();
         var exports = img.Symbols.Where(s => s.Kind == NamedSymbolKind.Export).Take(cap)
@@ -135,7 +141,7 @@ public static class Headless
         w.WriteLine($"{Path.GetFileName(img.FilePath)}   {img.FormatName}   {img.ArchName}   base {Hex(img.ImageBase)}   entry {Hex(img.EntryVa)}");
         w.WriteLine($"functions {r.Functions.Count:N0}   strings {r.Strings.Count:N0}   imports {img.Imports.Count:N0}   exports {exports.Count:N0}");
         foreach (var warn in r.Warnings) w.WriteLine($"  ! {warn}");
-        if (opt.Has("functions")) { w.WriteLine("\n[functions]"); foreach (var f in funcs) w.WriteLine($"  {f.va}  {f.name}  ({f.section})"); }
+        if (opt.Has("functions")) { w.WriteLine("\n[functions]"); foreach (var f in funcs) w.WriteLine($"  {f.va}  {f.name}  ({f.section}){(f.noreturn ? "  [noreturn]" : "")}"); }
         if (opt.Has("strings")) { w.WriteLine("\n[strings]"); foreach (var s in strings) w.WriteLine($"  {s.va}  {(s.wide ? "L" : "")}\"{s.text}\""); }
         if (opt.Has("imports")) { w.WriteLine("\n[imports]"); foreach (var i in imports) w.WriteLine($"  {i.va}  {i.module}!{i.name}"); }
         if (opt.Has("exports")) { w.WriteLine("\n[exports]"); foreach (var e in exports) w.WriteLine($"  {e.va}  {e.name}"); }

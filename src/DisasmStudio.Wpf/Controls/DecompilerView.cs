@@ -243,12 +243,12 @@ public sealed class DecompilerView : Grid
         {
             if (LiveDecoder is null)
             {
-                CfgBuilder.Build(result.Image, function, result.JumpTables);
+                CfgBuilder.Build(result.Image, function, result.JumpTables, noReturn: result.NoReturn);
             }
             else
             {
                 using var cfgDis = NeutralDisasm.For(result.Image, result.Names, LiveDecoder);
-                CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis);
+                CfgBuilder.Build(result.Image, function, result.JumpTables, cfgDis, result.NoReturn);
             }
         }
 

@@ -6,15 +6,15 @@ namespace DisasmStudio.Core.Analysis;
 /// <summary>
 /// Builds a function's control-flow graph by recursive descent from its entry, then splits the
 /// reachable instructions into basic blocks at branch targets and after conditional branches.
-/// Calls do NOT split blocks (they return), matching the usual disassembler convention. Bounded by
-/// an instruction cap so a mis-identified function can't run away.
+/// Ordinary calls do not split blocks. Calls proven no-return terminate their block and have no
+/// fall-through path. Bounded by an instruction cap so a mis-identified function can't run away.
 /// </summary>
 public static class CfgBuilder
 {
     private const int MaxInstructions = 200_000;
 
     public static void Build(IBinaryImage image, Function fn, IReadOnlyDictionary<ulong, ulong[]>? jumpTables = null,
-        INeutralDisassembler? decoder = null)
+        INeutralDisassembler? decoder = null, NoReturnInfo? noReturn = null)
     {
         if (fn.BlocksBuilt) return;
 
@@ -84,17 +84,21 @@ public static class CfgBuilder
                 case FlowKind.Ret:
                 case FlowKind.Interrupt:
                     break; // path ends here
+                case FlowKind.Call:
+                case FlowKind.IndirectCall:
+                    if (noReturn?.IsNoReturnCall(va, instr.DirectTarget) != true) work.Push(fall);
+                    break;
                 default:
-                    work.Push(fall); // Seq / Call / IndirectCall — execution continues after
+                    work.Push(fall); // ordinary sequential flow
                     break;
             }
         }
 
-        fn.SetBlocks(SplitIntoBlocks(insns, leaders, jumpTables), entry);
+        fn.SetBlocks(SplitIntoBlocks(insns, leaders, jumpTables, noReturn), entry);
     }
 
     private static List<BasicBlock> SplitIntoBlocks(SortedDictionary<ulong, NeutralInsn> insns, HashSet<ulong> leaders,
-        IReadOnlyDictionary<ulong, ulong[]>? jumpTables)
+        IReadOnlyDictionary<ulong, ulong[]>? jumpTables, NoReturnInfo? noReturn)
     {
         var blocks = new List<BasicBlock>();
         BasicBlock? cur = null;
@@ -113,7 +117,7 @@ public static class CfgBuilder
             cur.InstrVas.Add(va);
             cur.End = va + (ulong)instr.Length;
 
-            if (instr.IsBlockTerminator)
+            if (instr.IsBlockTerminator || noReturn?.IsNoReturnCall(va, instr.DirectTarget) == true)
             {
                 AddTerminatorEdges(instr, va, insns, cur, jumpTables);
                 terminated = true;

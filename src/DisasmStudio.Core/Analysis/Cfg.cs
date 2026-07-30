@@ -26,6 +26,8 @@ public sealed class Function
 {
     public required ulong Va { get; init; }
     public required string Name { get; set; }
+    /// <summary>True when interprocedural analysis proved that no normal path returns to the caller.</summary>
+    public bool IsNoReturn { get; init; }
     private List<BasicBlock>? _blocks;
 
     /// <summary>The VA the CFG actually begins at. Equal to <see cref="Va"/> except when the entry was

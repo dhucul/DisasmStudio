@@ -15,6 +15,7 @@ public sealed class CodeBitmap
     private readonly ulong[] _start;
     private readonly ulong[] _end;
     private readonly ulong[][] _words;
+    private readonly HashSet<ulong> _noReturnFalls = [];
     private int _last;
 
     public CodeBitmap(IBinaryImage image)
@@ -60,6 +61,11 @@ public sealed class CodeBitmap
         return (_words[r][wi] & (1UL << (int)(i & 63))) != 0;
     }
 
+    /// <summary>Fallthrough addresses reached from decoded calls that were proven not to return.</summary>
+    internal IReadOnlySet<ulong> NoReturnFalls => _noReturnFalls;
+
+    internal void MarkNoReturnFall(ulong va) => _noReturnFalls.Add(va);
+
     /// <summary>Next code byte at/after <paramref name="va"/>, else <paramref name="limit"/>.</summary>
     public ulong NextCode(ulong va, ulong limit) => Scan(va, limit, set: true);
 
@@ -102,17 +108,27 @@ public static class CodeMap
     private const long Budget = 120_000_000;
 
     public static CodeBitmap Compute(IBinaryImage image, IEnumerable<ulong> seeds,
-        IReadOnlyDictionary<ulong, ulong[]> jumpTables, CancellationToken token = default)
+        IReadOnlyDictionary<ulong, ulong[]> jumpTables, CancellationToken token = default) =>
+        Compute(image, seeds, jumpTables, null, token);
+
+    public static CodeBitmap Compute(IBinaryImage image, IEnumerable<ulong> seeds,
+        IReadOnlyDictionary<ulong, ulong[]> jumpTables, NoReturnInfo? noReturn,
+        CancellationToken token = default)
     {
         var code = new CodeBitmap(image);
-        Descend(image, code, seeds, jumpTables, token);
+        Descend(image, code, seeds, jumpTables, noReturn, token);
         return code;
     }
 
     /// <summary>Scan the unmarked .text gaps for function prologues, descend from them, and return the
     /// new function starts found (so they can be listed and named).</summary>
     public static List<ulong> GapScan(IBinaryImage image, CodeBitmap code,
-        IReadOnlyDictionary<ulong, ulong[]> jumpTables, CancellationToken token = default)
+        IReadOnlyDictionary<ulong, ulong[]> jumpTables, CancellationToken token = default) =>
+        GapScan(image, code, jumpTables, null, token);
+
+    public static List<ulong> GapScan(IBinaryImage image, CodeBitmap code,
+        IReadOnlyDictionary<ulong, ulong[]> jumpTables, NoReturnInfo? noReturn,
+        CancellationToken token = default)
     {
         var dis = new Disassembler(image);
         var seeds = new List<ulong>();
@@ -121,16 +137,32 @@ public static class CodeMap
         {
             ulong end = sec.StartVa + (sec.VirtualSize > 0 ? Math.Min(sec.VirtualSize, (ulong)sec.FileSize) : (ulong)sec.FileSize);
             ulong va = sec.StartVa;
+            bool suppressLinearRecovery = false;
             while (va < end)
             {
                 if (token.IsCancellationRequested) break;
-                if (code.IsCode(va)) { va = code.NextGap(va, end); continue; }       // skip known code (word-scan)
+                if (code.IsCode(va))
+                {
+                    va = code.NextGap(va, end);
+                    suppressLinearRecovery = code.NoReturnFalls.Contains(va);
+                    continue;
+                }
+                if (code.NoReturnFalls.Contains(va)) suppressLinearRecovery = true;
 
                 byte b = ByteAt(image, va);
-                if (b is 0xCC or 0x00 or 0x90) { va++; continue; }                   // 1-byte padding / nop
+                if (b is 0xCC or 0x00 or 0x90)
+                {
+                    va++;
+                    continue;
+                }
 
                 // Multi-byte NOP alignment — mark it so it renders as `nop`, not a db row.
-                if (dis.TryDecodeAt(va, out var nop) && nop.Mnemonic == Mnemonic.Nop) { code.Mark(va, nop.Length); va += (ulong)nop.Length; continue; }
+                if (dis.TryDecodeAt(va, out var nop) && nop.Mnemonic == Mnemonic.Nop)
+                {
+                    code.Mark(va, nop.Length);
+                    va += (ulong)nop.Length;
+                    continue;
+                }
 
                 // Aligned pointer into mapped memory — a table entry; leave as data.
                 int ps = PointerSize(image, va);
@@ -150,9 +182,10 @@ public static class CodeMap
                 if (IsPrologue(image, va) || IsThunk(image, dis, va))
                 {
                     one[0] = va;
-                    Descend(image, code, one, jumpTables, token);
+                    Descend(image, code, one, jumpTables, noReturn, token);
                     seeds.Add(va);
                     va = Math.Max(code.NextGap(va, end), va + 1);   // always make progress
+                    suppressLinearRecovery = code.NoReturnFalls.Contains(va);
                     continue;
                 }
 
@@ -163,7 +196,8 @@ public static class CodeMap
                 // (the strong signal the rejected "decodes to a ret within N" heuristic lacked), and mark it as
                 // code WITHOUT seeding a function, so the listing disassembles it but the function list isn't
                 // flooded with phantom sub_*.
-                if (TryRecoverCodeRun(image, code, dis, va, end, out ulong runEnd) && runEnd > va)
+                if (!suppressLinearRecovery
+                    && TryRecoverCodeRun(image, code, dis, va, end, out ulong runEnd) && runEnd > va)
                 {
                     MarkRun(image, code, dis, va, runEnd);
                     va = Math.Max(runEnd, va + 1);
@@ -184,7 +218,7 @@ public static class CodeMap
     }
 
     private static void Descend(IBinaryImage image, CodeBitmap code, IEnumerable<ulong> seeds,
-        IReadOnlyDictionary<ulong, ulong[]> jumpTables, CancellationToken token)
+        IReadOnlyDictionary<ulong, ulong[]> jumpTables, NoReturnInfo? noReturn, CancellationToken token)
     {
         var dis = new Disassembler(image);
         var work = new Stack<ulong>();
@@ -219,7 +253,17 @@ public static class CodeMap
                     break;
                 case FlowControl.Call:
                     if (FlowAnalysis.IsDirectCall(ins)) work.Push(ins.NearBranchTarget);
-                    work.Push(fall);
+                    if (noReturn?.IsNoReturnCall(va,
+                            FlowAnalysis.IsDirectCall(ins) ? ins.NearBranchTarget : null) == true)
+                        code.MarkNoReturnFall(fall);
+                    else
+                        work.Push(fall);
+                    break;
+                case FlowControl.IndirectCall:
+                    if (noReturn?.IsNoReturnCall(va, null) == true)
+                        code.MarkNoReturnFall(fall);
+                    else
+                        work.Push(fall);
                     break;
                 default:
                     work.Push(fall);

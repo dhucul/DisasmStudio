@@ -34,7 +34,7 @@ public static class ArmAnalyzer
         var roots = new List<ulong>();
         if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) roots.Add(image.EntryVa);
         foreach (var s in image.Symbols) if (image.IsExecutableVa(s.Va)) roots.Add(s.Va);
-        Descend(image, dis, code, roots, callTargets, branchTargets, xrefs, token);
+        Descend(image, dis, code, roots, callTargets, branchTargets, xrefs, null, token);
 
         // 2. Gap prologue scan: functions no bl reaches (indirectly-called) are found by their prologue and
         //    descended from. Mirrors CodeMap.GapScan for x86.
@@ -42,7 +42,20 @@ public static class ArmAnalyzer
         var prologues = ScanPrologues(image, token);
         foreach (var p in prologues)
             if (image.IsExecutableVa(p) && !code.IsCode(p))
-                Descend(image, dis, code, [p], callTargets, branchTargets, xrefs, token);
+                Descend(image, dis, code, [p], callTargets, branchTargets, xrefs, null, token);
+
+        // Redo reachability with no-return facts so fallthrough after a terminating call is not marked code.
+        progress?.Report("Analyzing non-returning functions…");
+        var preliminaryStarts = roots.Concat(callTargets).Concat(prologues).Distinct().ToList();
+        var noReturn = NoReturnAnalyzer.Analyze(image, preliminaryStarts, token: token);
+        code = new CodeBitmap(image);
+        xrefs = new XrefDatabase();
+        callTargets = [];
+        branchTargets = [];
+        Descend(image, dis, code, roots, callTargets, branchTargets, xrefs, noReturn, token);
+        foreach (var p in prologues)
+            if (image.IsExecutableVa(p) && !code.IsCode(p))
+                Descend(image, dis, code, [p], callTargets, branchTargets, xrefs, noReturn, token);
 
         // 3. Strings: scan the whole blob (firmware keeps string tables inside the one "executable" section),
         //    then keep only those starting in a data region so code isn't mined for false strings.
@@ -80,7 +93,12 @@ public static class ArmAnalyzer
         var byVa = new Dictionary<ulong, Function>(funcStarts.Count);
         foreach (var va in funcStarts)
         {
-            var fn = new Function { Va = va, Name = names.TryGetValue(va, out var n) ? n : $"sub_{va:X}" };
+            var fn = new Function
+            {
+                Va = va,
+                Name = names.TryGetValue(va, out var n) ? n : $"sub_{va:X}",
+                IsNoReturn = noReturn.IsNoReturnFunction(va),
+            };
             functions.Add(fn);
             byVa[va] = fn;
         }
@@ -94,6 +112,7 @@ public static class ArmAnalyzer
             Functions = functions,
             FunctionByVa = byVa,
             Xrefs = xrefs,
+            NoReturn = noReturn,
             Strings = strings,
             JumpTables = new Dictionary<ulong, ulong[]>(),
             StringPointerSlots = new Dictionary<ulong, ulong>(),
@@ -105,7 +124,7 @@ public static class ArmAnalyzer
 
     private static void Descend(IBinaryImage image, INeutralDisassembler dis, CodeBitmap code,
         IEnumerable<ulong> seeds, HashSet<ulong> callTargets, HashSet<ulong> branchTargets,
-        XrefDatabase xrefs, CancellationToken token)
+        XrefDatabase xrefs, NoReturnInfo? noReturn, CancellationToken token)
     {
         var work = new Stack<ulong>();
         foreach (var s in seeds) if (image.IsExecutableVa(s)) work.Push(s);
@@ -135,14 +154,17 @@ public static class ArmAnalyzer
                 case FlowKind.Call:
                     if (ni.DirectTarget is ulong tk && image.IsExecutableVa(tk))
                     { callTargets.Add(tk); xrefs.Add(va, tk, XrefKind.Call); work.Push(tk); }
-                    work.Push(fall);
+                    if (noReturn?.IsNoReturnCall(va, ni.DirectTarget) != true) work.Push(fall);
                     break;
                 case FlowKind.Ret:
                 case FlowKind.IndirectJump:      // unresolved computed branch — path ends here
                 case FlowKind.Interrupt:
                     break;
+                case FlowKind.IndirectCall:
+                    if (noReturn?.IsNoReturnCall(va, null) != true) work.Push(fall);
+                    break;
                 default:
-                    work.Push(fall);             // Seq, IndirectCall — execution continues after
+                    work.Push(fall);             // ordinary sequential flow
                     break;
             }
         }

@@ -67,6 +67,18 @@ public static class I8051Analyzer
         foreach (var t in branchTargets) names.TryAdd(t, $"loc_{t:X}");
         foreach (var sec in image.Sections) if (sec.FileSize > 0) names.TryAdd(sec.StartVa, sec.Name);
 
+        progress?.Report("Analyzing non-returning functions…");
+        var noReturn = NoReturnAnalyzer.Analyze(image, funcStarts, token: token);
+
+        // Reclassify with the discovered no-return facts. The first sweep remains intentionally broad so it
+        // can discover functions in firmware reached only through indirect dispatch; this second sweep keeps
+        // those starts while suppressing ordinary linear fallthrough after a terminating call.
+        var restartPoints = new HashSet<ulong>(funcStarts);
+        restartPoints.UnionWith(branchTargets);
+        var finalCode = new CodeBitmap(image);
+        Sweep(image, dis, finalCode, stringSpans, [], [], new XrefDatabase(), token, noReturn, restartPoints);
+        code = finalCode;
+
         // 4. Classified linear index: a code line per marked instruction, gaps collapsed into data.
         progress?.Report("Classifying code vs data…");
         var linear = BuildIndex(image, dis, code, stringByVa, token);
@@ -76,7 +88,12 @@ public static class I8051Analyzer
         var byVa = new Dictionary<ulong, Function>(funcStarts.Count);
         foreach (var va in funcStarts)
         {
-            var fn = new Function { Va = va, Name = names.TryGetValue(va, out var n) ? n : $"sub_{va:X}" };
+            var fn = new Function
+            {
+                Va = va,
+                Name = names.TryGetValue(va, out var n) ? n : $"sub_{va:X}",
+                IsNoReturn = noReturn.IsNoReturnFunction(va),
+            };
             functions.Add(fn);
             byVa[va] = fn;
         }
@@ -90,6 +107,7 @@ public static class I8051Analyzer
             Functions = functions,
             FunctionByVa = byVa,
             Xrefs = xrefs,
+            NoReturn = noReturn,
             Strings = strings,
             JumpTables = new Dictionary<ulong, ulong[]>(),
             StringPointerSlots = new Dictionary<ulong, ulong>(),
@@ -105,7 +123,8 @@ public static class I8051Analyzer
     /// table isn't half-eaten by a preceding opcode).</summary>
     private static void Sweep(IBinaryImage image, INeutralDisassembler dis, CodeBitmap code,
         (ulong Va, ulong End)[] stringSpans, HashSet<ulong> callTargets, HashSet<ulong> branchTargets,
-        XrefDatabase xrefs, CancellationToken token)
+        XrefDatabase xrefs, CancellationToken token, NoReturnInfo? noReturn = null,
+        IReadOnlySet<ulong>? restartPoints = null)
     {
         foreach (var sec in image.Sections)
         {
@@ -113,29 +132,47 @@ public static class I8051Analyzer
             ulong end = sec.StartVa + (sec.VirtualSize > 0 ? Math.Min(sec.VirtualSize, (ulong)sec.FileSize) : (ulong)sec.FileSize);
             ulong va = sec.StartVa;
             long n = 0;
+            bool suppressLinearFallthrough = false;
             while (va < end && n < Budget)
             {
                 if ((n & 0xFFFFF) == 0 && token.IsCancellationRequested) break;
                 n++;
+                if (restartPoints?.Contains(va) == true) suppressLinearFallthrough = false;
 
                 ulong runEnd = PaddingRunEnd(image, va, end);      // > va when va starts a padding run
-                if (runEnd > va) { va = runEnd; continue; }         // padding -> data
+                if (runEnd > va)
+                {
+                    va = runEnd;
+                    suppressLinearFallthrough = false;              // confirmed padding starts a new run
+                    continue;
+                }
 
-                if (InSpan(stringSpans, va, out ulong spanEnd)) { va = Math.Min(spanEnd, end); continue; }  // string -> data
+                if (InSpan(stringSpans, va, out ulong spanEnd))
+                {
+                    va = Math.Min(spanEnd, end);
+                    suppressLinearFallthrough = false;              // a confirmed data span starts a new run
+                    continue;
+                }
 
                 if (!dis.TryDecode(va, out var ni) || ni.Length == 0) { va++; continue; }
                 ulong next = va + (ulong)ni.Length;
                 if (next > NextSpanStart(stringSpans, va, end)) { va++; continue; }   // would cross a string → treat as data
 
-                code.Mark(va, ni.Length);
-                if (ni.DirectTarget is ulong t && image.IsExecutableVa(t))
+                if (!suppressLinearFallthrough)
                 {
-                    switch (ni.Flow)
+                    code.Mark(va, ni.Length);
+                    if (ni.DirectTarget is ulong t && image.IsExecutableVa(t))
                     {
-                        case FlowKind.Call: callTargets.Add(t); xrefs.Add(va, t, XrefKind.Call); break;
-                        case FlowKind.Jump: branchTargets.Add(t); xrefs.Add(va, t, XrefKind.Jump); break;
-                        case FlowKind.CondJump: branchTargets.Add(t); xrefs.Add(va, t, XrefKind.CondJump); break;
+                        switch (ni.Flow)
+                        {
+                            case FlowKind.Call: callTargets.Add(t); xrefs.Add(va, t, XrefKind.Call); break;
+                            case FlowKind.Jump: branchTargets.Add(t); xrefs.Add(va, t, XrefKind.Jump); break;
+                            case FlowKind.CondJump: branchTargets.Add(t); xrefs.Add(va, t, XrefKind.CondJump); break;
+                        }
                     }
+                    if (ni.Flow is FlowKind.Call or FlowKind.IndirectCall
+                        && noReturn?.IsNoReturnCall(va, ni.DirectTarget) == true)
+                        suppressLinearFallthrough = true;
                 }
                 va = next;
             }

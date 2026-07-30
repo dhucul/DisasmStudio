@@ -107,6 +107,10 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   `RegOpenKeyExW(hKey, lpSubKey=L"Software\\…", samDesired=KEY_READ)`,
   `VirtualAlloc(…, flAllocationType=MEM_COMMIT, flProtect=PAGE_EXECUTE_READWRITE)`. Shown inline in
   both linear and graph views.
+- **No-return analysis:** a conservative interprocedural fixpoint recognises known termination APIs
+  and runtime routines, traps, infinite loops, tail calls, and wrappers around functions that cannot
+  return. Proven no-return calls terminate CFG blocks, so unreachable fallthrough is excluded from
+  graphs, decompilation, and code discovery.
 - **Side panels:** Functions, Strings, Imports, Exports, Sections (with per-section "load into listing"
   toggles), Resources (the `.rsrc` tree + preview), and live Cross-references.
 - **C++ demangling:** mangled symbol names are demangled to readable signatures throughout (Functions
@@ -259,8 +263,9 @@ src/
 ```
 
 The analysis runs on a background thread: scan strings → one linear sweep building the instruction
-index + cross-references + call/branch targets → name resolution + function list. Per-function CFGs
-are built lazily when a function is opened in the graph, keeping huge files fast.
+index + cross-references + call/branch targets → no-return propagation → name resolution + function
+list. Per-function CFGs are built lazily when a function is opened in the graph, keeping huge files
+fast.
 
 ## APIs & libraries
 

@@ -129,11 +129,11 @@ public static class Decompiler
     {
         if (decoder is null)
         {
-            CfgBuilder.Build(result.Image, fn, result.JumpTables);
+            CfgBuilder.Build(result.Image, fn, result.JumpTables, noReturn: result.NoReturn);
             return;
         }
 
         using var dis = NeutralDisasm.For(result.Image, result.Names, decoder);
-        CfgBuilder.Build(result.Image, fn, result.JumpTables, dis);
+        CfgBuilder.Build(result.Image, fn, result.JumpTables, dis, result.NoReturn);
     }
 }

@@ -23,7 +23,12 @@ public static class LiveAnalysis
         var comments = new Dictionary<ulong, string>();
         foreach (var kv in staticResult.Comments) comments[kv.Key + slide] = kv.Value;
 
-        var funcs = staticResult.Functions.Select(f => new Function { Va = f.Va + slide, Name = f.Name }).ToList();
+        var funcs = staticResult.Functions.Select(f => new Function
+        {
+            Va = f.Va + slide,
+            Name = f.Name,
+            IsNoReturn = f.IsNoReturn,
+        }).ToList();
         var byVa = new Dictionary<ulong, Function>();
         foreach (var f in funcs) byVa[f.Va] = f;
 
@@ -44,6 +49,7 @@ public static class LiveAnalysis
             Functions = funcs,
             FunctionByVa = byVa,
             Xrefs = staticResult.Xrefs.Rebased(slide),
+            NoReturn = staticResult.NoReturn.Rebased(slide),
             Strings = strings,
             JumpTables = jt,
             StringPointerSlots = sps,

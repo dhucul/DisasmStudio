@@ -1439,7 +1439,7 @@ public partial class MainWindow : Window
             try
             {
                 using var cfgDis = NeutralDisasm.For(_result.Image, _result.Names, _dbg.LiveDecoder);
-                CfgBuilder.Build(_result.Image, fn, null, cfgDis);
+                CfgBuilder.Build(_result.Image, fn, null, cfgDis, _result.NoReturn);
             }
             catch { /* fall through to Step Out */ }
             // FindFunction returns the nearest preceding function start; only trust it if the IP is actually

@@ -164,16 +164,22 @@ public static class AnalysisEngine
         foreach (var d in dataTargets) if (image.IsExecutableVa(d) && ptrSeen.Add(d)) ptrTargets.Add(d);
         // Code pointers living in data (vtables, callback/jump tables) — reach methods no instruction names.
         foreach (var d in PointerScanner.CollectCodePointers(image, token: token)) if (ptrSeen.Add(d)) ptrTargets.Add(d);
-        var code = CodeMap.Compute(image, CodeSeeds(image, ptrTargets), jumpTables, token);
+        progress?.Report("Analyzing non-returning functions…");
+        var noReturnSeeds = CodeSeeds(image, ptrTargets).Concat(callTargets).Distinct().ToList();
+        var noReturn = NoReturnAnalyzer.Analyze(image, noReturnSeeds, jumpTables, token);
+        var code = CodeMap.Compute(image, CodeSeeds(image, ptrTargets), jumpTables, noReturn, token);
 
         // Gap scan: find function prologues in the unmarked .text gaps (chiefly indirectly-called
         // functions — on a CET build these begin with endbr64) and descend from them. Name + list them.
         progress?.Report("Scanning gaps for functions…");
-        foreach (var f in CodeMap.GapScan(image, code, jumpTables, token))
+        var gapFunctions = CodeMap.GapScan(image, code, jumpTables, noReturn, token);
+        foreach (var f in gapFunctions)
         {
             names.TryAdd(f, $"sub_{f:X}");
             ptrTargets.Add(f);
         }
+        if (gapFunctions.Count > 0)
+            noReturn = NoReturnAnalyzer.Analyze(image, noReturnSeeds.Concat(gapFunctions), jumpTables, token);
 
         // Classified linear index: real instructions, with padding / jump tables / literals collapsed
         // into data lines instead of disassembled junk.
@@ -233,7 +239,7 @@ public static class AnalysisEngine
         progress?.Report("Identifying functions…");
         var jumpTargets = new HashSet<ulong>();
         foreach (var ts in jumpTables.Values) foreach (var t in ts) jumpTargets.Add(t);
-        var (functions, byVa) = BuildFunctions(image, names, callTargets, ptrTargets, code, jumpTargets);
+        var (functions, byVa) = BuildFunctions(image, names, callTargets, ptrTargets, code, jumpTargets, noReturn);
 
         // Library-function identification (FLIRT/FID-lite): name still-unnamed functions whose prologue matches
         // a known signature. No-op unless the user has generated/imported signatures into signatures/*.sig.
@@ -254,6 +260,7 @@ public static class AnalysisEngine
             Functions = functions,
             FunctionByVa = byVa,
             Xrefs = xrefs,
+            NoReturn = noReturn,
             Strings = strings,
             JumpTables = jumpTables,
             StringPointerSlots = stringPointerSlots,
@@ -287,7 +294,7 @@ public static class AnalysisEngine
 
     private static (List<Function>, Dictionary<ulong, Function>) BuildFunctions(IBinaryImage image,
         IReadOnlyDictionary<ulong, string> names, HashSet<ulong> callTargets,
-        List<ulong> ptrTargets, CodeBitmap code, HashSet<ulong> jumpTargets)
+        List<ulong> ptrTargets, CodeBitmap code, HashSet<ulong> jumpTargets, NoReturnInfo noReturn)
     {
         var seeds = new SortedSet<ulong>();
         if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) seeds.Add(image.EntryVa);
@@ -305,7 +312,12 @@ public static class AnalysisEngine
         var byVa = new Dictionary<ulong, Function>(seeds.Count);
         foreach (var va in seeds)
         {
-            var fn = new Function { Va = va, Name = names.TryGetValue(va, out var n) ? n : $"sub_{va:X}" };
+            var fn = new Function
+            {
+                Va = va,
+                Name = names.TryGetValue(va, out var n) ? n : $"sub_{va:X}",
+                IsNoReturn = noReturn.IsNoReturnFunction(va),
+            };
             functions.Add(fn);
             byVa[va] = fn;
         }
