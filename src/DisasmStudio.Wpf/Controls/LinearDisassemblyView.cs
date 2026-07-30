@@ -514,7 +514,7 @@ public sealed class LinearDisassemblyView : Grid
         SelectionChanged?.Invoke(_result.Linear.VaAt(instrLine));
     }
 
-    /// <summary>True if <paramref name="p"/> falls in the left gutter margin on a code line — the breakpoint
+    /// <summary>True if <paramref name="p"/> falls in the left gutter margin on a decoded instruction line — the breakpoint
     /// strip, where a click toggles a breakpoint (Visual Studio–style). Outputs that instruction line. Section
     /// headers (collapse markers), label rows and data lines are not breakpoint rows, so folding/selection on
     /// them is unaffected.</summary>
@@ -525,7 +525,7 @@ public sealed class LinearDisassemblyView : Grid
         long display = ToDisplay(Math.Clamp(_topDisplay + (long)(p.Y / _rowHeight), 0, Math.Max(0, VisibleCount - 1)));
         var (isLabel, line) = ContentAt(display);
         if (isLabel || RegionStartAt(line) >= 0 || line < 0 || line >= _result.Linear.Count
-            || !_result.Linear.IsReachableCodeAt(line)) return false;
+            || _result.Linear.IsDataAt(line)) return false;
         instrLine = line;
         return true;
     }
