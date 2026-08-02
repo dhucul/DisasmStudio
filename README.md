@@ -1,10 +1,12 @@
 # DisasmStudio
 
-A Binary Ninja–style disassembler for Windows — soft, dark, high-DPI WPF. Loads PE / ELF / Mach-O /
-raw binaries, disassembles x86/x64 (via [Iced](https://github.com/icedland/iced)) and ARM / Thumb /
-AArch64 (via [Capstone](https://www.capstone-engine.org/)), and presents a linear listing, a
-per-function control-flow graph, and a hex view, with the usual reverse-engineering side panels and
-fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large files.
+A Binary Ninja–style disassembler and user-mode debugger for Windows — soft, dark, high-DPI WPF.
+Loads PE / ELF / Mach-O / raw binaries, disassembles x86/x64 (via
+[Iced](https://github.com/icedland/iced)), ARM / Thumb / AArch64 (via
+[Capstone](https://www.capstone-engine.org/)), and Intel 8051 firmware, and decompiles managed .NET
+assemblies to C#. It presents linear, control-flow graph, call-graph, decompiler, and hex views with
+the usual reverse-engineering side panels and fluid navigation. Built to stay crisp on 4K/5K monitors
+and responsive on large files.
 
 ## Features
 
@@ -35,6 +37,11 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   *Limitations:* one instruction set per image (no automatic ARM↔Thumb switching on `BX`/`BLX` yet);
   the **IL/pseudo-C decompiler, debugger, devirtualizer and C/ASM export are x86/x64-only** and are
   disabled for ARM images; ARM table branches (`tbb`/`tbh`/`ldr pc,[…]`) are shown but not resolved.
+- **Intel 8051 / MCS-51:** raw microcontroller firmware can be opened as 8051 code and analyzed with a
+  built-in decoder and architecture-specific recursive descent. Direct calls/jumps, functions, labels,
+  cross-references, strings, and SFR/register operands feed the same listing, call graph, search, and
+  headless-analysis paths. CFG recovery, the x86-only decompiler, patch assembler, debugger, and
+  devirtualizer remain unavailable for 8051 images.
 - **Linear view:** a custom, virtualized listing that decodes and formats only the rows on screen,
   so it scrolls smoothly over multi-million-instruction images. Soft syntax colouring, named branch
   targets (`sub_`/`loc_`/imports/exports), inline string comments, and a branch-arrow gutter.
@@ -61,6 +68,9 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   fit-to-view. The graph and linear listing stay **two-way synced on the highlighted instruction** —
   selecting a line in either view highlights and scrolls to the same instruction in the other, in both
   static browsing and during a debug run (the same way both views follow the IP on a breakpoint).
+- **Call graph:** a lazy whole-program callers/callees tree built from static call cross-references.
+  Re-root it at the current function, follow navigation automatically, or switch it to live edges
+  collected by function capture.
 - **Decompiler (multi-level IL + Pseudo-C):** a per-function decompiler in the Binary Ninja mold,
   shown in a *Decompiler* tab with a Low IL / Medium IL / High IL / Pseudo-C selector. **Low IL**
   lifts each instruction to register/memory/flag semantics (flags handled as deferred conditions so a
@@ -111,14 +121,21 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   and runtime routines, traps, infinite loops, tail calls, and wrappers around functions that cannot
   return. Proven no-return calls terminate CFG blocks, so unreachable fallthrough is excluded from
   graphs, decompilation, and code discovery.
+- **Library signatures (FLIRT/FID-lite):** generate relocation-masked prologue signatures from named
+  functions. Signature files placed in the `signatures` folder beside the app automatically identify
+  matching library functions in later analyses.
+- **IL emulation:** emulate one function over the shared Low IL with unknown inputs to resolve constant
+  register values, fold always/never-taken predicates, and surface contiguous memory writes such as
+  decrypted strings or data. Available from the UI and the headless `emulate` command.
 - **Side panels:** Functions, Strings, Imports, Exports, Sections (with per-section "load into listing"
   toggles), Resources (the `.rsrc` tree + preview), and live Cross-references.
 - **C++ demangling:** mangled symbol names are demangled to readable signatures throughout (Functions
   list, Exports/Imports, labels) — MSVC names (`?…`) via the OS `UnDecorateSymbolName`, and Itanium
   names (`_Z…`, GCC/Clang/MinGW/ELF) via a built-in demangler. Anything unrecognised is left as-is.
-- **Projects:** save the session as a `.dsproj` (binary reference, load options, and current view
-  state) via *Save Project…* and reopen it with *Open Project…* — it re-analyses on open (fast, always
-  consistent with the engine). The format is versioned to carry future user edits (renames, comments).
+- **Markup and projects:** rename symbols, add comments, define functions, and bookmark addresses from
+  the listing, graph, decompiler, or hex view. Save the session as a `.dsproj` (binary reference and
+  hash, load options, patches, markup, breakpoints, and view/debug state) and reopen it with *Open
+  Project…*; it re-analyzes the binary and reapplies the saved overlay.
 - **Export:** *Save ASM…* / *Save C…* on the toolbar write the whole-program disassembly listing
   (`.asm`) or the decompiled C of every function (`.c`); both stream to disk on a background thread
   with a progress bar. Right-click a function in the linear view (*Save function as ASM…*) or the
@@ -149,6 +166,17 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   x64dbg-style **dereferencing** — `r9 → start`, `rcx → "C:\\…"`), the **stack** and a **memory dump**
   (both dereferenced), the **call stack**, and breakpoints, threads and modules. 32-bit targets are
   debugged from the 64-bit host via WOW64.
+- **Managed .NET analysis and debugging:** opening a managed PE shows a namespace/type/member tree,
+  decompiled **C#** and IL, assembly metadata, and extractable embedded resources/assemblies (powered by
+  ILSpy's decompiler). Run source-level .NET 5+/Core and .NET Framework executables through a
+  bitness-matched out-of-process ICorDebug host; set C# line breakpoints, continue/step/restart/detach,
+  inspect managed call stacks and locals, and navigate stops back to the decompiled statement. Targets
+  requiring administrator rights are handed off to an elevated DisasmStudio instance while preserving
+  the project, breakpoints, relevant launch configuration, and working directory.
+- **Function capture (FunCap):** while native debugging, capture one function or all discovered
+  functions and log arguments plus optional return values. Capture each function once for broad,
+  low-overhead coverage or every call for detail; dereferenced values annotate the listing and observed
+  caller/callee edges can replace the static call graph.
 - **Execution trace / coverage (◴ Trace):** highlights the code that actually runs. Toggle it on while
   stopped and it plants one-shot breakpoints at every basic-block start of the loaded image; as the
   program runs — and as you step (Into/Over/Out) — executed instructions are tinted green in the linear
@@ -247,6 +275,10 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
   Works for x86 and x64 targets.
 - **Navigation:** double-click to follow a call/branch, Back/Forward history, Ctrl+G go-to-address,
   and an address box. Open a file from the command line (`DisasmStudio <path>`) or via *Open…*.
+- **Headless CLI:** use the same loader and analysis engine without WPF through `analyze`, `disasm`,
+  `decompile`, `callgraph`, `siggen`, and `emulate` verbs. Commands support raw-image architecture/base/
+  entry options, per-function output, JSON where appropriate, and atomic `--out` file writes; run
+  `DisasmStudio help` for the complete option list.
 - **Help:** a *Help ▾* toolbar menu with a grouped keyboard-shortcut reference (also opened with **F1**) —
   covering the debugger, navigation, and the linear / hex / graph / decompiler views — and an *About* box
   (name, version, feature overview, runtime).
@@ -259,25 +291,41 @@ fluid navigation. Built to stay crisp on 4K/5K monitors and responsive on large 
 src/
   DisasmStudio.Core/     engine (no WPF): Formats/, Disasm/, Analysis/, IL/, Export/
   DisasmStudio.Debug/    live debugger: Win32 debug-loop interop, breakpoints, live image/disasm, dereference
+  DisasmStudio.Managed/  .NET metadata, C#/IL decompilation, managed resources
+  DisasmStudio.ManagedDebug/ shared app ↔ managed-debug-host IPC contracts
+  DisasmStudio.ManagedDbgHost/ bitness-matched out-of-process ICorDebug host
   DisasmStudio.Wpf/      UI: custom controls, Catppuccin Frappé theme, view-models
+tests/
+  DisasmStudio.Core.Tests/ xUnit regression and integration tests
+installer/               self-contained win-x64 publish + Inno Setup packaging
 ```
 
-The analysis runs on a background thread: scan strings → one linear sweep building the instruction
-index + cross-references + call/branch targets → no-return propagation → name resolution + function
-list. Per-function CFGs are built lazily when a function is opened in the graph, keeping huge files
-fast.
+Analysis runs on a background thread: format/architecture-specific code discovery builds the instruction
+index, cross-references, and call/branch targets; no-return propagation, name/signature resolution, and
+function recovery follow. Per-function CFGs, the whole-program call graph, and decompiler output are
+built lazily when requested, keeping huge files fast.
 
 ## APIs & libraries
 
-A small, deliberate set of dependencies: one disassembler library, the OS debugging and symbol APIs, and
-the .NET base class library.
+A small, deliberate set of dependencies: architecture decoders, the managed decompiler/debugging bridge,
+the OS debugging and symbol APIs, and the .NET base class library.
 
 **Iced (`Iced.Intel`, NuGet 1.21.0)** — the x86/x64 decoder *and* encoder. Everything that touches machine
 code goes through it: `Decoder` for disassembly, the formatter for operand text, `FlowControl`/operand
 metadata for the analysis (calls, branches, jump-table shapes), and the `Encoder`/`BlockEncoder` for the
 *Patch…* assembler.
 
-**Win32 debugging API (`kernel32.dll`, P/Invoke in `DisasmStudio.Debug/Native.cs`)** — the entire live
+**Capstone (`Gee.External.Capstone`, NuGet 2.3.0)** — decodes ARM, Thumb/Thumb-2, and AArch64 through the
+neutral disassembly seam. The Intel 8051 decoder is built into `DisasmStudio.Core`.
+
+**ILSpy decompiler (`ICSharpCode.Decompiler`, NuGet 10.1.0.8386)** — reads managed metadata/resources and
+produces the C# and IL views without loading the target assembly into DisasmStudio's process.
+
+**ClrDebug + Microsoft DbgShim** — drive ICorDebug in the separate `DisasmStudio.ManagedDbgHost` process.
+The installer ships self-contained x86 and x64 hosts so the debugger host always matches the target's
+bitness and does not require a separately installed .NET runtime.
+
+**Win32 debugging API (`kernel32.dll`, P/Invoke in `DisasmStudio.Debug/Native.cs`)** — the native live
 debugger. Called only on Windows; 32-bit (WOW64) targets use the `Wow64*` context entry points.
 
 | Function | Used for |
@@ -324,13 +372,28 @@ dotnet run --project src/DisasmStudio.Wpf -- C:\Windows\System32\notepad.exe
 
 Requires the .NET 10 SDK (Windows). x64.
 
+Run the tests with:
+
+```
+dotnet test tests/DisasmStudio.Core.Tests/DisasmStudio.Core.Tests.csproj -c Debug
+```
+
+Build the self-contained installer (including both managed-debug host architectures) with:
+
+```
+powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
+```
+
+This also requires Inno Setup 6 (`ISCC.exe`).
+
 ## Scope
 
-v1 targets x86/x64 static analysis, a best-effort decompiler (multi-level IL + Pseudo-C), and a live
-user-mode debugger (Windows PE; x86/x64). Out of scope (for now): signatures/FLIRT, kernel/remote
-debugging, time-travel, scripting/plugins, other architectures, .NET managed debugging, and PDB symbol
-servers — the call stack uses a best-effort frame/return-address heuristic (no full `.pdata` unwind
-yet), and symbols come from the app's own analysis + demangler rather than a symbol server.
+The native live debugger and patch assembler target Windows PE x86/x64; ARM/AArch64 and 8051 support is
+currently static analysis only. Managed debugging is source-level and limited to runnable .NET 5+/Core
+and .NET Framework executables. Out of scope (for now): kernel/remote debugging, time-travel,
+scripting/plugins, mixed-mode debugging, automatic ARM↔Thumb switching, and PDB symbol servers. Native
+call stacks use a best-effort frame/return-address heuristic (no full `.pdata` unwind yet), and native
+symbols come from the app's analysis, signature matching, and demanglers rather than a symbol server.
 
 ### Devirtualization (experimental foundation)
 
