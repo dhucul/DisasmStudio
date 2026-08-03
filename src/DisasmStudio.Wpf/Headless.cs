@@ -33,7 +33,9 @@ public static class Headless
         string verb = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
         if (verb is "help" or "--help" or "-h") { Usage(Console.Out); return 0; }
 
-        var opt = Opts.Parse(args[1..]);
+        Opts opt;
+        try { opt = Opts.Parse(args[1..]); }
+        catch (ArgumentException ex) { Console.Error.WriteLine("error: " + ex.Message); return 1; }
         if (opt.Input is null) { Console.Error.WriteLine("error: no input file given."); Usage(Console.Error); return 1; }
         if (!File.Exists(opt.Input)) { Console.Error.WriteLine($"error: file not found: {opt.Input}"); return 2; }
 
@@ -357,17 +359,19 @@ public static class Headless
                 string a = args[i];
                 if (!a.StartsWith('-')) { o.Input ??= a; continue; }
                 string key = a.TrimStart('-').ToLowerInvariant();
-                string? Next() => i + 1 < args.Length && !args[i + 1].StartsWith('-') ? args[++i] : null;
+                string Next() => i + 1 < args.Length && !args[i + 1].StartsWith('-')
+                    ? args[++i]
+                    : throw new ArgumentException($"--{key} requires a value.");
                 switch (key)
                 {
                     case "out": o.Out = Next(); break;
                     case "sections": o.Sections = Next(); break;
                     case "arch": o.Arch = Next(); break;
-                    case "base": o.Base = ParseHex(Next()); break;
-                    case "entry": o.Entry = ParseHex(Next()); break;
-                    case "func" or "function": o.Func = ParseHex(Next()); break;
-                    case "limit": o.Limit = int.TryParse(Next(), out var l) ? l : 0; break;
-                    case "depth": o.Depth = int.TryParse(Next(), out var d) ? d : 0; break;
+                    case "base": o.Base = ParseHex(Next(), key); break;
+                    case "entry": o.Entry = ParseHex(Next(), key); break;
+                    case "func" or "function": o.Func = ParseHex(Next(), key); break;
+                    case "limit": o.Limit = int.TryParse(Next(), out var l) && l >= 0 ? l : throw new ArgumentException("--limit requires a non-negative integer."); break;
+                    case "depth": o.Depth = int.TryParse(Next(), out var d) && d >= 0 ? d : throw new ArgumentException("--depth requires a non-negative integer."); break;
                     case "json": o.Json = true; o._flags.Add("json"); break;
                     case "verbose": o.Verbose = true; break;
                     default: o._flags.Add(key); break;
@@ -376,12 +380,14 @@ public static class Headless
             return o;
         }
 
-        private static ulong? ParseHex(string? s)
+        private static ulong ParseHex(string s, string option)
         {
-            if (string.IsNullOrWhiteSpace(s)) return null;
             s = s.Trim();
             if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
-            return ulong.TryParse(s, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
+            return ulong.TryParse(s, System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out var v)
+                ? v
+                : throw new ArgumentException($"--{option} requires a hexadecimal value.");
         }
     }
 

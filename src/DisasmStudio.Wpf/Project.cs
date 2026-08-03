@@ -56,9 +56,21 @@ public sealed record ProjectFile
 
     public void Save(string path) => AtomicFile.WriteAllText(path, ToJson());
 
-    public static ProjectFile FromJson(string json) =>
-        JsonSerializer.Deserialize<ProjectFile>(json, Opts)
-        ?? throw new InvalidDataException("Not a valid DisasmStudio project file.");
+    public static ProjectFile FromJson(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object
+            || !doc.RootElement.TryGetProperty(nameof(Version), out var version)
+            || version.ValueKind != JsonValueKind.Number
+            || !version.TryGetInt32(out int v)
+            || v is < 1 or > 10)
+            throw new InvalidDataException("Not a valid versioned DisasmStudio project file.");
+        var project = JsonSerializer.Deserialize<ProjectFile>(json, Opts)
+            ?? throw new InvalidDataException("Not a valid DisasmStudio project file.");
+        if (string.IsNullOrWhiteSpace(project.BinaryPath) || string.IsNullOrWhiteSpace(project.Format))
+            throw new InvalidDataException("The project is missing its binary path or format.");
+        return project;
+    }
 
     public static ProjectFile Load(string path) => FromJson(File.ReadAllText(path));
 

@@ -38,6 +38,21 @@ public sealed class RegressionTests : IDisposable
     }
 
     [Fact]
+    public void LzmaRejectsOversizedDeclaredOutputBeforeAllocation()
+    {
+        byte[] properties = [0x5D, 0x00, 0x10, 0x00, 0x00];
+        Assert.Throws<InvalidDataException>(() =>
+            LzmaCodec.Decode(properties, [0, 0, 0, 0, 0], 512L * 1024 * 1024 + 1));
+    }
+
+    [Fact]
+    public void DemanglerBoundsRecursiveTypePrefixes()
+    {
+        string hostile = "_Z1f" + new string('P', 100_000) + "i";
+        Assert.Equal(hostile, Demangler.Demangle(hostile));
+    }
+
+    [Fact]
     public void UpxLzmaDecodesCompactTwoByteProperties()
     {
         // Official UPX method-14 decoder test vector: compact properties 1A 03 followed by a raw range stream.

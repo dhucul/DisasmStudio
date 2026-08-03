@@ -91,17 +91,21 @@ public static class PackerDetector
         }
 
         // 1) Known section-name signature.
+        (string Name, PackerKind Kind, string Section)? signatureMatch = null;
         foreach (var s in img.Sections)
             foreach (var (sig, kind, name) in Signatures)
                 if (s.Name.Equals(sig, StringComparison.OrdinalIgnoreCase) ||
                     s.Name.StartsWith(sig, StringComparison.OrdinalIgnoreCase))
-                {
-                    string note = kind == PackerKind.Virtualizer
-                        ? $"{name} virtualization detected (section '{s.Name}'). Code is virtualized to bytecode; " +
-                          "generic unpacking cannot recover the original — a raw dump is offered for experts only."
-                        : $"{name} detected from section '{s.Name}'.";
-                    return new PackerVerdict(name, kind, entropy, note);
-                }
+                    if (signatureMatch is null || kind > signatureMatch.Value.Kind)
+                        signatureMatch = (name, kind, s.Name);
+        if (signatureMatch is { } match)
+        {
+            string note = match.Kind == PackerKind.Virtualizer
+                ? $"{match.Name} virtualization detected (section '{match.Section}'). Code is virtualized to bytecode; " +
+                  "generic unpacking cannot recover the original — a raw dump is offered for experts only."
+                : $"{match.Name} detected from section '{match.Section}'.";
+            return new PackerVerdict(match.Name, match.Kind, entropy, note);
+        }
 
         // 2) Structural heuristics — including a fingerprint for virtualizing protectors (VMProtect /
         //    Themida-class) whose tell-tale .vmpN / .themida section names have been renamed or stripped,

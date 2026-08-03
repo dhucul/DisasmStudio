@@ -579,7 +579,11 @@ public sealed partial class DebuggerEngine
             if (rearm)
             {
                 suspended = SuspendPeerThreads(tid) ?? [];
-                if (suspended.Length != _threads.Count - 1) return false;
+                if (suspended.Length != _threads.Count - 1)
+                {
+                    ResumeThreads(suspended);
+                    return false;
+                }
             }
             if (!WriteCode(addr, [site.Original]))
             {
@@ -665,7 +669,7 @@ public sealed partial class DebuggerEngine
     private void ScrubSnapshotParent(ulong pe32Ptr)
     {
         if (pe32Ptr == 0 || _spoofParentPid == 0) return;
-        const int parentOffX86 = 24, parentOffX64 = 24;   // same offset — the pid field is DWORD in both
+        const int parentOffX86 = 24, parentOffX64 = 32;
         int off = Is32 ? parentOffX86 : parentOffX64;
         WriteU32(pe32Ptr + (ulong)off, _spoofParentPid);
     }

@@ -98,7 +98,7 @@ public sealed class MediumLifter
             case BranchStmt b:
                 return new BranchStmt { Va = b.Va, Cond = MapExpr(b.Cond, slots), IfTrue = b.IfTrue, IfFalse = b.IfFalse };
             case SwitchTermStmt sw:
-                return new SwitchTermStmt { Va = sw.Va, Value = MapExpr(sw.Value, slots), Cases = sw.Cases };
+                return new SwitchTermStmt { Va = sw.Va, Value = MapExpr(sw.Value, slots), Cases = sw.Cases, Selectors = sw.Selectors };
             case ReturnStmt r:
                 return new ReturnStmt { Va = r.Va, Value = r.Value is null ? null : MapExpr(r.Value, slots) };
             case CallStmt cs:
@@ -198,7 +198,7 @@ public sealed class MediumLifter
                     outp.Add(new BranchStmt { Va = b.Va, Cond = Subst(b.Cond, env), IfTrue = b.IfTrue, IfFalse = b.IfFalse });
                     break;
                 case SwitchTermStmt sw:
-                    outp.Add(new SwitchTermStmt { Va = sw.Va, Value = Subst(sw.Value, env), Cases = sw.Cases });
+                    outp.Add(new SwitchTermStmt { Va = sw.Va, Value = Subst(sw.Value, env), Cases = sw.Cases, Selectors = sw.Selectors });
                     break;
                 case ReturnStmt r:
                     outp.Add(new ReturnStmt { Va = r.Va, Value = r.Value is null ? null : Subst(r.Value, env) });
@@ -350,7 +350,7 @@ public sealed class MediumLifter
         var liveOut = blocks.ToDictionary(b => b.Start, _ => new HashSet<Loc>());
         bool changed = true;
         int guard = 0;
-        int maxIterations = Math.Max(1, blocks.Count + 1);
+        int maxIterations = Math.Max(1, blocks.Count + 2);
         while (changed && guard++ < maxIterations)
         {
             changed = false;

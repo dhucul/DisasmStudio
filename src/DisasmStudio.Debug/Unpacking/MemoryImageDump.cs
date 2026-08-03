@@ -34,9 +34,12 @@ internal static class MemoryImageDump
         Array.Copy(hdr, 0, buf, 0, Math.Min(hdr.Length, buf.Length));
         ulong endVa = imageBase + size, addr = imageBase;
         int mbiSize = Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
+        bool queriedAnyRegion = false;
         while (addr < endVa)
         {
-            if (Native.VirtualQueryEx(proc, addr, out var mbi, (nuint)mbiSize) == 0) break;
+            if (Native.VirtualQueryEx(proc, addr, out var mbi, (nuint)mbiSize) == 0)
+                return queriedAnyRegion ? buf : [];
+            queriedAnyRegion = true;
             ulong regionBase = mbi.BaseAddress, regionSize = mbi.RegionSize;
             if (regionSize == 0) break;
             ulong next = regionBase + regionSize;

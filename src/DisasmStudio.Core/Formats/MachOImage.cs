@@ -350,7 +350,7 @@ public sealed class MachOImage : IBinaryImage, IDisposable
             !TrySliceRange(stroff, strsize, out int strBase))
             throw new BinaryFormatException("Mach-O symbol table exceeds the selected slice.");
 
-        for (int i = 0; i < nsyms && i < 500_000; i++)
+        for (int i = 0; i < nsyms && i < 500_000 && _symbols.Count < 1_000_000; i++)
         {
             int e = symbolsBase + i * nlistSize;
             uint nStrx = _f.ReadU32(e + 0);

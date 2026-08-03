@@ -62,18 +62,22 @@ public sealed class SourceViewerWindow : Window
         _surface.ContextMenu = menu;
 
         MeasureFont();
-        Load(path);
+        Loaded += async (_, _) => await LoadAsync(path);
     }
 
-    private void Load(string path)
+    private async Task LoadAsync(string path)
     {
-        try { _rawText = File.ReadAllText(path); }
-        catch (Exception ex) { _rawText = "// Could not read file: " + ex.Message; }
-
         string ext = Path.GetExtension(path).ToLowerInvariant();
         bool il = ext == ".il";
         bool code = il || ext is ".cs" or ".c" or ".cpp" or ".cc" or ".cxx" or ".h" or ".hpp" or ".java" or ".vb";
-        _lines = code ? CodeTokenizer.Tokenize(_rawText, il) : PlainLines(_rawText);
+        (_rawText, _lines) = await Task.Run(() =>
+        {
+            string text;
+            try { text = File.ReadAllText(path); }
+            catch (Exception ex) { text = "// Could not read file: " + ex.Message; }
+            IReadOnlyList<DecompLine> lines = code ? CodeTokenizer.Tokenize(text, il) : PlainLines(text);
+            return (text, lines);
+        });
         _lineNoDigits = Math.Max(3, _lines.Count.ToString().Length);
         ConfigureScroll();
         _surface.InvalidateVisual();

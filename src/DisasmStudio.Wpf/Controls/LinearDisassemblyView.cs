@@ -54,6 +54,26 @@ public sealed class LinearDisassemblyView : Grid
     // Untoggled jump arrows are drawn faint so a toggled (green/red) one clearly stands out.
     private static readonly Brush DimEdgeJump = FrozenDim(SyntaxTheme.EdgeJump, 0.4);
     private static Brush FrozenDim(Brush b, double opacity) { var c = b.Clone(); c.Opacity = opacity; c.Freeze(); return c; }
+    private static readonly Pen SeparatorPen = FrozenPen(SyntaxTheme.Separator, 1);
+    private static readonly Pen DimJumpPen = FrozenPen(DimEdgeJump, 0.6);
+    private static readonly Pen TakenCorePen = FrozenPen(SyntaxTheme.EdgeTaken, 2.3);
+    private static readonly Pen NotTakenCorePen = FrozenPen(Palette.RedBrush, 2.3);
+    private static readonly Pen TakenGlowPen = FrozenPen(FrozenDim(SyntaxTheme.EdgeTaken, 0.3), 5, rounded: true);
+    private static readonly Pen NotTakenGlowPen = FrozenPen(FrozenDim(Palette.RedBrush, 0.3), 5, rounded: true);
+    private static Pen FrozenPen(Brush brush, double width, bool rounded = false)
+    {
+        var pen = new Pen(brush, width);
+        if (rounded) pen.StartLineCap = pen.EndLineCap = PenLineCap.Round;
+        if (rounded) pen.LineJoin = PenLineJoin.Round;
+        pen.Freeze();
+        return pen;
+    }
+
+    private AnalysisResult? _arrowCacheResult;
+    private long _arrowCacheTop;
+    private int _arrowCacheRows;
+    private long _arrowCacheHidden = -1;
+    private List<(int SrcOff, int TgtOff, Brush Brush, bool Marked)>? _arrowCache;
 
     public event Action<ulong>? NavigateRequested;
     public event Action? GoToRequested;
@@ -133,15 +153,22 @@ public sealed class LinearDisassemblyView : Grid
     }
 
     /// <summary>Repaint (e.g. a data byte changed underneath, no index change).</summary>
-    public void Refresh() => _surface.InvalidateVisual();
+    public void Refresh() { InvalidateArrowCache(); _surface.InvalidateVisual(); }
+
+    private void InvalidateArrowCache() => _arrowCache = null;
 
     /// <summary>Rebuild labels and repaint after the result's index was spliced (local patch repair),
     /// keeping the current scroll/caret rather than resetting like <see cref="SetResult"/>.</summary>
     public void RefreshAfterPatch()
     {
         if (_result is null) return;
+        InvalidateArrowCache();
         BuildLabelLines(_result);
         BuildRegions(_result);
+        long count = _result.Linear.Count;
+        _caretInstr = count == 0 ? -1 : Math.Clamp(_caretInstr, 0, count - 1);
+        _selAnchor = count == 0 ? -1 : Math.Clamp(_selAnchor, 0, count - 1);
+        _topDisplay = Math.Clamp(_topDisplay, 0, Math.Max(0, VisibleCount - VisibleRows));
         ConfigureScroll();
         _surface.InvalidateVisual();
     }
@@ -152,6 +179,7 @@ public sealed class LinearDisassemblyView : Grid
     /// process-memory decoder while debugging) or the static file decoder when null.</summary>
     public void SetResult(AnalysisResult? result, IInstructionDecoder? decoder)
     {
+        InvalidateArrowCache();
         // Collapse state is per-document: drop it when the image changes (a new file / the debug swap), but
         // keep it across a same-image re-analysis (loading or unloading a section) so folds aren't lost.
         if (!ReferenceEquals(result?.Image, _result?.Image)) _collapsed.Clear();
@@ -188,7 +216,7 @@ public sealed class LinearDisassemblyView : Grid
         long vis = ToVisible(disp);
         if (vis < 0) vis = 0;   // defensive: target still hidden → top
         long firstThird = Math.Max(0, VisibleRows / 3);
-        _topDisplay = Math.Clamp(vis - firstThird, 0, Math.Max(0, VisibleCount - 1));
+        _topDisplay = Math.Clamp(vis - firstThird, 0, Math.Max(0, VisibleCount - VisibleRows));
         SyncScrollValue();
         if (focus) _surface.Focus();
         _surface.InvalidateVisual();
@@ -249,6 +277,7 @@ public sealed class LinearDisassemblyView : Grid
     /// keeps its first row (rendered as the summary) and hides the rest: (header+1 .. region end).</summary>
     private void RebuildHidden()
     {
+        InvalidateArrowCache();
         if (_collapsed.Count == 0) { _hidden = []; return; }
         var ranges = new List<(long, long)>();
         foreach (var (va, sl, el, _) in _regions)
@@ -318,7 +347,7 @@ public sealed class LinearDisassemblyView : Grid
             int rc = RegionContaining(topLine);
             anchorVis = rc >= 0 ? ToVisible(DisplayIndexOfInstr(_regions[rc].StartLine)) : 0;
         }
-        _topDisplay = Math.Clamp(Math.Max(0, anchorVis), 0, Math.Max(0, VisibleCount - 1));
+        _topDisplay = Math.Clamp(Math.Max(0, anchorVis), 0, Math.Max(0, VisibleCount - VisibleRows));
         ConfigureScroll();
         _surface.InvalidateVisual();
     }
@@ -659,7 +688,7 @@ public sealed class LinearDisassemblyView : Grid
 
         // Draggable column divider between the bytes and disassembly columns.
         double dx = Math.Round(DisasmX) - 2.5;
-        dc.DrawLine(new Pen(SyntaxTheme.Separator, 1), new Point(dx, 0), new Point(dx, height));
+        dc.DrawLine(SeparatorPen, new Point(dx, 0), new Point(dx, height));
     }
 
     private void DrawLabel(DrawingContext dc, ulong va, double y, double width, double dpi)
@@ -667,7 +696,7 @@ public sealed class LinearDisassemblyView : Grid
         bool isFunc = _result!.FunctionByVa.ContainsKey(va);
         // Pixel-snapped 1px separator above a function header.
         double ly = Math.Round(y) + 0.5;
-        dc.DrawLine(new Pen(SyntaxTheme.Separator, 1), new Point(GutterW, ly), new Point(width, ly));
+        dc.DrawLine(SeparatorPen, new Point(GutterW, ly), new Point(width, ly));
 
         string name = _result.NameFor(va) ?? $"loc_{va:X}";
         var brush = isFunc ? SyntaxTheme.FuncName : SyntaxTheme.Symbol;
@@ -747,12 +776,12 @@ public sealed class LinearDisassemblyView : Grid
         switch (bytes.Length)
         {
             case 8 or 4:
-            {
-                ulong v = bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
-                string? name = _result!.Image.IsMappedVa(v) ? _result.NameFor(v) : null;
-                string val = name ?? "0x" + v.ToString(bytes.Length == 8 ? "X" : "X8");
-                return (bytes.Length == 8 ? "dq " : "dd ", val, name is not null ? SyntaxTheme.Symbol : SyntaxTheme.Number);
-            }
+                {
+                    ulong v = bytes.Length == 8 ? BitConverter.ToUInt64(bytes, 0) : BitConverter.ToUInt32(bytes, 0);
+                    string? name = _result!.Image.IsMappedVa(v) ? _result.NameFor(v) : null;
+                    string val = name ?? "0x" + v.ToString(bytes.Length == 8 ? "X" : "X8");
+                    return (bytes.Length == 8 ? "dq " : "dd ", val, name is not null ? SyntaxTheme.Symbol : SyntaxTheme.Number);
+                }
             case 2: return ("dw ", $"0x{BitConverter.ToUInt16(bytes, 0):X4}", SyntaxTheme.Number);
             case 1: return ("db ", $"0x{bytes[0]:X2}", SyntaxTheme.Number);
         }
@@ -811,38 +840,52 @@ public sealed class LinearDisassemblyView : Grid
         //    (next instruction) when toggled to "not taken". Colour: green = taken, red = falls through, blue =
         //    untoggled. Off-screen endpoints are clamped to the view edge (the target edge gets an ↑/↓ head).
         var arrows = new List<(int SrcOff, int TgtOff, Brush Brush, bool Marked)>();
-        long scanLo = Math.Max(0, _topDisplay - Margin);
-        long scanHi = Math.Min(VisibleCount, _topDisplay + rows + Margin);
-        for (long visible = scanLo; visible < scanHi; visible++)
+        long hiddenTotal = HiddenTotal;
+        if (_arrowCache is not null && ReferenceEquals(_arrowCacheResult, _result) &&
+            _arrowCacheTop == _topDisplay && _arrowCacheRows == rows && _arrowCacheHidden == hiddenTotal)
         {
-            var (isLabel, instrLine) = ContentAt(ToDisplay(visible));
-            if (isLabel || !_result.Linear.IsReachableCodeAt(instrLine)) continue;
-            int ri = RegionStartAt(instrLine);
-            if (ri >= 0 && _collapsed.Contains(_regions[ri].Va)) continue;   // collapsed header — no arrow
-            ulong va = _result.Linear.VaAt(instrLine);
-            int srcOff = (int)(visible - _topDisplay);
-            if (!_dis.TryDecode(va, out var instr)) continue;
-            if (instr.DirectTarget is not ulong branchTarget) continue;
-            if (instr.Flow == FlowKind.Call) continue;   // arrows for jumps only
-
-            bool? mark = JumpMark?.Invoke(va);
-            ulong target = mark == false ? va + (ulong)instr.Length : branchTarget;   // not-taken reroutes to fall-through
-            Brush brush = mark switch
+            arrows.AddRange(_arrowCache);
+        }
+        else
+        {
+            long scanLo = Math.Max(0, _topDisplay - Margin);
+            long scanHi = Math.Min(VisibleCount, _topDisplay + rows + Margin);
+            for (long visible = scanLo; visible < scanHi; visible++)
             {
-                true => SyntaxTheme.EdgeTaken,      // green: taken
-                false => Palette.RedBrush,          // red: falls through
-                _ => SyntaxTheme.EdgeJump,          // blue: untoggled
-            };
-            long targetInstr = _result.Linear.IndexOf(target);
-            if (_result.Linear.VaAt(targetInstr) != target) continue;      // target not a clean instruction boundary
-            long targetVis = ToVisible(DisplayIndexOfInstr(targetInstr));
-            if (targetVis < 0) continue;                                   // hidden inside a collapsed region
-            long relTgt = targetVis - _topDisplay;
-            // Clamp an off-screen target to just-above (-1) / just-below (rows) so a very distant target can't
-            // overflow the int; on-screen targets keep their exact row offset.
-            int tgtOff = relTgt < 0 ? -1 : relTgt >= rows ? rows : (int)relTgt;
-            if (Math.Max(srcOff, tgtOff) < 0 || Math.Min(srcOff, tgtOff) >= rows) continue;   // span misses the view
-            arrows.Add((srcOff, tgtOff, brush, mark is not null));
+                var (isLabel, instrLine) = ContentAt(ToDisplay(visible));
+                if (isLabel || !_result.Linear.IsReachableCodeAt(instrLine)) continue;
+                int ri = RegionStartAt(instrLine);
+                if (ri >= 0 && _collapsed.Contains(_regions[ri].Va)) continue;   // collapsed header — no arrow
+                ulong va = _result.Linear.VaAt(instrLine);
+                int srcOff = (int)(visible - _topDisplay);
+                if (!_dis.TryDecode(va, out var instr)) continue;
+                if (instr.DirectTarget is not ulong branchTarget) continue;
+                if (instr.Flow == FlowKind.Call) continue;   // arrows for jumps only
+
+                bool? mark = JumpMark?.Invoke(va);
+                ulong target = mark == false ? va + (ulong)instr.Length : branchTarget;   // not-taken reroutes to fall-through
+                Brush brush = mark switch
+                {
+                    true => SyntaxTheme.EdgeTaken,      // green: taken
+                    false => Palette.RedBrush,          // red: falls through
+                    _ => SyntaxTheme.EdgeJump,          // blue: untoggled
+                };
+                long targetInstr = _result.Linear.IndexOf(target);
+                if (_result.Linear.VaAt(targetInstr) != target) continue;      // target not a clean instruction boundary
+                long targetVis = ToVisible(DisplayIndexOfInstr(targetInstr));
+                if (targetVis < 0) continue;                                   // hidden inside a collapsed region
+                long relTgt = targetVis - _topDisplay;
+                // Clamp an off-screen target to just-above (-1) / just-below (rows) so a very distant target can't
+                // overflow the int; on-screen targets keep their exact row offset.
+                int tgtOff = relTgt < 0 ? -1 : relTgt >= rows ? rows : (int)relTgt;
+                if (Math.Max(srcOff, tgtOff) < 0 || Math.Min(srcOff, tgtOff) >= rows) continue;   // span misses the view
+                arrows.Add((srcOff, tgtOff, brush, mark is not null));
+            }
+            _arrowCacheResult = _result;
+            _arrowCacheTop = _topDisplay;
+            _arrowCacheRows = rows;
+            _arrowCacheHidden = hiddenTotal;
+            _arrowCache = [.. arrows];
         }
 
         // 2) Give each arrow a lane so nested/overlapping jumps don't draw on top of each other (greedy interval
@@ -908,11 +951,11 @@ public sealed class LinearDisassemblyView : Grid
             double laneX = Math.Max(MinX, xCode - LaneStep * (laneOf[k] + 1));
             if (a.Marked)
             {
-                var glow = a.Brush.Clone(); glow.Opacity = 0.3; glow.Freeze();   // luminous halo under the core
-                DrawPath(new Pen(glow, 5) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round }, a.SrcOff, a.TgtOff, laneX);
-                DrawPath(new Pen(a.Brush, 2.3), a.SrcOff, a.TgtOff, laneX);      // bright full-colour core
+                bool taken = ReferenceEquals(a.Brush, SyntaxTheme.EdgeTaken);
+                DrawPath(taken ? TakenGlowPen : NotTakenGlowPen, a.SrcOff, a.TgtOff, laneX);
+                DrawPath(taken ? TakenCorePen : NotTakenCorePen, a.SrcOff, a.TgtOff, laneX);
             }
-            else DrawPath(new Pen(DimEdgeJump, 0.6), a.SrcOff, a.TgtOff, laneX);   // untoggled: thin + faint
+            else DrawPath(DimJumpPen, a.SrcOff, a.TgtOff, laneX);
         }
     }
 

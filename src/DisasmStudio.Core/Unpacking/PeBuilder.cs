@@ -88,7 +88,6 @@ public static class PeBuilder
 
         var outBuf = new byte[finalSize];
         Array.Copy(dumpImage, 0, outBuf, 0, Math.Min(dumpImage.Length, (int)Math.Min(finalSize, (uint)int.MaxValue)));
-        if (addSection) Array.Copy(importBytes, 0, outBuf, (int)newSecRva, importBytes.Length);
 
         int peOff = view.PeOffset;
         int fileHdr = peOff + PeConstants.FileHeaderFromSig;
@@ -107,6 +106,9 @@ public static class PeBuilder
             int applied = ApplyRelocations(outBuf, relRva, relSize, delta, is64);
             sb.Append($"Un-relocated dump to preferred base {preferredBase:X} (delta {delta:X}, {applied} fixups).\n");
         }
+        // Lay down newly generated data only after applying relocations from the original image. A malformed or
+        // over-broad relocation table must never be allowed to rewrite the fresh import descriptors.
+        if (addSection) Array.Copy(importBytes, 0, outBuf, (int)newSecRva, importBytes.Length);
 
         // Relocate the Load Config into .idata now the dump bytes are final (post un-relocation). Its internal
         // fields are absolute VAs into other sections, so a byte copy stays valid; only the directory moves.
@@ -148,7 +150,10 @@ public static class PeBuilder
             // Never drop the first (lowest-VA) section: contiguity is restored by growing the *preceding*
             // section over the gap, and there is none before section 0 — dropping it would leave a gap between
             // the headers and the first section, which the loader rejects. (UPX's stub is never section 0.)
-            bool isStub = false;
+            bool isStub = addSection && i > 0 && !hasOep && SecHas(s, origEpRva)
+                && (s.Characteristics & PeConstants.SCN_MEM_EXECUTE) != 0
+                && (iatRva == 0 || !SecHas(s, iatRva))
+                && !protectedRvas.Any(rva => SecHas(s, rva));
             if (isStub) { dropped.Add((s.VirtualAddress, Math.Max(s.VirtualSize, s.SizeOfRawData))); continue; }
 
             string name = hasOep ? ".text"

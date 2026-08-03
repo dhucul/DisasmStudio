@@ -196,13 +196,14 @@ public sealed class OepFinder
             {
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
-                if (size == 0 || lo == _entrySectionLo) continue;   // never guard the stub's own section
+                bool containsEntry = eng.EntryPoint >= lo && eng.EntryPoint - lo < size;
+                if (size == 0 || containsEntry) continue;
                 if (eng.TryGuardRegion(lo, size)) guarded++;
             }
             if (guarded == 0) throw new InvalidOperationException("No OEP section guard could be armed.");
             _log.Append($"Section guard: guarded {guarded} non-stub section(s).\n");
         }
-        else _log.Append("Section guard: could not parse the image headers.\n");
+        else throw new InvalidOperationException("Section guard could not parse the image headers.");
         _phase = Phase.WaitGuard;
         eng.Go();
     }
@@ -220,7 +221,8 @@ public sealed class OepFinder
             {
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
-                if (size == 0 || lo == _entrySectionLo) continue;   // never break on the stub's own section
+                bool containsEntry = eng.EntryPoint >= lo && eng.EntryPoint - lo < size;
+                if (size == 0 || containsEntry) continue;
                 if (eng.TrySetMemoryBreakpoint(lo, size, MemAccess.Execute))
                     _execBpStarts.Add(lo);
             }
@@ -228,7 +230,7 @@ public sealed class OepFinder
                 throw new InvalidOperationException("No OEP execute breakpoint could be armed.");
             _log.Append($"Section execute-bp: armed execute memory breakpoints on {_execBpStarts.Count} non-stub section(s).\n");
         }
-        else _log.Append("Section execute-bp: could not parse the image headers.\n");
+        else throw new InvalidOperationException("Section execute breakpoint could not parse the image headers.");
         _phase = Phase.WaitMemBp;
         eng.Go();
     }

@@ -37,13 +37,13 @@ public static class VmTriage
 
             while (va < end && scanned < MaxInstructions)
             {
+                scanned++;
                 if (!dis.TryDecodeAt(va, out var ins) || ins.Length <= 0)
                 {
                     va++;
                     continue;
                 }
 
-                scanned++;
                 string text = fmt.FormatText(ins);
                 window.Enqueue(new TraceInsn(va, ins, text));
                 while (window.Count > 8) window.Dequeue();

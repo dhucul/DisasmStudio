@@ -80,6 +80,7 @@ public sealed class IlEmulator
         int steps = 0;
         while (true)
         {
+            if (++steps > _opts.StepBudget) { Finish(EmuStatus.Budget, block.Start, steps); return; }
             ulong? next = null;
             foreach (var st in block.Stmts)
             {
@@ -104,8 +105,12 @@ public sealed class IlEmulator
                     case SwitchTermStmt sw:
                     {
                         var v = Eval(sw.Value);
-                        if (!v.Known || v.V < 0 || v.V >= sw.Cases.Count) { Finish(EmuStatus.UnknownBranch, st.Va, steps); return; }
-                        next = sw.Cases[(int)v.V];
+                        if (!v.Known) { Finish(EmuStatus.UnknownBranch, st.Va, steps); return; }
+                        int caseIndex = sw.Selectors is null
+                            ? v.V is >= 0 and < int.MaxValue ? (int)v.V : -1
+                            : IndexOf(sw.Selectors, v.V);
+                        if ((uint)caseIndex >= (uint)sw.Cases.Count) { Finish(EmuStatus.UnknownBranch, st.Va, steps); return; }
+                        next = sw.Cases[caseIndex];
                         break;
                     }
                 }
@@ -120,6 +125,12 @@ public sealed class IlEmulator
             }
             if (!lf.ByStart.TryGetValue(next.Value, out block!)) { Finish(EmuStatus.Returned, next.Value, steps); return; }   // edge leaves the function
         }
+    }
+
+    private static int IndexOf(IReadOnlyList<long> values, long value)
+    {
+        for (int i = 0; i < values.Count; i++) if (values[i] == value) return i;
+        return -1;
     }
 
     /// <summary>The fall-through successor of a block with no terminator statement (the FallThrough edge, or the

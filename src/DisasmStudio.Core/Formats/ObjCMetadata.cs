@@ -34,6 +34,7 @@ public static class ObjCMetadata
         var classes = new List<ObjCClass>();
         var methodSyms = new List<NamedSymbol>();
         var seen = new HashSet<ulong>();
+        int methodsScanned = 0;
         int n = (int)(classlist.VirtualSize / 8);
 
         for (int i = 0; i < n && i < 50_000; i++)
@@ -41,7 +42,7 @@ public static class ObjCMetadata
             ulong slotVa = classlist.StartVa + (ulong)i * 8;
             ulong classVa = image.ResolvePtr(image.ReadU64AtVa(slotVa), slotVa);
             if (classVa == 0 || !seen.Add(classVa)) continue;
-            var c = ReadClass(image, classVa, methodSyms);
+            var c = ReadClass(image, classVa, methodSyms, ref methodsScanned);
             if (c is not null) classes.Add(c);
         }
 
@@ -50,7 +51,8 @@ public static class ObjCMetadata
 
     // objc_class: isa@0, superclass@8, cache@0x10, vtable@0x18, data@0x20
     // class_ro_t: flags@0, ..., name@0x18, baseMethods@0x20, ..., ivars@0x30
-    private static ObjCClass? ReadClass(MachOImage image, ulong classVa, List<NamedSymbol> methodSyms)
+    private static ObjCClass? ReadClass(MachOImage image, ulong classVa, List<NamedSymbol> methodSyms,
+        ref int methodsScanned)
     {
         ulong roVa = RoData(image, classVa);
         if (roVa == 0) return null;
@@ -59,7 +61,8 @@ public static class ObjCMetadata
         string name = nameVa != 0 ? image.ReadCStrAtVa(nameVa) : "";
         if (string.IsNullOrEmpty(name)) return null;
 
-        var instance = ReadMethodList(image, MethodListVa(image, roVa), name, isClass: false, methodSyms);
+        var instance = ReadMethodList(image, MethodListVa(image, roVa), name, isClass: false, methodSyms,
+            ref methodsScanned);
 
         // class ("+") methods live on the metaclass, reached through isa
         var classMethods = new List<ObjCMethod>();
@@ -67,7 +70,8 @@ public static class ObjCMetadata
         if (metaVa != 0 && metaVa != classVa)
         {
             ulong metaRo = RoData(image, metaVa);
-            if (metaRo != 0) classMethods = ReadMethodList(image, MethodListVa(image, metaRo), name, isClass: true, methodSyms);
+            if (metaRo != 0) classMethods = ReadMethodList(image, MethodListVa(image, metaRo), name,
+                isClass: true, methodSyms, ref methodsScanned);
         }
 
         string? superName = null;
@@ -97,7 +101,8 @@ public static class ObjCMetadata
     // method_list_t: entsizeAndFlags@0, count@4, then `count` elements.
     //   big   (24B): name(ptr)@0, types(ptr)@8, imp(ptr)@0x10
     //   small (12B): relName(i32)@0, relTypes(i32)@4, relImp(i32)@8   — all self-relative to their own field
-    private static List<ObjCMethod> ReadMethodList(MachOImage image, ulong listVa, string className, bool isClass, List<NamedSymbol> methodSyms)
+    private static List<ObjCMethod> ReadMethodList(MachOImage image, ulong listVa, string className, bool isClass,
+        List<NamedSymbol> methodSyms, ref int methodsScanned)
     {
         var result = new List<ObjCMethod>();
         if (listVa == 0 || !image.IsMappedVa(listVa)) return result;
@@ -110,7 +115,7 @@ public static class ObjCMetadata
         if (entsize == 0) entsize = isSmall ? 12u : 24u;
         if (count > 100_000) count = 100_000;
 
-        for (uint i = 0; i < count; i++)
+        for (uint i = 0; i < count && methodsScanned < 1_000_000; i++, methodsScanned++)
         {
             ulong elemVa = listVa + 8 + (ulong)i * entsize;
             string sel; ulong imp;

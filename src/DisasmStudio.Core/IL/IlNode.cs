@@ -107,7 +107,13 @@ public sealed class GotoStmt : Stmt { public ulong Target; }
 public sealed class BranchStmt : Stmt { public required Expr Cond; public ulong IfTrue; public ulong IfFalse; }
 
 /// <summary>A multi-way (jump-table) block terminator.</summary>
-public sealed class SwitchTermStmt : Stmt { public required Expr Value; public required IReadOnlyList<ulong> Cases; }
+public sealed class SwitchTermStmt : Stmt
+{
+    public required Expr Value;
+    public required IReadOnlyList<ulong> Cases;
+    /// <summary>Optional selector values corresponding to <see cref="Cases"/>. Null means ordinal 0..N-1.</summary>
+    public IReadOnlyList<long>? Selectors;
+}
 
 public sealed class ReturnStmt : Stmt { public Expr? Value; }
 

@@ -18,6 +18,7 @@ internal sealed class VmTraceRecovery
 
     private const int MaxSteps = 1_000_000;
     private const int MaxEvents = 200_000;
+    private const int MaxSnapshotFiles = 6;
     private const int HotCallTargetThreshold = 512;
     private const int HotRepThreshold = 512;
     private const int HotLoopThreshold = 512;
@@ -54,6 +55,7 @@ internal sealed class VmTraceRecovery
     private readonly Dictionary<ulong, SehFollow> _sehFollows = [];
     private string _reason = "";
     private string _lastReportError = "";
+    private volatile bool _done;
 
     public VmTraceRecovery(DebuggerEngine eng, string targetPath, string outputPath)
     {
@@ -64,7 +66,7 @@ internal sealed class VmTraceRecovery
         LoadExecutableRanges();
     }
 
-    public bool Done { get; private set; }
+    public bool Done => _done;
     public string? ReportPath { get; private set; }
     public string PlannedReportPath => _reportPath;
     public string LastReportError => _lastReportError;
@@ -72,6 +74,11 @@ internal sealed class VmTraceRecovery
     public void Begin(StopInfo stop)
     {
         _sw.Start();
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(MaxDuration).ConfigureAwait(false);
+            if (!Done) try { _eng.Pause(); } catch { }
+        });
         ObserveStop(stop, out _);
         WriteReport();
     }
@@ -88,7 +95,7 @@ internal sealed class VmTraceRecovery
         if (Done) return;
         if (dumpFinal)
             DumpTraceSnapshot("final", force: true);
-        Done = true;
+        _done = true;
         _reason = reason;
         WriteReport();
     }
@@ -382,12 +389,25 @@ internal sealed class VmTraceRecovery
             File.WriteAllBytes(path, image);
             _snapshots.Add(new TraceSnapshot(label, _steps, path, score.Section, score.Entropy,
                 score.NonZeroPercent, image.Length, ""));
+            TrimSnapshotFiles();
             WriteReport();
         }
         catch (Exception ex)
         {
             _snapshots.Add(new TraceSnapshot(label, _steps, "", "", 0, 0, 0, ex.Message));
             WriteReport();
+        }
+    }
+
+    private void TrimSnapshotFiles()
+    {
+        while (_snapshots.Count(s => s.Path.Length > 0) > MaxSnapshotFiles)
+        {
+            int index = _snapshots.FindIndex(s => s.Path.Length > 0);
+            if (index < 0) break;
+            string path = _snapshots[index].Path;
+            _snapshots.RemoveAt(index);
+            try { File.Delete(path); } catch { }
         }
     }
 

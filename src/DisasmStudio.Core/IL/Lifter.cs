@@ -220,7 +220,7 @@ public sealed class Lifter : ILifter
                 if (FlowAnalysis.DirectBranchTarget(ins) is ulong jt)
                     Emit(new GotoStmt { Target = jt });
                 else if (_jumpTables.TryGetValue(va, out var cases))
-                    Emit(new SwitchTermStmt { Value = Operand(ins, 0, Ptr), Cases = cases });
+                    Emit(new SwitchTermStmt { Value = SwitchSelector(ins), Cases = cases });
                 else
                     Emit(new AsmStmt { Text = _fmt.FormatText(ins) });   // unresolved indirect jump
                 break;
@@ -287,6 +287,13 @@ public sealed class Lifter : ILifter
 
     private Expr Dest(in Instruction ins) => Operand(ins, 0, DestWidth(ins));
     private Expr Src1(in Instruction ins, int width) => Operand(ins, 1, width);
+
+    // For an indexed jump table, the memory operand evaluates to the selected target address. The source-level
+    // switch expression is the table index, not that loaded pointer.
+    private Expr SwitchSelector(in Instruction ins) =>
+        ins.Op0Kind == OpKind.Memory && ins.MemoryIndex != Register.None
+            ? R(ins.MemoryIndex)
+            : Operand(ins, 0, Ptr);
 
     private int DestWidth(in Instruction ins)
     {

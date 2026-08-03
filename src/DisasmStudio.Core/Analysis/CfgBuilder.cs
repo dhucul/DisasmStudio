@@ -17,9 +17,12 @@ public static class CfgBuilder
         INeutralDisassembler? decoder = null, NoReturnInfo? noReturn = null)
     {
         if (fn.BlocksBuilt) return;
+        lock (fn)
+        {
+            if (fn.BlocksBuilt) return;
 
-        using INeutralDisassembler? owned = decoder is null ? NeutralDisasm.For(image, null) : null;
-        INeutralDisassembler dis = decoder ?? owned!;
+            using INeutralDisassembler? owned = decoder is null ? NeutralDisasm.For(image, null) : null;
+            INeutralDisassembler dis = decoder ?? owned!;
 
         // Reachability gate for the descent. Normally an address must sit in an *executable* section — this
         // stops a mis-identified data "function" from decoding pointer bytes into a junk CFG. But some images
@@ -94,7 +97,8 @@ public static class CfgBuilder
             }
         }
 
-        fn.SetBlocks(SplitIntoBlocks(insns, leaders, jumpTables, noReturn), entry);
+            fn.SetBlocks(SplitIntoBlocks(insns, leaders, jumpTables, noReturn), entry);
+        }
     }
 
     private static List<BasicBlock> SplitIntoBlocks(SortedDictionary<ulong, NeutralInsn> insns, HashSet<ulong> leaders,

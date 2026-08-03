@@ -34,6 +34,8 @@ public sealed class DecompilerView : Grid
     private ILLevel _level = ILLevel.PseudoC;
 
     private readonly Dictionary<ulong, DecompiledFunction> _cache = [];
+    private const int MaxCachedFunctions = 256;
+    private INeutralDisassembler? _arrowDis;
     private ulong? _shownFn;
     private int _buildSeq;
 
@@ -59,6 +61,20 @@ public sealed class DecompilerView : Grid
     // Untoggled branch arrows are drawn faint so a toggled (green/red) one clearly stands out (as in the linear view).
     private static readonly Brush DimEdgeJump = FrozenDim(SyntaxTheme.EdgeJump, 0.4);
     private static Brush FrozenDim(Brush b, double opacity) { var c = b.Clone(); c.Opacity = opacity; c.Freeze(); return c; }
+    private static readonly Pen SeparatorPen = FrozenPen(SyntaxTheme.Separator, 1);
+    private static readonly Pen DimJumpPen = FrozenPen(DimEdgeJump, 0.6);
+    private static readonly Pen TakenCorePen = FrozenPen(SyntaxTheme.EdgeTaken, 2.3);
+    private static readonly Pen NotTakenCorePen = FrozenPen(Palette.RedBrush, 2.3);
+    private static readonly Pen TakenGlowPen = FrozenPen(FrozenDim(SyntaxTheme.EdgeTaken, 0.3), 5, rounded: true);
+    private static readonly Pen NotTakenGlowPen = FrozenPen(FrozenDim(Palette.RedBrush, 0.3), 5, rounded: true);
+    private static Pen FrozenPen(Brush brush, double width, bool rounded = false)
+    {
+        var pen = new Pen(brush, width);
+        if (rounded) pen.StartLineCap = pen.EndLineCap = PenLineCap.Round;
+        if (rounded) pen.LineJoin = PenLineJoin.Round;
+        pen.Freeze();
+        return pen;
+    }
 
     public event Action<ulong>? NavigateRequested;
     public event Action<ulong>? SelectionChanged;
@@ -228,7 +244,13 @@ public sealed class DecompilerView : Grid
     {
         // A new image (e.g. the static↔live debugger swap) invalidates the decoder and the per-function
         // cache — both were built over the old address space.
-        if (_dis is not null && !ReferenceEquals(_result?.AnalysisImage, result.AnalysisImage)) { _dis = null; _cache.Clear(); }
+        if (_dis is not null && !ReferenceEquals(_result?.AnalysisImage, result.AnalysisImage))
+        {
+            _dis = null;
+            _arrowDis?.Dispose();
+            _arrowDis = null;
+            _cache.Clear();
+        }
         _result = result;
         // Follow-call needs a decoder that can read the shown bytes: the live decoder while debugging (process
         // memory), else the file-backed one. The image-swap reset above rebuilds it on the static↔live switch.
@@ -270,6 +292,8 @@ public sealed class DecompilerView : Grid
                     ShowFailure(failure ?? "Decompiler failed.");
                     return;
                 }
+                if (_cache.Count >= MaxCachedFunctions && !_cache.ContainsKey(fn.Va))
+                    _cache.Remove(_cache.Keys.First());
                 _cache[fn.Va] = dc;
                 Show(dc);
             });
@@ -280,7 +304,10 @@ public sealed class DecompilerView : Grid
     {
         _buildSeq++;          // invalidate any background decompilation still targeting the previous image
         _dc = null;
+        _result = null;
         _dis = null;          // a new file means a new image; the decoder is rebuilt on next SetFunction
+        _arrowDis?.Dispose();
+        _arrowDis = null;
         _lines = [];
         _lineByVa = [];
         _mergeOf = [];
@@ -565,7 +592,7 @@ public sealed class DecompilerView : Grid
         DrawBranchArrows(dc, rows);
 
         double dx = Math.Round(ContentX - _charWidth) - 0.5;
-        dc.DrawLine(new Pen(SyntaxTheme.Separator, 1), new Point(dx, 0), new Point(dx, height));
+        dc.DrawLine(SeparatorPen, new Point(dx, 0), new Point(dx, height));
     }
 
     /// <summary>Branch-connector arrows in the lane between the breakpoint strip and the address column — the
@@ -577,7 +604,7 @@ public sealed class DecompilerView : Grid
     private void DrawBranchArrows(DrawingContext dc, int rows)
     {
         if (_result is null || _lines.Count == 0) return;
-        using var dis = NeutralDisasm.For(_result.AnalysisImage, _result.Names, LiveDecoder);
+        var dis = _arrowDis ??= NeutralDisasm.For(_result.AnalysisImage, _result.Names, LiveDecoder);
 
         double xCode = AddrX - 3;          // arrows meet the code at the left edge of the address column
         double minX = BpGutterW + 2;       // don't cross into the breakpoint strip
@@ -689,11 +716,11 @@ public sealed class DecompilerView : Grid
             double laneX = Math.Max(minX, xCode - LaneStep * (laneOf[k] + 1));
             if (a.Marked)
             {
-                var glow = a.Brush.Clone(); glow.Opacity = 0.3; glow.Freeze();   // luminous halo under the core
-                DrawPath(new Pen(glow, 5) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round }, a.SrcOff, a.TgtOff, laneX);
-                DrawPath(new Pen(a.Brush, 2.3), a.SrcOff, a.TgtOff, laneX);      // bright full-colour core
+                bool taken = ReferenceEquals(a.Brush, SyntaxTheme.EdgeTaken);
+                DrawPath(taken ? TakenGlowPen : NotTakenGlowPen, a.SrcOff, a.TgtOff, laneX);
+                DrawPath(taken ? TakenCorePen : NotTakenCorePen, a.SrcOff, a.TgtOff, laneX);
             }
-            else DrawPath(new Pen(DimEdgeJump, 0.6), a.SrcOff, a.TgtOff, laneX);   // untoggled: thin + faint
+            else DrawPath(DimJumpPen, a.SrcOff, a.TgtOff, laneX);
         }
     }
 

@@ -233,7 +233,15 @@ public sealed partial class DebuggerEngine
                 CurrentThreadId = ev.dwThreadId;
                 ClearExecCache();   // the target just ran; its committed-memory map may have changed since the last stop
                 uint cont = Native.DBG_CONTINUE;
-                bool stop = HandleEvent(ev, ref cont);
+                bool stop;
+                try { stop = HandleEvent(ev, ref cont); }
+                catch (Exception ex)
+                {
+                    try { Output?.Invoke($"Debug-loop error on event {ev.dwDebugEventCode}: {ex}"); }
+                    catch { }
+                    Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_EXCEPTION_NOT_HANDLED);
+                    continue;
+                }
                 if (_ended) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont); break; }
                 if (_stopping) { DoStop(ev); break; }
 
@@ -299,8 +307,23 @@ public sealed partial class DebuggerEngine
                 ThreadsChanged?.Invoke();
                 return false;
             case Native.EXIT_THREAD_DEBUG_EVENT:
-                lock (_lock) { if (_threads.Remove(ev.dwThreadId, out var h)) Native.CloseHandle(h); }
-                _stepping.Remove(ev.dwThreadId);   // a thread that exited mid-step leaves no stale entry
+                lock (_lock)
+                {
+                    if (_threads.Remove(ev.dwThreadId, out var h)) Native.CloseHandle(h);
+                    _stepping.Remove(ev.dwThreadId);
+                    _traceStep.Remove(ev.dwThreadId);
+                    if (_memStep.Remove(ev.dwThreadId, out var ms))
+                    {
+                        ApplyPageProtection(ms.Page);
+                        ResumeThreads(ms.SuspendedPeers);
+                    }
+                    if (_pendingGuardReeval.Remove(ev.dwThreadId, out var gs))
+                    {
+                        RearmAndReprotect(gs.Page);
+                        ResumeThreads(gs.SuspendedPeers);
+                    }
+                    if (_returnStep.Remove(ev.dwThreadId, out var rs)) ResumeThreads(rs.SuspendedPeers);
+                }
                 ThreadsChanged?.Invoke();
                 return false;
             case Native.LOAD_DLL_DEBUG_EVENT:
@@ -834,6 +857,7 @@ public sealed partial class DebuggerEngine
     /// the debug registers on every thread. Safe only while stopped (single-threaded w.r.t. the debug loop).</summary>
     private void RestoreAllInstrumentation()
     {
+        ClearGuards();
         SmcCleanup();
         MemCleanup();   // restore memory-breakpoint page protections
         lock (_lock)
@@ -963,16 +987,15 @@ public sealed partial class DebuggerEngine
             }
 
         const int PageSize = 0x1000;
-        var buf = new byte[PageSize];
         foreach (var (page, vas) in byPage)
         {
-            if (!Native.ReadProcessMemory(_proc, page, buf, (nuint)PageSize, out var read))
+            var buf = ReadMemory(page, PageSize);
+            if (buf.Length == 0)
             {
                 lock (_lock) foreach (var va in vas) _swBps.Remove(va);
                 continue;
             }
-            int n = (int)read;
-            if (n == 0) { lock (_lock) foreach (var va in vas) _swBps.Remove(va); continue; }
+            int n = buf.Length;
 
             if (!Native.VirtualProtectEx(_proc, page, (nuint)n, Native.PAGE_EXECUTE_READWRITE, out uint old))
             {

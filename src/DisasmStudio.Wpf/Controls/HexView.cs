@@ -259,7 +259,7 @@ public sealed class HexView : Grid
     /// <summary>Search for <paramref name="pattern"/> (with an optional wildcard <paramref name="mask"/>) from
     /// just past the current selection, wrapping around the image once. Records the pattern for
     /// <see cref="SearchAgain"/> (F3). On a hit, selects the whole match and scrolls it into view.</summary>
-    public FindResult Search(byte[] pattern, bool[]? mask, bool forward)
+    public Task<FindResult> Search(byte[] pattern, bool[]? mask, bool forward)
     {
         _lastPattern = pattern;
         _lastMask = mask;
@@ -267,9 +267,13 @@ public sealed class HexView : Grid
     }
 
     /// <summary>Repeat the last <see cref="Search"/> in the given direction (F3 / Shift+F3). No-op if none.</summary>
-    public FindResult SearchAgain(bool forward) => _lastPattern is null ? FindResult.NotFound : RunSearch(forward);
+    public Task<FindResult> SearchAgain(bool forward) => _lastPattern is null
+        ? Task.FromResult(FindResult.NotFound)
+        : RunSearch(forward);
 
-    private FindResult RunSearch(bool forward)
+    private CancellationTokenSource? _searchCts;
+
+    private async Task<FindResult> RunSearch(bool forward)
     {
         if (_image is null) return FindResult.NoImage;
         if (_lastPattern is null) return FindResult.NotFound;
@@ -286,7 +290,16 @@ public sealed class HexView : Grid
         }
         else start = forward ? _image.MinVa : _image.MaxVa - 1;
 
-        ulong? hit = ByteSearch.Find(_image, start, _lastPattern, _lastMask, forward);
+        _searchCts?.Cancel();
+        _searchCts?.Dispose();
+        _searchCts = new CancellationTokenSource();
+        var image = _image;
+        var pattern = _lastPattern;
+        var mask = _lastMask;
+        CancellationToken token = _searchCts.Token;
+        ulong? hit = await Task.Run(() => ByteSearch.Find(image, start, pattern, mask, forward, token), token);
+        token.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(_image, image)) return FindResult.NoImage;
         if (hit is null) return FindResult.NotFound;
 
         ulong matchLo = hit.Value;
@@ -330,6 +343,7 @@ public sealed class HexView : Grid
     private void ConfigureScroll()
     {
         if (_image is null) { _scroll.Maximum = 0; return; }
+        _topAddress = Math.Clamp(_topAddress, _image.MinVa, MaxTopAddress());
         double totalRows = (_image.MaxVa - _image.MinVa) / (double)BytesPerRow;
         _scroll.Minimum = 0;
         _scroll.Maximum = Math.Max(0, totalRows - VisibleRows);
@@ -365,6 +379,7 @@ public sealed class HexView : Grid
         if (_image is null) return;
         ulong amount = checked((ulong)Math.Abs((long)rows) * BytesPerRow);
         ulong maxTop = MaxTopAddress();
+        _topAddress = Math.Clamp(_topAddress, _image.MinVa, maxTop);
         if (rows < 0)
             _topAddress -= Math.Min(_topAddress - _image.MinVa, amount);
         else

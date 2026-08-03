@@ -97,7 +97,13 @@ internal static class ExceptionDialog
         {
             grid.CommitEdit(DataGridEditingUnit.Cell, true);
             grid.CommitEdit(DataGridEditingUnit.Row, true);
-            built = Build(rows);
+            try { built = Build(rows); }
+            catch (FormatException ex)
+            {
+                MessageBox.Show(win, ex.Message, "Invalid exception code", MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
             win.DialogResult = true;
         };
 
@@ -129,7 +135,8 @@ internal static class ExceptionDialog
                 filter.Default.PassToProgram = row.Pass;
                 continue;
             }
-            if (!TryParseRange(row.Code, out uint lo, out uint hi)) continue;   // drop unparseable rows
+            if (!TryParseRange(row.Code, out uint lo, out uint hi))
+                throw new FormatException($"'{row.Code}' is not a valid exception code or range.");
             filter.Rules.Add(new ExceptionRule
             {
                 CodeLow = lo, CodeHigh = hi, Name = row.Name,

@@ -15,6 +15,7 @@ namespace DisasmStudio.Core.Unpacking.Lzma;
 /// 5 property bytes and a raw (header-less, end-marker-terminated) LZMA stream per packed block.</summary>
 public static class LzmaCodec
 {
+    internal const long MaxOutputSize = 512L * 1024 * 1024;
     /// <summary>Decode a raw LZMA stream.</summary>
     /// <param name="props">The 5 LZMA property bytes (lc/lp/pb + 4-byte dictionary size).</param>
     /// <param name="input">The raw compressed stream (no .lzma alone-header, no size prefix).</param>
@@ -35,11 +36,13 @@ public static class LzmaCodec
         CancellationToken cancellationToken = default, bool requireInputFullyConsumed = false)
     {
         if (props.Length < 5) throw new ArgumentException("LZMA properties must be at least 5 bytes.", nameof(props));
+        if (outSizeHint > MaxOutputSize)
+            throw new InvalidDataException($"LZMA declared output exceeds the {MaxOutputSize >> 20} MiB limit.");
         cancellationToken.ThrowIfCancellationRequested();
         var dec = new LzmaDecoder();
         dec.SetDecoderProperties(props[..5].ToArray());
         using var inStream = new MemoryStream(input, offset, count, writable: false);
-        using var outStream = new MemoryStream(outSizeHint > 0 && outSizeHint < int.MaxValue ? (int)outSizeHint : 0);
+        using var outStream = new MemoryStream(outSizeHint > 0 ? (int)Math.Min(outSizeHint, 4 << 20) : 0);
         dec.Code(inStream, outStream, count, outSizeHint, cancellationToken);
         if (requireInputFullyConsumed && inStream.Position != count)
             throw new InvalidDataException(
@@ -536,6 +539,8 @@ internal sealed class LzmaDecoder
 
         ulong nowPos64 = 0;
         bool sizeKnown = outSize >= 0;
+        if (sizeKnown && outSize > LzmaCodec.MaxOutputSize)
+            throw new InvalidDataException($"LZMA declared output exceeds the {LzmaCodec.MaxOutputSize >> 20} MiB limit.");
         ulong outSize64 = sizeKnown ? (ulong)outSize : MaxUnknownOutputSize;
         if (nowPos64 < outSize64)
         {

@@ -13,6 +13,7 @@ public static class Demangler
 {
     private static readonly object _lock = new();
     private static readonly Dictionary<string, string> _cache = [];
+    private const int MaxCacheEntries = 16_384;
 
     public static string Demangle(string name)
     {
@@ -25,6 +26,7 @@ public static class Demangler
         {
             if (_cache.TryGetValue(name, out var hit)) return hit;
             string result = (msvc ? Msvc(name) : Itanium(name)) ?? name;
+            if (_cache.Count >= MaxCacheEntries) _cache.Clear();
             _cache[name] = result;
             return result;
         }
@@ -65,6 +67,8 @@ public static class Demangler
     private sealed class Itan(string s, int i)
     {
         private int _i = i;
+        private const int MaxDepth = 64;
+        private int _depth;
         private readonly List<string> _subs = [];
         public bool Failed { get; private set; }
 
@@ -165,6 +169,14 @@ public static class Demangler
         }
 
         private string Type()
+        {
+            if (_depth >= MaxDepth) { Failed = true; return ""; }
+            _depth++;
+            try { return TypeCore(); }
+            finally { _depth--; }
+        }
+
+        private string TypeCore()
         {
             char c = Cur;
             switch (c)

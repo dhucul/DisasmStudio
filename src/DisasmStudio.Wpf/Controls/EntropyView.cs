@@ -24,6 +24,17 @@ public sealed class EntropyView : FrameworkElement
     private readonly Typeface _typeface =
         new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 10.0;
+    private static readonly Pen GridPen = FrozenPen(Palette.Surface2Brush, 0.6);
+    private static readonly Pen CurvePen = FrozenPen(Palette.Overlay0Brush, 1);
+    private static readonly Pen DividerPen = FrozenPen(Palette.Overlay0Brush, 0.6, dashed: true);
+
+    private static Pen FrozenPen(Brush brush, double width, bool dashed = false)
+    {
+        var pen = new Pen(brush, width);
+        if (dashed) pen.DashStyle = new DashStyle([2, 2], 0);
+        pen.Freeze();
+        return pen;
+    }
 
     /// <summary>Replace the plotted data (null clears) and repaint.</summary>
     public void SetData(EntropyData? data)
@@ -113,27 +124,25 @@ public sealed class EntropyView : FrameworkElement
         topGeo.Freeze();
 
         // Gridlines + Y labels at 0/2/4/6/8 (over the fill so they read).
-        var gridPen = new Pen(Palette.Surface2Brush, 0.6);
         for (int e = 0; e <= 8; e += 2)
         {
             double y = plotB - (e / 8.0) * plotH;
-            dc.DrawLine(gridPen, new Point(plotL, y), new Point(plotR, y));
+            dc.DrawLine(GridPen, new Point(plotL, y), new Point(plotR, y));
             var ft = new FormattedText(e.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture,
                 FlowDirection.LeftToRight, _typeface, FontSize, Palette.FontMutedBrush, dpi);
             dc.DrawText(ft, new Point(plotL - ft.Width - 4, y - ft.Height / 2));
         }
 
-        dc.DrawGeometry(null, new Pen(Palette.Overlay0Brush, 1), topGeo);   // crisp curve edge
+        dc.DrawGeometry(null, CurvePen, topGeo);   // crisp curve edge
 
         // Section dividers + labels (drawn in file-offset space so they line up with the plot).
-        var divPen = new Pen(Palette.Overlay0Brush, 0.6) { DashStyle = new DashStyle([2, 2], 0) };
         var bounds = d.Bounds;
         for (int i = 0; i < bounds.Count; i++)
         {
             double x = plotL + (double)bounds[i].Start / len * plotW;
             if (x < plotL) x = plotL;
             if (x > plotR) continue;
-            dc.DrawLine(divPen, new Point(x, plotT), new Point(x, plotB));
+            dc.DrawLine(DividerPen, new Point(x, plotT), new Point(x, plotB));
 
             double nextX = i + 1 < bounds.Count ? plotL + (double)bounds[i + 1].Start / len * plotW : plotR;
             double avail = Math.Max(0, Math.Min(nextX, plotR) - x - 3);

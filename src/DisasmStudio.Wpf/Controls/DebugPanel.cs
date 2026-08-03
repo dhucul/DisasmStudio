@@ -180,15 +180,26 @@ public sealed class DebugPanel : Grid
         var callees = new HashSet<ulong>(edges.Values.SelectMany(s => s));
         var roots = edges.Keys.Where(k => !callees.Contains(k)).ToList();
         if (roots.Count == 0) roots = edges.Keys.ToList();
-        foreach (var r in roots.OrderBy(x => x)) _callGraph.Items.Add(BuildNode(r, edges, nameOf, [], 0));
+        int budget = 2_000;
+        foreach (var r in roots.OrderBy(x => x))
+        {
+            if (budget <= 0) break;
+            _callGraph.Items.Add(BuildNode(r, edges, nameOf, [], 0, ref budget));
+        }
     }
 
-    private static TreeViewItem BuildNode(ulong va, Dictionary<ulong, HashSet<ulong>> edges, Func<ulong, string> nameOf, HashSet<ulong> path, int depth)
+    private static TreeViewItem BuildNode(ulong va, Dictionary<ulong, HashSet<ulong>> edges,
+        Func<ulong, string> nameOf, HashSet<ulong> path, int depth, ref int budget)
     {
+        budget--;
         var item = new TreeViewItem { Header = nameOf(va), Tag = va };
         if (depth < 12 && path.Add(va) && edges.TryGetValue(va, out var callees))
         {
-            foreach (var c in callees.OrderBy(x => x)) item.Items.Add(BuildNode(c, edges, nameOf, path, depth + 1));
+            foreach (var c in callees.OrderBy(x => x))
+            {
+                if (budget <= 0) { item.Items.Add(new TreeViewItem { Header = "… node limit reached" }); break; }
+                item.Items.Add(BuildNode(c, edges, nameOf, path, depth + 1, ref budget));
+            }
             path.Remove(va);
         }
         return item;

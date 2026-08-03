@@ -16,6 +16,10 @@ namespace DisasmStudio.ManagedDbgHost;
 /// </summary>
 internal sealed class ManagedDebugEngine
 {
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+    private const uint ProcessTerminate = 0x0001;
     private readonly Action<MdbgEvent> _emit;
     private readonly DbgShim _dbgshim;
 
@@ -32,6 +36,7 @@ internal sealed class ManagedDebugEngine
     private CorDebugThread? _stoppedThread;
 
     private readonly Dictionary<string, CorDebugModule> _modules = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<object, MetaDataImport> _metadataImports = new(ReferenceEqualityComparer.Instance);
     private readonly List<BpLoc> _pending = [];                          // breakpoints not yet armed (module not loaded)
     private readonly Dictionary<int, CorDebugFunctionBreakpoint> _armed = [];   // id -> live breakpoint
     private readonly HashSet<int> _cancelledBpIds = [];
@@ -211,6 +216,11 @@ internal sealed class ManagedDebugEngine
             _emit(new MdbgEvent { Ev = Mdbg.Error, Message = "ELEVATION_REQUIRED" });
             return;
         }
+        finally
+        {
+            if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
+            if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+        }
 
         _pid = _process.Id;
         try { _osProc = Process.GetProcessById(_pid); } catch { /* best-effort for exit code */ }
@@ -319,7 +329,7 @@ internal sealed class ManagedDebugEngine
     /// exception-stop display — so the user sees e.g. "System.IO.FileNotFoundException: …" instead of a bare
     /// method token. Reads the exception object's exact type from its own module's metadata and walks the base
     /// chain to read System.Exception's private <c>_message</c>. Any failure degrades to the type name, then null.</summary>
-    private static string? DescribeException(CorDebugThread thread)
+    private string? DescribeException(CorDebugThread thread)
     {
         CorDebugObjectValue? ex = TryGetExceptionObject(thread);
         if (ex is null) return null;
@@ -353,7 +363,7 @@ internal sealed class ManagedDebugEngine
 
     /// <summary>Read System.Exception._message off the object. It's declared on System.Exception (mscorlib /
     /// CoreLib), so walk the exact-type base chain — each level carries its own module — until one declares it.</summary>
-    private static string? ReadExceptionMessage(CorDebugObjectValue ex)
+    private string? ReadExceptionMessage(CorDebugObjectValue ex)
     {
         CorDebugType? t; try { t = ex.ExactType; } catch { return null; }
         for (; t is not null; t = SafeBase(t))
@@ -372,8 +382,17 @@ internal sealed class ManagedDebugEngine
 
     private static CorDebugType? SafeBase(CorDebugType t) { try { return t.Base; } catch { return null; } }
 
-    private static MetaDataImport ImportOf(CorDebugModule module) =>
-        new((IMetaDataImport)module.GetMetaDataInterface(typeof(IMetaDataImport).GUID));
+    private MetaDataImport ImportOf(CorDebugModule module)
+    {
+        object key = module.Raw;
+        lock (_gate)
+        {
+            if (_metadataImports.TryGetValue(key, out var existing)) return existing;
+            var created = new MetaDataImport((IMetaDataImport)module.GetMetaDataInterface(typeof(IMetaDataImport).GUID));
+            _metadataImports[key] = created;
+            return created;
+        }
+    }
 
     /// <summary>Token of the named field declared directly on <paramref name="td"/>, or 0 if it has none.</summary>
     private static int FindField(MetaDataImport mdi, mdTypeDef td, string name)
@@ -538,7 +557,12 @@ internal sealed class ManagedDebugEngine
     /// (so <see cref="_process"/> is null and Terminate/Detach are no-ops).</summary>
     private void KillTarget()
     {
-        try { if (_osProc is { HasExited: false }) _osProc.Kill(); } catch { }
+        try { if (_osProc is { HasExited: false }) { _osProc.Kill(); return; } } catch { }
+        if (_pid == 0) return;
+        IntPtr process = OpenProcess(ProcessTerminate, false, _pid);
+        if (process == IntPtr.Zero) return;
+        try { TerminateProcess(process, 1); }
+        finally { CloseHandle(process); }
     }
 
     // ---- stack / locals snapshot ----

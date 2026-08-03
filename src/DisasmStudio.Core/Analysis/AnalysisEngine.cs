@@ -79,6 +79,7 @@ public static class AnalysisEngine
         var thunks = new Dictionary<ulong, string>();               // jmp [iat] thunk VA → import name
         var indirectJmps = new List<ulong>();                       // candidate switch dispatchers
         bool capped = false;
+        long sweepAttempts = 0;
 
         foreach (var sec in image.Sections)
         {
@@ -91,12 +92,13 @@ public static class AnalysisEngine
 
             while (va < end)
             {
-                if ((sweepIndex.Count & 0x3FFFF) == 0 && token.IsCancellationRequested)
+                sweepAttempts++;
+                if ((sweepAttempts & 0xFFFF) == 0 && token.IsCancellationRequested)
                 {
                     warnings.Add("Analysis cancelled — partial result.");
                     goto done;
                 }
-                if (sweepIndex.Count >= MaxInstructions) { capped = true; goto done; }
+                if (sweepAttempts > MaxInstructions) { capped = true; goto done; }
 
                 if (!dis.TryDecodeAt(va, out var instr)) { va++; continue; }
                 sweepIndex.Add(va);

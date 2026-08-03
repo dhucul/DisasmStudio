@@ -591,13 +591,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private ulong ToStatic(ulong live) => LiveSlide >= 0
-        ? checked(live - (ulong)LiveSlide)
-        : checked(live + (ulong)(-(LiveSlide + 1)) + 1);
+    private ulong ToStatic(ulong live) => unchecked(live - (ulong)LiveSlide);
 
-    private ulong ToLive(ulong stat) => LiveSlide >= 0
-        ? checked(stat + (ulong)LiveSlide)
-        : checked(stat - ((ulong)(-(LiveSlide + 1)) + 1));
+    private ulong ToLive(ulong stat) => unchecked(stat + (ulong)LiveSlide);
 
     /// <summary>The decoder to lift/emulate/export with: the live one while the view shows a running process
     /// (reads its memory), else null so the default file-backed decoder is used. Same rule as the decompiler view.</summary>
@@ -2188,8 +2184,14 @@ public partial class MainWindow : Window
     private void OnExceptions(object sender, RoutedEventArgs e)
     {
         if (ExceptionDialog.Show(this, _exceptionFilter) is not { } edited) return;
+        try { ExceptionStore.Save(edited); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "The exception policy could not be saved.\n\n" + ex.Message,
+                "Save exception policy", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         _exceptionFilter = edited;
-        ExceptionStore.Save(edited);
         if (_dbg is not null) _dbg.Engine.ExceptionFilter = edited;   // atomic reference swap; in-flight Decide() finishes on the old one
     }
 
@@ -2244,7 +2246,7 @@ public partial class MainWindow : Window
     {
         // Arming breakpoints writes the debuggee's code pages; that's only safe while it is frozen at a stop
         // (writing into a running process can corrupt it). Require a stop before starting a capture.
-        if (_dbg is not { IsStopped: true }) { StatusText.Text = "Pause the debuggee before starting a capture."; return; }
+        if (_dbg is not { IsStopped: true } debug) { StatusText.Text = "Pause the debuggee before starting a capture."; return; }
 
         // Choose where the capture log is written (defaults to the last path, then ~/funcap.txt).
         string defaultPath = _captureLogPath ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "funcap.txt");
@@ -2257,6 +2259,11 @@ public partial class MainWindow : Window
             OverwritePrompt = false,   // the log is meant to be overwritten; the user already picked the file
         };
         if (dlg.ShowDialog(this) != true) return;   // cancelled — don't start a capture
+        if (!ReferenceEquals(_dbg, debug) || !debug.IsStopped)
+        {
+            StatusText.Text = "The debug session ended or resumed while the capture dialog was open.";
+            return;
+        }
         string log = _captureLogPath = dlg.FileName;
 
         // Read the capture-option checkboxes (settings — they hold state, they don't trigger anything).
@@ -2264,7 +2271,7 @@ public partial class MainWindow : Window
         bool argsOnly = RetCheck.IsChecked != true;
         bool annotate = DerefCheck.IsChecked == true;
 
-        var cap = _dbg!.StartCapture(funcVa, log, once, argsOnly, annotate);
+        var cap = debug.StartCapture(funcVa, log, once, argsOnly, annotate);
         if (cap is null) { StatusText.Text = "Capture needs the program stopped at least once first."; return; }
 
         _captureEdges = -1; _captureGraphBuiltAt = 0; _captureCommented.Clear();
@@ -2846,6 +2853,7 @@ public partial class MainWindow : Window
 
     private async Task LoadProject(string path, bool transient = false, string? expectedJsonSha256 = null)
     {
+        if (!CanReplaceDocument("Open project")) return;
         if (!ConfirmDiscardSessionChanges()) return;
 
         ProjectFile proj;
@@ -3260,6 +3268,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!CanReplaceDocument("Open")) return;
         if (!ConfirmDiscardSessionChanges()) return;
         SignatureLibrary.Reload();   // re-scan signatures/*.sig so newly-added files apply to this binary
         IBinaryImage image;
@@ -3485,6 +3494,14 @@ public partial class MainWindow : Window
             "Unsaved session", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
     }
 
+    private bool CanReplaceDocument(string title)
+    {
+        if (_dbg is null && _mdbg is null) return true;
+        MessageBox.Show(this, "Stop the current debug session before opening another file.", title,
+            MessageBoxButton.OK, MessageBoxImage.Information);
+        return false;
+    }
+
     protected override void OnClosing(CancelEventArgs e)
     {
         if (!e.Cancel && !_closingForElevationHandoff && !ConfirmDiscardSessionChanges()) e.Cancel = true;
@@ -3496,6 +3513,10 @@ public partial class MainWindow : Window
         base.OnClosed(e);
         CancelStaticStringRefresh();
         _cts?.Cancel();
+        _captureTimer?.Stop();
+        _captureFlushTimer?.Dispose();
+        _captureFlushTimer = null;
+        try { _dbg?.AbortCapture(); } catch { }
         try
         {
             _dbg?.Engine.Stop();
@@ -3716,17 +3737,19 @@ public partial class MainWindow : Window
     }
 
     // ---- hex byte search (Ctrl+F on the Hex tab; F3 / Shift+F3 to repeat) ----
-    private void HexFind()
+    private async void HexFind()
     {
         if (_image is null) return;
         if (Dialogs.AskSearchPattern(this) is not { } q) return;
-        ShowFindResult(Hex.Search(q.Pattern, q.Mask, forward: true), q.Display);
+        try { ShowFindResult(await Hex.Search(q.Pattern, q.Mask, forward: true), q.Display); }
+        catch (OperationCanceledException) { }
     }
 
-    private void HexFindAgain(bool prev)
+    private async void HexFindAgain(bool prev)
     {
         if (_image is null) return;
-        ShowFindResult(Hex.SearchAgain(forward: !prev), null);
+        try { ShowFindResult(await Hex.SearchAgain(forward: !prev), null); }
+        catch (OperationCanceledException) { }
     }
 
     private void ShowFindResult(HexView.FindResult result, string? query)

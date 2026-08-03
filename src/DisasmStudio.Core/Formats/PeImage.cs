@@ -191,7 +191,7 @@ public sealed class PeImage : IBinaryImage, IDisposable
     private ushort Machine => _f.ReadU16(FileHeader + 0);
     private ushort NumberOfSections => _f.ReadU16(FileHeader + 2);
     private ushort SizeOfOptionalHeader => _f.ReadU16(FileHeader + 16);
-    private uint SizeOfHeaders => _f.ReadU32(OptHeader + 60);
+    private uint SizeOfHeaders => Math.Min(_f.ReadU32(OptHeader + 60), (uint)_f.Length);
     private uint NumberOfRvaAndSizes => _f.ReadU32(OptHeader + (Is64Bit ? 108 : 92));
     private int DataDirBase => OptHeader + (Is64Bit ? 112 : 96);
     private int SectionTableOffset => OptHeader + SizeOfOptionalHeader;
@@ -281,7 +281,7 @@ public sealed class PeImage : IBinaryImage, IDisposable
         int descOff = RvaToOffset(dirRva);
         if (descOff < 0) return;
 
-        int maxDescriptors = (int)Math.Min(dirSize / (uint)descSize, int.MaxValue);
+        int maxDescriptors = (int)Math.Min(dirSize / (uint)descSize, 65_536u);
         for (int d = 0; d < maxDescriptors; d++)
         {
             int b = descOff + d * descSize;
@@ -325,7 +325,7 @@ public sealed class PeImage : IBinaryImage, IDisposable
         int ptr = PointerSize;
         ulong ordinalFlag = Is64Bit ? 0x8000_0000_0000_0000UL : 0x8000_0000UL;
 
-        for (int i = 0; ; i++)
+        for (int i = 0; i < 65_536 && _imports.Count < 500_000; i++)
         {
             int thunkOff = intOff + i * ptr;
             if (thunkOff + ptr > _f.Length) break;

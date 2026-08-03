@@ -314,7 +314,12 @@ internal sealed class UnpackerDialog : Window
         var session = new UnpackSession(_target, options);
         _session = session;
         _cts = new CancellationTokenSource();
-        session.Progress += line => Dispatcher.BeginInvoke(() => Append(line));
+        void OnProgress(string line)
+        {
+            try { Dispatcher.BeginInvoke(() => Append(line)); }
+            catch (InvalidOperationException) { }
+        }
+        session.Progress += OnProgress;
 
         UnpackResult result;
         try { result = await session.RunAsync().WaitAsync(_cts.Token); }
@@ -326,9 +331,17 @@ internal sealed class UnpackerDialog : Window
             SetInputsEnabled(true);
             return;
         }
-        catch (Exception ex) { Append("ERROR: " + ex.Message); _running = false; SetInputsEnabled(true); return; }
+        catch (Exception ex)
+        {
+            session.Cancel();
+            Append("ERROR: " + ex.Message);
+            _running = false;
+            SetInputsEnabled(true);
+            return;
+        }
         finally
         {
+            session.Progress -= OnProgress;
             _session = null;
             _cts.Dispose();
             _cts = null;

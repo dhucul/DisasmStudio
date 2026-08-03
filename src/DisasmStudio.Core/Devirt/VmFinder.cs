@@ -92,13 +92,13 @@ public static class VmFinder
 
             while (va < end && scanned < MaxBroadInstructions)
             {
+                scanned++;
                 if (!dis.TryDecodeAt(va, out var ins) || ins.Length <= 0)
                 {
                     va++;
                     continue;
                 }
 
-                scanned++;
                 window.Enqueue(new TraceInsn(va, ins));
                 while (window.Count > MaxScan) window.Dequeue();
 

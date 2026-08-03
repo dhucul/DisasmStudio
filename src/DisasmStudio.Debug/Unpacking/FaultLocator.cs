@@ -44,7 +44,8 @@ public static class FaultLocator
         uint exitCode = 0;
         bool exited = false;
         ulong imageBase = 0;
-        using var done = new ManualResetEventSlim(false);
+        // Debugger callbacks can outlive this method because Stop is asynchronous.
+        var done = new ManualResetEventSlim(false);
 
         eng.ExceptionObserved += e =>
         {
@@ -55,10 +56,16 @@ public static class FaultLocator
         eng.Stopped += stop =>
         {
             if (imageBase == 0) imageBase = eng.ImageBase;    // first stop: the image is mapped
-            if (stop.Reason == StopReason.Exception) { done.Set(); return; }
+            if (stop.Reason == StopReason.Exception) { TrySignal(); return; }
             try { eng.Go(); } catch { /* race with teardown */ }
         };
-        eng.Exited += code => { exitCode = (uint)code; exited = true; done.Set(); };
+        eng.Exited += code => { exitCode = (uint)code; exited = true; TrySignal(); };
+
+        void TrySignal()
+        {
+            try { done.Set(); }
+            catch (ObjectDisposedException) { }
+        }
 
         Log($"Launching {Path.GetFileName(path)} under the debugger (hide layer {(hideFromDebugger ? "on" : "off")}" +
             $"{(sandbox ? ", job-sandboxed" : "")})…");

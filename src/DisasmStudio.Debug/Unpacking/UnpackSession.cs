@@ -30,6 +30,7 @@ public sealed record RunFreeProbeSnapshot(string Label, string Path, string? Hot
 /// </summary>
 public sealed class UnpackSession
 {
+    private const int MaxProbeFiles = 6;
     private readonly string _target;
     private readonly UnpackOptions _opt;
     private readonly DebuggerEngine _eng = new();
@@ -37,7 +38,7 @@ public sealed class UnpackSession
     private readonly TaskCompletionSource<UnpackResult> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _engineCompleted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly StringBuilder _log = new();
-    private bool _done;
+    private volatile bool _done;
     private bool _first = true;
     private FaultSnapshot? _lastFault;
     private string? _faultDumpPath;
@@ -87,7 +88,6 @@ public sealed class UnpackSession
     {
         if (_opt.Strategy != OepMethod.RunFree) return;
         if (System.Threading.Interlocked.Exchange(ref _runFreeLiveStarted, 1) != 0) return;
-        DumpRunFreeProbe("live_resume");
         StartRunFreeLiveProbes();
     }
 
@@ -230,7 +230,7 @@ public sealed class UnpackSession
             else await System.Threading.Tasks.Task.Yield();
             last = ms;
             if (_done) return;
-            DumpRunFreeProbe($"live{Math.Max(0, (int)sw.ElapsedMilliseconds)}ms");
+            RequestRunFreePause(1, $"live{Math.Max(0, (int)sw.ElapsedMilliseconds)}ms");
         }
     });
 
@@ -294,7 +294,15 @@ public sealed class UnpackSession
                 ? ""
                 : $" hottest exec section '{hot.Name}' entropy {hot.Entropy:F2}, nonzero {hot.NonZero:F1}%.";
             lock (_runFreeProbes)
+            {
                 _runFreeProbes.Add(new RunFreeProbeSnapshot(label, path, hot.Name, hot.Entropy, hot.NonZero));
+                while (_runFreeProbes.Count > MaxProbeFiles)
+                {
+                    string oldPath = _runFreeProbes[0].Path;
+                    _runFreeProbes.RemoveAt(0);
+                    try { File.Delete(oldPath); } catch { }
+                }
+            }
             Report($"Run-free probe {label}: {sizeOfImage:X} bytes -> {path}.{hotText}");
         }
         catch (Exception ex)

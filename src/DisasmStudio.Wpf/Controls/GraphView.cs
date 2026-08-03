@@ -22,6 +22,31 @@ public sealed class GraphView : FrameworkElement
     private readonly List<BasicBlock> _blocks = [];
     private readonly Dictionary<ulong, BasicBlock> _byStart = [];
     private readonly Dictionary<ulong, List<Line>> _lines = [];
+    private readonly Dictionary<(ulong From, ulong To), StreamGeometry> _edgeGeometry = [];
+
+    private static readonly Pen TakenEdgePen = FrozenPen(SyntaxTheme.EdgeTaken, 1.4);
+    private static readonly Pen RejectedEdgePen = FrozenPen(Palette.RedBrush, 1.4);
+    private static readonly Pen JumpEdgePen = FrozenPen(SyntaxTheme.EdgeJump, 1.4);
+    private static readonly Pen SwitchEdgePen = FrozenPen(SyntaxTheme.EdgeSwitch, 1.4);
+    private static readonly Pen FallEdgePen = FrozenPen(SyntaxTheme.EdgeFall, 1.4);
+    private static readonly Pen CurrentBlockPen = FrozenPen(SyntaxTheme.FuncName, 2);
+    private static readonly Pen BlockPen = FrozenPen(SyntaxTheme.BlockBorder, 1);
+
+    private static Pen FrozenPen(Brush brush, double width)
+    {
+        var pen = new Pen(brush, width);
+        pen.Freeze();
+        return pen;
+    }
+
+    private static Pen EdgePen(Brush brush)
+    {
+        if (ReferenceEquals(brush, SyntaxTheme.EdgeTaken)) return TakenEdgePen;
+        if (ReferenceEquals(brush, Palette.RedBrush)) return RejectedEdgePen;
+        if (ReferenceEquals(brush, SyntaxTheme.EdgeJump)) return JumpEdgePen;
+        if (ReferenceEquals(brush, SyntaxTheme.EdgeSwitch)) return SwitchEdgePen;
+        return FallEdgePen;
+    }
 
     private double _scale = 1.0;
     private Vector _offset;
@@ -153,6 +178,7 @@ public sealed class GraphView : FrameworkElement
         _blocks.Clear();
         _byStart.Clear();
         _lines.Clear();
+        _edgeGeometry.Clear();
         _selVa = null;
         _menuVa = null;
         _blocks.AddRange(function.Blocks);
@@ -214,6 +240,7 @@ public sealed class GraphView : FrameworkElement
 
     public void Clear()
     {
+        _result = null;
         _function = null;
         _decoder = null;
         _ipVa = null;
@@ -223,6 +250,7 @@ public sealed class GraphView : FrameworkElement
         _blocks.Clear();
         _byStart.Clear();
         _lines.Clear();
+        _edgeGeometry.Clear();
         InvalidateVisual();
     }
 
@@ -289,6 +317,7 @@ public sealed class GraphView : FrameworkElement
     // ---- layout (simple BFS layering) ----
     private void Layout()
     {
+        _edgeGeometry.Clear();
         if (_blocks.Count == 0 || _function is null) return;
 
         // Size each block from its lines.
@@ -386,18 +415,27 @@ public sealed class GraphView : FrameworkElement
                         EdgeKind.Switch => SyntaxTheme.EdgeSwitch,
                         _ => SyntaxTheme.EdgeFall,
                     };
-                var pen = new Pen(brush, 1.4);
-                double midY = ty > sy ? (sy + ty) / 2 : sy + 24;
-                var fig = new PathFigure { StartPoint = new Point(sx, sy) };
-                fig.Segments.Add(new LineSegment(new Point(sx, midY), true));
-                fig.Segments.Add(new LineSegment(new Point(tx, midY), true));
-                fig.Segments.Add(new LineSegment(new Point(tx, ty), true));
-                var geo = new PathGeometry();
-                geo.Figures.Add(fig);
+                var pen = EdgePen(brush);
+                var key = (b.Start, e.ToBlockStart);
+                if (!_edgeGeometry.TryGetValue(key, out var geo))
+                {
+                    double midY = ty > sy ? (sy + ty) / 2 : sy + 24;
+                    geo = new StreamGeometry();
+                    using (var ctx = geo.Open())
+                    {
+                        ctx.BeginFigure(new Point(sx, sy), false, false);
+                        ctx.LineTo(new Point(sx, midY), true, false);
+                        ctx.LineTo(new Point(tx, midY), true, false);
+                        ctx.LineTo(new Point(tx, ty), true, false);
+                        ctx.BeginFigure(new Point(tx, ty), false, false);
+                        ctx.LineTo(new Point(tx - 4, ty - 6), true, false);
+                        ctx.BeginFigure(new Point(tx, ty), false, false);
+                        ctx.LineTo(new Point(tx + 4, ty - 6), true, false);
+                    }
+                    geo.Freeze();
+                    _edgeGeometry[key] = geo;
+                }
                 dc.DrawGeometry(null, pen, geo);
-                // Arrowhead into the target.
-                dc.DrawLine(pen, new Point(tx, ty), new Point(tx - 4, ty - 6));
-                dc.DrawLine(pen, new Point(tx, ty), new Point(tx + 4, ty - 6));
             }
         }
     }
@@ -406,7 +444,7 @@ public sealed class GraphView : FrameworkElement
     {
         var rect = new Rect(b.X, b.Y, b.Width, b.Height);
         bool isIpBlock = _ipVa is { } ip && b.Start <= ip && ip < b.End;
-        var border = isIpBlock ? new Pen(SyntaxTheme.FuncName, 2) : new Pen(SyntaxTheme.BlockBorder, 1);
+        var border = isIpBlock ? CurrentBlockPen : BlockPen;
         dc.DrawRoundedRectangle(SyntaxTheme.BlockBg, border, rect, 5, 5);
         dc.DrawRoundedRectangle(SyntaxTheme.BlockHeader, null, new Rect(b.X, b.Y, b.Width, HeaderH), 5, 5);
 

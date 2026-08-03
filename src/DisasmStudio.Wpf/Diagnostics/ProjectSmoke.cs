@@ -139,6 +139,14 @@ internal static class ProjectSmoke
             emptyBack.Breakpoints is null && emptyBack.Trace is null && emptyBack.Patches is null
             && emptyBack.JumpAssumptions is null && emptyBack.ManagedBreakpoints is null && emptyBack.DllDebug is null);
 
+        bool Rejected(string json)
+        {
+            try { ProjectFile.FromJson(json); return false; }
+            catch (InvalidDataException) { return true; }
+        }
+        Check("missing Version is rejected", Rejected("{\"BinaryPath\":\"x.exe\",\"Format\":\"PE\"}"));
+        Check("unrelated JSON object is rejected", Rejected("{\"Version\":10,\"hello\":\"world\"}"));
+
         Log(fail == 0 ? $"All {total} checks passed." : $"{fail}/{total} checks FAILED.");
 
         try

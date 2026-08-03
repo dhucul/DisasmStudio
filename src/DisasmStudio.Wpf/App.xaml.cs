@@ -1,5 +1,7 @@
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Threading;
 using DisasmStudio.Debug;
 using DisasmStudio.Wpf.Diagnostics;
 
@@ -10,9 +12,19 @@ public partial class App : Application
     [DllImport("kernel32.dll")] private static extern bool AttachConsole(int dwProcessId);
     private const int ATTACH_PARENT_PROCESS = -1;
     internal DebugElevationRequest? PendingDebugElevationRequest { get; private set; }
+    private static readonly string CrashLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DisasmStudio", "crash.log");
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += (_, a) =>
+            AppendCrash(a.ExceptionObject as Exception ?? new Exception(a.ExceptionObject?.ToString()));
+        TaskScheduler.UnobservedTaskException += (_, a) =>
+        {
+            AppendCrash(a.Exception);
+            a.SetObserved();
+        };
         // Headless (no-GUI) mode — Ghidra analyzeHeadless-style. When the first arg is a headless verb, run the
         // Core-only command-line front end (attach to the launching terminal, print, exit) and never show a window.
         if (e.Args.Length > 0 && Headless.IsHeadlessVerb(e.Args[0]))
@@ -139,5 +151,23 @@ public partial class App : Application
             PendingDebugElevationRequest = request;
         }
         base.OnStartup(e);   // StartupUri creates MainWindow
+    }
+
+    private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        AppendCrash(e.Exception);
+        MessageBox.Show(e.Exception.ToString(), "DisasmStudio — unexpected error",
+            MessageBoxButton.OK, MessageBoxImage.Error);
+        e.Handled = true;
+    }
+
+    private static void AppendCrash(Exception ex)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(CrashLogPath)!);
+            File.AppendAllText(CrashLogPath, $"[{DateTimeOffset.Now:O}] {ex}{Environment.NewLine}");
+        }
+        catch { }
     }
 }

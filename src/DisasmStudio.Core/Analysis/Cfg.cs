@@ -35,9 +35,13 @@ public sealed class Function
     /// a code pointer that pointed into the middle of an instruction). Set when the CFG is built.</summary>
     public ulong EntryVa { get; private set; }
 
-    public bool BlocksBuilt => _blocks is not null;
-    public IReadOnlyList<BasicBlock> Blocks => _blocks ?? [];
-    internal void SetBlocks(List<BasicBlock> b, ulong entryVa) { _blocks = b; EntryVa = entryVa; }
+    public bool BlocksBuilt => Volatile.Read(ref _blocks) is not null;
+    public IReadOnlyList<BasicBlock> Blocks => Volatile.Read(ref _blocks) ?? [];
+    internal void SetBlocks(List<BasicBlock> b, ulong entryVa)
+    {
+        EntryVa = entryVa;
+        Volatile.Write(ref _blocks, b);
+    }
 
     public override string ToString() => $"{Name} @ {Va:X}";
 }

@@ -62,7 +62,8 @@ public sealed class AnalysisResult
             if (_functions[mid].Va <= va) lo = mid + 1;
             else hi = mid;
         }
-        for (int i = lo - 1; i >= 0; i--)
+        const int MaxCandidates = 16;
+        for (int i = lo - 1; i >= 0 && lo - i <= MaxCandidates; i--)
         {
             var fn = _functions[i];
             try { CfgBuilder.Build(AnalysisImage, fn, JumpTables, noReturn: NoReturn); }

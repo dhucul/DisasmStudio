@@ -34,52 +34,54 @@ catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = "engine i
 
 string? line;
 Task? launchTask = null;
-while ((line = reader.ReadLine()) is not null)
+try
 {
-    MdbgCommand? cmd;
-    try { cmd = MdbgJson.FromLine<MdbgCommand>(line); } catch { continue; }
-    if (cmd is null) continue;
-    try
+    while ((line = reader.ReadLine()) is not null)
     {
-        switch (cmd.Cmd)
+        MdbgCommand? cmd;
+        try { cmd = MdbgJson.FromLine<MdbgCommand>(line); } catch { continue; }
+        if (cmd is null) continue;
+        try
         {
-            case Mdbg.Launch:
-                // Launch (register-for-startup + wait + attach) can take seconds; run it off the command-reader
-                // thread so Stop/Quit stay responsive if the target's runtime never starts (e.g. a wrong-runtime target).
-                if (launchTask is not null)
-                {
-                    Emit(new MdbgEvent { Ev = Mdbg.Error, Message = "a managed target has already been launched by this host" });
-                    break;
-                }
-                var lc = cmd;
-                launchTask = Task.Run(() =>
-                {
-                    try { engine.Launch(lc.Target!, lc.Args, lc.Cwd, lc.Breakpoints, lc.Framework); }
-                    catch (Exception ex)
+            switch (cmd.Cmd)
+            {
+                case Mdbg.Launch:
+                    if (launchTask is not null)
                     {
-                        Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message });
-                        Emit(new MdbgEvent { Ev = Mdbg.Exited, Code = Mdbg.LaunchFailedExitCode });
+                        Emit(new MdbgEvent { Ev = Mdbg.Error, Message = "a managed target has already been launched by this host" });
+                        break;
                     }
-                });
-                break;
-            case Mdbg.SetBreakpoint: if (cmd.Bp is not null) engine.SetBreakpoint(cmd.Bp); break;
-            case Mdbg.RemoveBreakpoint: engine.RemoveBreakpoint(cmd.Id); break;
-            case Mdbg.Go: engine.Go(); break;
-            case Mdbg.StepInto: engine.Step(Mdbg.StepInto, cmd.Range); break;
-            case Mdbg.StepOver: engine.Step(Mdbg.StepOver, cmd.Range); break;
-            case Mdbg.StepOut: engine.Step(Mdbg.StepOut, cmd.Range); break;
-            case Mdbg.Pause: engine.Pause(); break;
-            case Mdbg.Stop: engine.Stop(); break;
-            case Mdbg.Detach: engine.Detach(); break;
-            case Mdbg.Quit:
-                engine.Stop();
-                if (launchTask is not null) try { await launchTask.ConfigureAwait(false); } catch { }
-                return 0;   // launch has observed Stop/Detach and resolved its target before the host exits
+                    var lc = cmd;
+                    launchTask = Task.Run(() =>
+                    {
+                        try { engine.Launch(lc.Target!, lc.Args, lc.Cwd, lc.Breakpoints, lc.Framework); }
+                        catch (Exception ex)
+                        {
+                            Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message });
+                            Emit(new MdbgEvent { Ev = Mdbg.Exited, Code = Mdbg.LaunchFailedExitCode });
+                        }
+                    });
+                    break;
+                case Mdbg.SetBreakpoint: if (cmd.Bp is not null) engine.SetBreakpoint(cmd.Bp); break;
+                case Mdbg.RemoveBreakpoint: engine.RemoveBreakpoint(cmd.Id); break;
+                case Mdbg.Go: engine.Go(); break;
+                case Mdbg.StepInto: engine.Step(Mdbg.StepInto, cmd.Range); break;
+                case Mdbg.StepOver: engine.Step(Mdbg.StepOver, cmd.Range); break;
+                case Mdbg.StepOut: engine.Step(Mdbg.StepOut, cmd.Range); break;
+                case Mdbg.Pause: engine.Pause(); break;
+                case Mdbg.Stop: engine.Stop(); break;
+                case Mdbg.Detach: engine.Detach(); break;
+                case Mdbg.Quit: return 0;
+            }
         }
+        catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message }); }
     }
-    catch (Exception ex) { Emit(new MdbgEvent { Ev = Mdbg.Error, Message = ex.Message }); }
+    return 0;
 }
-// Pipe closed (the app went away) — terminate the debuggee so it isn't orphaned. A prior Detach makes this a no-op.
-engine.Stop();
-if (launchTask is not null) try { await launchTask.ConfigureAwait(false); } catch { }
-return 0;
+finally
+{
+    // Pipe errors and normal quits take the same deterministic lifecycle path. A prior Detach makes Stop a no-op
+    // for the target and lets it survive as requested.
+    engine.Stop();
+    if (launchTask is not null) try { await launchTask.ConfigureAwait(false); } catch { }
+}

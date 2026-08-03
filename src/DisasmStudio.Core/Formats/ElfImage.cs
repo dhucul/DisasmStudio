@@ -74,7 +74,7 @@ public sealed class ElfImage : IBinaryImage, IDisposable
         EntryVa = _is64 ? _f.ReadU64(0x18) : _f.ReadU32(0x18);
         ReadSections();
         if (_sections.Count == 0) ReadProgramHeaders();   // stripped: synthesise mapped regions from PT_LOAD
-        ReadSymbols();
+        try { ReadSymbols(); } catch { /* symbols are optional; malformed metadata must not block loading */ }
         try { ReadImports(); } catch { /* imports are best-effort; a malformed PLT must never block load */ }
     }
 
@@ -319,7 +319,7 @@ public sealed class ElfImage : IBinaryImage, IDisposable
             int entSize = sh.entsize > 0 ? (int)sh.entsize : (_is64 ? 24 : 16);
             int n = entSize > 0 ? (int)(sh.size / (ulong)entSize) : 0;
 
-            for (int k = 0; k < n && k < 500_000; k++)
+            for (int k = 0; k < n && k < 500_000 && _symbols.Count < 1_000_000; k++)
             {
                 int e = (int)sh.offset + k * entSize;
                 uint stName; ulong stValue; byte stInfo;

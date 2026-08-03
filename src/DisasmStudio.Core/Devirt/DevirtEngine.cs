@@ -42,9 +42,11 @@ public static class DevirtEngine
         // Decode the VIP byte stream into virtual instructions, following branch targets + fall-through.
         var byVip = new Dictionary<ulong, VInsn>();
         var work = new Queue<ulong>();
+        const int MaxVInsns = 200_000;
         work.Enqueue(entry.FirstVipVa);
         while (work.Count > 0)
         {
+            if (byVip.Count >= MaxVInsns) { partial = true; break; }
             ulong vip = work.Dequeue();
             if (byVip.ContainsKey(vip)) continue;
             var ob = image.ReadBytesAtVa(vip, 1);

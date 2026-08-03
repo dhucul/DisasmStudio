@@ -38,8 +38,15 @@ public static class ManagedResourceExtractor
             catch { continue; }
 
             var kind = Classify(r.Name, raw, out byte[] payload);
-            byte[] captured = payload;   // already inflated for CompressedAssembly
-            list.Add(new ManagedResourceEntry(r.Name, kind, captured.Length, () => captured));
+            int payloadLength = payload.Length;
+            list.Add(new ManagedResourceEntry(r.Name, kind, payloadLength, () =>
+            {
+                using var stream = r.TryOpenStream() ?? throw new InvalidDataException("Resource stream is unavailable.");
+                if (stream.CanSeek) stream.Position = 0;
+                byte[] bytes = ReadAll(stream);
+                Classify(r.Name, bytes, out byte[] ready);
+                return ready;
+            }));
 
             if (kind == ManagedResourceKind.ResourcesBlob)
                 AddInnerResources(list, r.Name, raw);

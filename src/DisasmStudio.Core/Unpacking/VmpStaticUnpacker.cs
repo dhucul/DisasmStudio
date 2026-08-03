@@ -161,11 +161,12 @@ public static class VmpStaticUnpacker
             if (dst >= image.Length)
                 throw new InvalidOperationException($"Block {i}: destination RVA 0x{dst:X} is outside the unpacked image.");
 
-            long outHint = DestSize(pe, dst);
+            int avail = image.Length - (int)dst;
+            long declared = DestSize(pe, dst);
+            long outHint = declared < 0 ? avail : Math.Min(declared, avail);
             byte[] decompressed = LzmaCodec.Decode(
                 props, file, (int)compRaw, file.Length - (int)compRaw, outHint, cancellationToken);
 
-            int avail = image.Length - (int)dst;
             if (decompressed.Length > avail)
                 throw new InvalidDataException($"Block {i} overruns the destination image.");
             int n = decompressed.Length;

@@ -51,6 +51,7 @@ internal sealed class ManagedDebugClient : IDisposable
     private readonly Queue<string> _sendQueue = new();   // buffers commands issued before the pipe connects
     private volatile bool _disposed;
     private volatile bool _sawExit;                       // a real "exited" event arrived (suppress the synthetic one)
+    private volatile bool _detached;
 
     public event Action<MdbgEvent>? EventReceived;
 
@@ -177,7 +178,7 @@ internal sealed class ManagedDebugClient : IDisposable
     public void StepOut() => Send(new MdbgCommand { Cmd = Mdbg.StepOut });
     public void Pause() => Send(new MdbgCommand { Cmd = Mdbg.Pause });
     public void StopTarget() => Send(new MdbgCommand { Cmd = Mdbg.Stop });
-    public void Detach() => Send(new MdbgCommand { Cmd = Mdbg.Detach });
+    public void Detach() { _detached = true; Send(new MdbgCommand { Cmd = Mdbg.Detach }); }
 
     public void Dispose()
     {
@@ -185,8 +186,14 @@ internal sealed class ManagedDebugClient : IDisposable
         _disposed = true;
         try { Send(new MdbgCommand { Cmd = Mdbg.Quit }); } catch { }
         try { _connectCts?.Cancel(); } catch { }
+        try { if (_pipe is { IsConnected: true }) _pipe.WaitForPipeDrain(); } catch { }
         try { _pipe?.Dispose(); } catch { }
-        try { if (_host is { HasExited: false }) { if (!_host.WaitForExit(1500)) _host.Kill(entireProcessTree: true); } } catch { }
+        try
+        {
+            if (_host is { HasExited: false } && !_host.WaitForExit(5000) && !_detached)
+                _host.Kill(entireProcessTree: true);
+        }
+        catch { }
         try { _host?.Dispose(); } catch { }
         try { _connectCts?.Dispose(); } catch { }
     }

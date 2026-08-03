@@ -81,9 +81,11 @@ internal static class Dialogs
         bits.SelectionChanged += (_, _) =>
         {
             if (bits.SelectedIndex != 6) return;
-            userTouchedEntry = false;
+            syncing = true;
             baseBox.Text = "0";
             entryBox.Text = "0";
+            syncing = false;
+            userTouchedEntry = false;
         };
 
         var panel = new StackPanel { Margin = new Thickness(16) };

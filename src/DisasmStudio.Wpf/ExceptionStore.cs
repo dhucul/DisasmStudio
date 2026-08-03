@@ -10,6 +10,7 @@ namespace DisasmStudio.Wpf;
 internal static class ExceptionStore
 {
     private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
+    private static bool _loadFailed;
 
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DisasmStudio", "exceptions.json");
@@ -24,7 +25,11 @@ internal static class ExceptionStore
                 if (f is not null) { UpgradeDefaults(f); return f; }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _loadFailed = true;
+            System.Diagnostics.Debug.WriteLine($"Could not load exception policy '{FilePath}': {ex}");
+        }
         return ExceptionFilter.CreateDefault();   // first run (or unreadable): sensible starter policy
     }
 
@@ -41,11 +46,13 @@ internal static class ExceptionStore
 
     public static void Save(ExceptionFilter filter)
     {
-        try
+        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+        if (_loadFailed && File.Exists(FilePath))
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            AtomicFile.WriteAllText(FilePath, JsonSerializer.Serialize(filter, Opts));
+            string backup = FilePath + ".unreadable.bak";
+            File.Copy(FilePath, backup, overwrite: true);
+            _loadFailed = false;
         }
-        catch { }
+        AtomicFile.WriteAllText(FilePath, JsonSerializer.Serialize(filter, Opts));
     }
 }

@@ -108,7 +108,16 @@ public sealed class ArmLifter : ILifter, IDisposable
                 _flag = default;
                 return;
             case "br":
-                Emit(new AsmStmt { Text = Text(ins) }); _flag = default; return;
+                if (_jumpTables.TryGetValue(va, out var cases))
+                    Emit(new SwitchTermStmt
+                    {
+                        Value = ops.Length > 0 ? Val(ops[0], 8) : new RawExpr("branch_target"),
+                        Cases = cases,
+                        Selectors = cases.Select(c => unchecked((long)c)).ToArray(),
+                    });
+                else Emit(new AsmStmt { Text = Text(ins) });
+                _flag = default;
+                return;
             case "cbz" or "cbnz" when ops.Length >= 2:
             {
                 int w = W(ops[0]);

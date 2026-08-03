@@ -184,7 +184,11 @@ public sealed class Structurer
         {
             if (loop is not null && b == loop.Header && start != b) { seq.Items.Add(new ContinueStmt()); break; }
             if (loop is { HasFollow: true } && b == loop.Follow) { seq.Items.Add(new BreakStmt()); break; }
-            if (stop.Contains(b)) break;                                   // outer scope owns this block
+            if (stop.Contains(b))
+            {
+                if (loop is not null) { seq.Items.Add(new GotoStmt { Target = b }); _labelNeeded.Add(b); }
+                break;
+            }
             if (_emitted.Contains(b)) { seq.Items.Add(new GotoStmt { Target = b }); _labelNeeded.Add(b); break; }
             if (depth > MaxDepth) { seq.Items.Add(new GotoStmt { Target = b }); _labelNeeded.Add(b); break; }
 
@@ -246,7 +250,7 @@ public sealed class Structurer
                 for (int i = 0; i < sw.Cases.Count; i++)
                 {
                     if (!byTarget.TryGetValue(sw.Cases[i], out var vals)) { vals = []; byTarget[sw.Cases[i]] = vals; order.Add(sw.Cases[i]); }
-                    vals.Add(i);
+                    vals.Add(sw.Selectors is { Count: > 0 } selectors && i < selectors.Count ? selectors[i] : i);
                 }
                 foreach (var c in order)
                 {
@@ -307,7 +311,14 @@ public sealed class Structurer
                 var bodyStop = new HashSet<ulong>(stop) { lp.Header };
                 if (lp.HasFollow) bodyStop.Add(lp.Follow);
                 var inner = EmitSeq(inSucc, bodyStop, lp, depth + 1);
-                return new WhileStmt { Va = br.Va, Cond = cond, Body = inner };
+                return new SeqStmt
+                {
+                    Items =
+                    {
+                        new LabelStmt { Target = lp.Header },
+                        new WhileStmt { Va = br.Va, Cond = cond, Body = inner },
+                    }
+                };
             }
         }
 

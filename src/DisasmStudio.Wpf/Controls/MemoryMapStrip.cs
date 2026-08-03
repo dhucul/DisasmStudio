@@ -28,6 +28,14 @@ public sealed class MemoryMapStrip : FrameworkElement
     private readonly Typeface _typeface =
         new(AppFonts.Code, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private const double FontSize = 10.0;
+    private static readonly Pen SelectionPen = CreateSelectionPen();
+
+    private static Pen CreateSelectionPen()
+    {
+        var pen = new Pen(Palette.AccentBrush, 2);
+        pen.Freeze();
+        return pen;
+    }
 
     /// <summary>Raised (with the row index) when a block is clicked; the host navigates + selects the table row.</summary>
     public event Action<int>? RegionActivated;
@@ -56,11 +64,11 @@ public sealed class MemoryMapStrip : FrameworkElement
 
     private static Brush Fill(MemKind k) => k switch
     {
-        MemKind.Code     => Palette.GreenBrush,
+        MemKind.Code => Palette.GreenBrush,
         MemKind.Writable => Palette.PeachBrush,
         MemKind.ReadOnly => Palette.BlueBrush,
-        MemKind.Header   => Palette.Overlay2Brush,
-        _                => Palette.Surface1Brush,   // gap — dim, reads as empty space
+        MemKind.Header => Palette.Overlay2Brush,
+        _ => Palette.Surface1Brush,   // gap — dim, reads as empty space
     };
 
     // Per-row vertical layout for the current height: each block's top + height. Proportional to byte span,
@@ -108,8 +116,6 @@ public sealed class MemoryMapStrip : FrameworkElement
 
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
         var (tops, heights) = Layout(h);
-        var selPen = new Pen(Palette.AccentBrush, 2);
-
         for (int i = 0; i < _rows.Count; i++)
         {
             var row = _rows[i];
@@ -131,7 +137,7 @@ public sealed class MemoryMapStrip : FrameworkElement
             }
 
             if (i == _selected)
-                dc.DrawRectangle(null, selPen, new Rect(1, top + 1, Math.Max(0, w - 2), Math.Max(0, blockH - 2)));
+                dc.DrawRectangle(null, SelectionPen, new Rect(1, top + 1, Math.Max(0, w - 2), Math.Max(0, blockH - 2)));
         }
     }
 
