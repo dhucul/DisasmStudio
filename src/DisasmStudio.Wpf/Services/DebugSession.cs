@@ -124,6 +124,44 @@ public sealed class DebugSession
         catch { return null; }
     }
 
+    /// <summary>Analysis (functions, names/exports, disassembly) of the module — other than the main image — that
+    /// contains <paramref name="va"/>, so the listing can follow the IP into it (e.g. ntdll at the loader break, or
+    /// a called kernel32 export). The module image is dumped from process memory and run through the standard
+    /// analyzer, then cached by module base so a step within the same module is instant. Returns null (also cached)
+    /// when <paramref name="va"/> is in the main image or the module can't be dumped/parsed. Call while stopped
+    /// (the debuggee is frozen at the stop).</summary>
+    public AnalysisResult? ForeignModuleAnalysis(ulong va)
+    {
+        var mod = Engine.ModuleContaining(va);
+        if (mod is null || mod.Base == Engine.ImageBase) return null;   // unknown, or the main image (handled elsewhere)
+        if (_foreignModules.TryGetValue(mod.Base, out var cached)) return cached;   // resolved: a built analysis, or null = gave up
+        AnalysisResult? res = null;
+        try
+        {
+            var bytes = Engine.DumpImage(mod.Base, out _);
+            if (PeMemoryImage.TryLoadFromBytes(bytes, mod.Base, mod.Path, out var img))
+                res = AnalysisEngine.Analyze(img);
+        }
+        catch { res = null; }
+        if (res is not null) { _foreignModules[mod.Base] = res; return res; }   // cache the success — built once per session
+        // Failed: the module may simply not be fully mapped yet (e.g. very early in loader init). Retry on a later
+        // stop up to a small cap, then give up and cache the null so a genuinely un-analyzable module isn't
+        // re-dumped on every step for the rest of the session.
+        int attempts = _foreignAttempts.GetValueOrDefault(mod.Base) + 1;
+        _foreignAttempts[mod.Base] = attempts;
+        if (attempts >= MaxForeignAnalysisAttempts) _foreignModules[mod.Base] = null;
+        return null;
+    }
+
+    /// <summary>Per-session cache of successfully built foreign-module analyses keyed by module base (see
+    /// <see cref="ForeignModuleAnalysis"/>). A cached null means "gave up after <see cref="MaxForeignAnalysisAttempts"/>
+    /// failed attempts" — a definitive miss that stops further re-dumping.</summary>
+    private readonly Dictionary<ulong, AnalysisResult?> _foreignModules = [];
+    /// <summary>Failed-attempt counts per module base, so a module that can't be dumped/parsed yet is retried a few
+    /// times (it may only be mid-initialization) before being cached as a permanent miss.</summary>
+    private readonly Dictionary<ulong, int> _foreignAttempts = [];
+    private const int MaxForeignAnalysisAttempts = 3;
+
     private void OnStoppedUi(StopInfo s)
     {
         // Build the rebased live analysis once the debugged module's base is known. For a launched EXE that is

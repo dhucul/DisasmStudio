@@ -6,6 +6,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Disasm;
+using DisasmStudio.Core.Formats;
 using DisasmStudio.Wpf.Services;
 
 namespace DisasmStudio.Wpf.Controls;
@@ -34,7 +35,13 @@ public sealed class LinearDisassemblyView : Grid
     // listing can collapse to a single header row via the [+]/[−] gutter marker. _hidden holds the hidden
     // display-row ranges for the currently-collapsed regions; it's empty (identity mapping) until you collapse.
     private (ulong Va, long StartLine, long EndLine, string Name)[] _regions = [];
-    private readonly HashSet<ulong> _collapsed = [];
+    private HashSet<ulong> _collapsed = [];   // fold state (region-start VAs) of the image currently shown
+    // Remembered fold state per image, so swapping the shown result — e.g. the debugger following the IP into
+    // another module and back — restores the folds of the image you return to instead of dropping them. LRU-bounded
+    // (MaxRememberedFoldImages) so opening many files, or stepping through many modules, can't retain images forever.
+    private readonly Dictionary<IBinaryImage, HashSet<ulong>> _collapsedByImage = [];
+    private readonly List<IBinaryImage> _collapseLru = [];   // least-recently-used first
+    private const int MaxRememberedFoldImages = 8;
     private (long Start, long End)[] _hidden = [];   // sorted, non-overlapping display-row ranges
 
     private long _topDisplay;       // first visible display line
@@ -180,9 +187,18 @@ public sealed class LinearDisassemblyView : Grid
     public void SetResult(AnalysisResult? result, IInstructionDecoder? decoder)
     {
         InvalidateArrowCache();
-        // Collapse state is per-document: drop it when the image changes (a new file / the debug swap), but
-        // keep it across a same-image re-analysis (loading or unloading a section) so folds aren't lost.
-        if (!ReferenceEquals(result?.Image, _result?.Image)) _collapsed.Clear();
+        // Collapse state is per-image: on a same-image re-analysis (loading/unloading a section) keep the active
+        // folds; when the image changes (a new file, or the debugger following the IP into another module) stash the
+        // folds of the image we're leaving and restore whatever we last had for the one we're switching to — so a
+        // round-trip back to the main image doesn't lose its folds. A never-seen image starts with none.
+        if (!ReferenceEquals(result?.Image, _result?.Image))
+        {
+            // Recall the image we're switching to first (marks it most-recently-used) so stashing the one we're
+            // leaving can't evict the very folds we're about to restore, then save the outgoing set.
+            var restored = result?.Image is { } entering ? RecallCollapse(entering) : [];
+            if (_result?.Image is { } leaving) RememberCollapse(leaving);
+            _collapsed = restored;
+        }
         _dis?.Dispose();
         _dis = null;
         _result = result;
@@ -199,6 +215,31 @@ public sealed class LinearDisassemblyView : Grid
         }
         ConfigureScroll();
         _surface.InvalidateVisual();
+    }
+
+    /// <summary>Stash the fold state of the image we're switching away from and mark it most-recently-used, evicting
+    /// the least-recently-used image once the remembered set exceeds its cap. Storing the live set reference is safe:
+    /// the image isn't shown again until <see cref="RecallCollapse"/> hands the same set back as the active one.</summary>
+    private void RememberCollapse(IBinaryImage image)
+    {
+        _collapsedByImage[image] = _collapsed;
+        _collapseLru.Remove(image);
+        _collapseLru.Add(image);
+        while (_collapseLru.Count > MaxRememberedFoldImages)
+        {
+            _collapsedByImage.Remove(_collapseLru[0]);
+            _collapseLru.RemoveAt(0);
+        }
+    }
+
+    /// <summary>The remembered fold state for <paramref name="image"/> (marking it most-recently-used), or a fresh
+    /// empty set for an image we haven't shown before.</summary>
+    private HashSet<ulong> RecallCollapse(IBinaryImage image)
+    {
+        if (!_collapsedByImage.TryGetValue(image, out var folds)) return [];
+        _collapseLru.Remove(image);
+        _collapseLru.Add(image);
+        return folds;
     }
 
     /// <summary>Centre the view on a VA and select that instruction.</summary>

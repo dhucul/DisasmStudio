@@ -84,6 +84,10 @@ public partial class MainWindow : Window
     private ExceptionFilter _exceptionFilter = ExceptionStore.Load();   // persisted x64dbg-style exception policy (swapped wholesale on edit)
     private AnalysisResult? _savedResult;   // static result, restored when the debug session ends
     private bool _dbgViewLive;
+    // Base of the module the linear listing is currently following the IP into, or 0 when it shows the main image.
+    // The listing follows the debuggee's IP across modules (into ntdll at the loader break, a called export, …) so
+    // the current-instruction highlight tracks stepping even outside the main image; see FollowIpModule.
+    private ulong _dbgViewForeignBase;
     // Instruction trace (◴ Trace). Single-steps the loaded module from the current stop and records each executed
     // instruction in *static* space (like _pendingBreakpoints) so the tint maps cleanly during a run and persists
     // for post-run inspection. Calls into system DLLs run at full speed (see DebuggerEngine.StartTrace). Nothing is
@@ -812,6 +816,37 @@ public partial class MainWindow : Window
 
     /// <summary>Re-evaluate, from the real live flags, whether the conditional jump at the current IP will be taken,
     /// and cache it for the branch colouring. Cleared unless we're stopped on a flag-based Jcc.</summary>
+    /// <summary>Point the linear listing at whatever module the debuggee's IP is currently in. While the IP is in
+    /// the main image the listing keeps showing the rebased live analysis (full editing/coverage). When it steps
+    /// into another module — ntdll at the loader breakpoint, a called kernel32 export, etc. — the listing swaps to
+    /// that module's own dumped-and-analyzed view (cached per module) so the current-instruction highlight follows
+    /// the step; it swaps back to the main image when the IP returns. Only the listing follows — the hex dump,
+    /// decompiler, breakpoint list and coverage stay bound to the main image. Returns the analysis now displayed
+    /// (for the status name) and whether it is a foreign module.</summary>
+    private (AnalysisResult? Shown, bool Foreign) FollowIpModule(ulong ip)
+    {
+        if (!_dbgViewLive || _dbg is not { } d || d.LiveResult is not { } main)
+        {
+            Linear.SetCurrentIp(ip);
+            return (_result, false);
+        }
+        var mod = d.Engine.ModuleContaining(ip);
+        bool foreign = mod is not null && mod.Base != d.Engine.ImageBase;
+        if (!foreign)
+        {
+            if (_dbgViewForeignBase != 0) { Linear.SetResult(main, d.LiveDecoder); _dbgViewForeignBase = 0; }
+            Linear.SetCurrentIp(ip);
+            return (main, false);
+        }
+        // Foreign module: dump + analyze it (cached) and show its listing. If it can't be analyzed, keep the current
+        // listing but drop the highlight — better than pinning it to a wrong, clamped main-image row.
+        var res = d.ForeignModuleAnalysis(ip);
+        if (res is null) { Linear.SetCurrentIp(null); return (main, true); }
+        if (_dbgViewForeignBase != mod!.Base) { Linear.SetResult(res, d.LiveDecoder); _dbgViewForeignBase = mod.Base; }
+        Linear.SetCurrentIp(ip);
+        return (res, true);
+    }
+
     private void RecomputeCurrentJump()
     {
         _curJump = null;
@@ -1452,7 +1487,7 @@ public partial class MainWindow : Window
         DeferStaticStringRefreshForDebug();
         _debugStartFailure = null;
         _savedResult = _result;
-        _dbgViewLive = false;
+        _dbgViewLive = false; _dbgViewForeignBase = 0;   // fresh session starts on the main image
         _dbg = new DebugSession(Dispatcher, _result);   // _result may be null: attach with no file open
         _dbg.Stopped += OnDbgStopped;
         _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); };   // no continue/step while running
@@ -2382,7 +2417,11 @@ public partial class MainWindow : Window
             }
         }
         DbgRunBtn.Content = "▶ Continue"; DbgRunBtn.IsEnabled = true; SetStepButtons(true);   // Run doubles as Continue (F5) during a session
-        Linear.SetCurrentIp(_dbg.CurrentIp);
+        // Point the listing at the module the IP is in (main image, or a foreign module like ntdll at the loader
+        // break) so the current-instruction highlight follows the step. `shown` is the analysis now displayed (for
+        // the status name); `ipInMain` gates the panes/state that only make sense in the main image.
+        var (shown, ipForeign) = FollowIpModule(_dbg.CurrentIp);
+        bool ipInMain = !ipForeign;
         RecomputeCurrentJump();   // colour the current conditional jump from the live flags (auto, before any toggle)
         Linear.Refresh();
         // Follow-writes: scroll both memory views so the address the current instruction writes to is at the top.
@@ -2403,8 +2442,9 @@ public partial class MainWindow : Window
         if (_coverageEnabled)
         {
             // Record the instruction we stopped on, so a Step (Into/Over/Out) or a breakpoint stop contributes to
-            // the trace too — not only the continuous single-step a Continue drives. Stored in static space.
-            bool added = _coveredInstrs.Add(ToStatic(_dbg.CurrentIp));
+            // the trace too — not only the continuous single-step a Continue drives. Stored in static space, so only
+            // a main-image IP is recorded — ToStatic would mis-map a foreign-module (ntdll) address.
+            bool added = ipInMain && _coveredInstrs.Add(ToStatic(_dbg.CurrentIp));
             if (added) MarkSessionDirty();
             HarvestCoverage();   // repaints (Refresh) when it adds anything
             if (added) { ClearCoverageBtn.IsEnabled = true; Linear.Refresh(); Decompiler.Refresh(); }   // ensure the stepped row paints
@@ -2413,9 +2453,12 @@ public partial class MainWindow : Window
         // Re-scan process memory for strings on every stop except a pure single-step (where it would thrash) —
         // unless the Strings tab is showing, in which case scan then too so stepping updates it live.
         if (_dbg.LastReason != StopReason.Step || StringsTabVisible) RefreshLiveStrings();
-        if (CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp, center: false);   // graph follows RIP too (SetCurrentIp centres it)
-        if (CenterTabs.SelectedIndex == 3) { OpenDecompiler(_dbg.CurrentIp); Decompiler.SetCurrentIp(_dbg.CurrentIp); }   // decompiler follows RIP: reframe + amber IP line
-        string? name = _result?.NameFor(_dbg.CurrentIp);
+        // Graph and decompiler follow the IP only inside the main image — they're built from its analysis and have
+        // nothing to show for a foreign module (ntdll); clear the decompiler's amber IP band while we're out there.
+        if (ipInMain && CenterTabs.SelectedIndex == 1) OpenGraph(_dbg.CurrentIp, center: false);   // graph follows RIP too (SetCurrentIp centres it)
+        if (ipInMain && CenterTabs.SelectedIndex == 3) { OpenDecompiler(_dbg.CurrentIp); Decompiler.SetCurrentIp(_dbg.CurrentIp); }   // decompiler follows RIP: reframe + amber IP line
+        else if (!ipInMain) Decompiler.SetCurrentIp(null);
+        string? name = shown?.NameFor(_dbg.CurrentIp);
         string extra = _dbg.LastReason switch
         {
             StopReason.Exception => $" (code 0x{_dbg.LastExceptionCode:X8})",
@@ -2452,7 +2495,7 @@ public partial class MainWindow : Window
         Decompiler.LiveDecoder = null;   // back to the static file image; the next decompile uses the file decoder
         _curJump = null;   // no live flags now — drop the current-IP jump colour (static what-if marks persist)
         Hex.WriteByteAt = null;
-        _dbg = null; _dbgViewLive = false;   // gutter now reads the static pre-run set again (IsBreakpointAt stays wired)
+        _dbg = null; _dbgViewLive = false; _dbgViewForeignBase = 0;   // gutter now reads the static pre-run set again (IsBreakpointAt stays wired)
         Graph.Clear(); _graphFn = null;
         Debug.SetSession(null);
         DebugDock.Visibility = Visibility.Collapsed;
