@@ -9,7 +9,7 @@
 ;  clutters bin\Release\net10.0-windows\ next to the framework-dependent dev-run exe.)
 
 #define MyAppName "DisasmStudio"
-#define MyAppVersion "2.38.12"
+#define MyAppVersion "2.38.13"
 #define MyAppPublisher "David Hucul"
 #define MyAppExeName "DisasmStudio.exe"
 #define PublishDir "payload"
