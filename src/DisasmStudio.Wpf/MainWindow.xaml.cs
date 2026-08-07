@@ -674,7 +674,7 @@ public partial class MainWindow : Window
         string skipped = r.SkippedBreakpoints > 0 ? $", {r.SkippedBreakpoints} breakpoint hit(s) skipped" : "";
         ulong oep = RefineOep(d, r.Oep);
         string approach = oep != r.Oep ? $" (execution entered the section at {r.Oep:X})" : "";
-        bool looksOk = OepValidator.LooksLikeOep(d.Engine.ReadMemory(oep, 32), d.Engine.Is32);
+        bool looksOk = OepValidator.LooksLikeOep(d.Engine.ReadMemory(oep, 32), d.Engine.Is64);
         string caveat = looksOk ? "" : " — the bytes there don't look like a function prologue, so treat it with suspicion";
         StatusText.Text = $"OEP at {oep:X} via {r.Method}{approach}{skipped}{caveat}. The program is live: step, set breakpoints, or continue.";
 
@@ -705,21 +705,11 @@ public partial class MainWindow : Window
     /// </para></summary>
     private static ulong RefineOep(DebugSession d, ulong oep)
     {
-        const int MaxProbeInstructions = 8;
-        if (OepValidator.LooksLikeOep(d.Engine.ReadMemory(oep, 32), d.Engine.Is32)) return oep;
-        if (d.LiveDecoder is not { } dec) return oep;
         // Never walk out of the section the guard fired in: past its end the bytes belong to something else, and
         // a prologue found there would be a coincidence, not this function's entry.
         var section = d.LiveResult?.Image.SectionAt(oep);
-        ulong va = oep;
-        for (int i = 0; i < MaxProbeInstructions; i++)
-        {
-            if (!dec.TryDecodeAt(va, out var insn) || insn.Length <= 0) break;
-            va += (ulong)insn.Length;
-            if (section is not null && !section.ContainsVa(va)) break;
-            if (OepValidator.LooksLikeOep(d.Engine.ReadMemory(va, 32), d.Engine.Is32)) return va;
-        }
-        return oep;
+        return OepScanner.RefineToPrologue((va, n) => d.Engine.ReadMemory(va, n), oep, d.Engine.Is64,
+                                           section?.EndVa ?? 0);
     }
 
     /// <summary>Rebuild the analysis from the unpacked image now in process memory and swap it into the live view.
@@ -770,17 +760,16 @@ public partial class MainWindow : Window
 
     private async void OnUnpack(object sender, RoutedEventArgs e)
     {
-        if (_image is null) { MessageBox.Show(this, "Open a packed binary first.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE executables can be unpacked.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (_image.IsDll) { MessageBox.Show(this, "The unpacker targets EXEs; packed DLLs aren't supported yet.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        if (_dbg is not null) { MessageBox.Show(this, "Stop the current debug session before unpacking.", "Unpack", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_image is null) { Dialogs.ShowNotice(this, "Unpack", "No binary is open.", "Open a packed executable first."); return; }
+        if (_image.Format != BinaryFormat.Pe) { Dialogs.ShowNotice(this, "Unpack", "Not a Windows PE.", "Only Windows PE executables can be unpacked."); return; }
+        if (_image.IsDll) { Dialogs.ShowNotice(this, "Unpack", "This is a DLL.", "The unpacker targets EXEs; packed DLLs aren't supported yet."); return; }
+        if (_dbg is not null) { Dialogs.ShowNotice(this, "Unpack", "A debug session is active.", "Stop the current debug session before unpacking — the unpacker launches the target under its own debugger."); return; }
         if (ManagedPeInfo.TryRead(_image) is { } net)
         {
-            MessageBox.Show(this,
-                $"This is a {net.Describe()} managed assembly, not a natively packed binary — there is no native OEP " +
-                "to dump, so native unpacking does not apply. Use the C# tab to decompile it, and the .NET tab to " +
-                "extract embedded resources and assemblies.",
-                "Unpack", MessageBoxButton.OK, MessageBoxImage.Information);
+            Dialogs.ShowNotice(this, "Unpack", $"This is a {net.Describe()} managed assembly.",
+                "It is not a natively packed binary — there is no native OEP to dump, so native unpacking does " +
+                "not apply.\n\nUse the C# tab to decompile it, and the .NET tab to extract embedded resources " +
+                "and assemblies.");
             return;
         }
 
@@ -788,21 +777,27 @@ public partial class MainWindow : Window
         var dlg = new UnpackerDialog(this, _image.FilePath, _image.Bitness, _image.ImageBase, verdict);
         dlg.ShowDialog();
         if (dlg.OpenPath is { } p && File.Exists(p))
-            await LoadFile(p);   // reopen the rebuilt PE through the normal load + analysis pipeline
+            await LoadFile(p, assumeUnpacked: true);   // reopen the rebuilt PE through the normal load + analysis pipeline
     }
 
     private async void OnDumpProcess(object sender, RoutedEventArgs e)
     {
         // Deliberately attaches no debugger: the target is meant to run separately so its anti-debug passes and
         // it self-decrypts. An active debug session here would defeat the point, so require it stopped first.
-        if (_dbg is not null) { MessageBox.Show(this, "Stop the current debug session first. The non-invasive dumper snapshots a separately-running process and never attaches a debugger.", "Dump Process", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (_dbg is not null)
+        {
+            Dialogs.ShowNotice(this, "Dump Process", "A debug session is active.",
+                "Stop it first. The non-invasive dumper snapshots a separately-running process and never " +
+                "attaches a debugger — that is the whole point, so an active debugger here would defeat it.");
+            return;
+        }
 
         ulong preferred = _image?.ImageBase ?? 0;
         string? dir = _image?.FilePath is { Length: > 0 } fp ? Path.GetDirectoryName(fp) : null;
         var dlg = new NonInvasiveDumpDialog(this, preferred, dir);
         dlg.ShowDialog();
         if (dlg.OpenPath is { } p && File.Exists(p))
-            await LoadFile(p);   // reopen the dumped PE through the normal load + analysis pipeline
+            await LoadFile(p, assumeUnpacked: true);   // reopen the dumped PE through the normal load + analysis pipeline
     }
 
     private async void OnDevirt(object sender, RoutedEventArgs e)
@@ -3241,6 +3236,7 @@ public partial class MainWindow : Window
         {
             IncludedDataSections = proj.LoadedSections is { Count: > 0 } ls ? new HashSet<string>(ls) : new HashSet<string>(),
             IncludeHeader = proj.LoadHeader,
+            AssumeUnpacked = proj.AssumeUnpacked,   // a rebuilt image stays exempt from packed narrowing
         };
         // Re-apply saved byte edits to the pristine image BEFORE analysis, so the disassembly decodes the patched
         // bytes and "Save patched binary…" / IsDirty light up. Keyed by file offset — stable for the same binary.
@@ -3385,6 +3381,7 @@ public partial class MainWindow : Window
             CenterTab = CenterTabs.SelectedIndex,
             LoadedSections = _loadOptions.IncludedDataSections.Count > 0 ? _loadOptions.IncludedDataSections.ToList() : null,
             LoadHeader = _loadOptions.IncludeHeader,
+            AssumeUnpacked = _loadOptions.AssumeUnpacked,
             Markup = _markup.IsEmpty ? null : _markup,
             Breakpoints = _pendingBreakpoints.Count > 0 ? new Dictionary<ulong, BpDef>(_pendingBreakpoints) : null,
             Trace = _coveredInstrs.Count > 0 ? _coveredInstrs.ToList() : null,
@@ -3581,7 +3578,11 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private async Task LoadFile(string path)
+    /// <param name="assumeUnpacked">The file was just produced by the unpacker or the process dumper, so it is
+    /// known to hold already-decompressed code. PeBuilder renames the packer's sections, but the structural
+    /// heuristics (an RWX high-entropy section, a loader-stub import set) can still fire on a rebuilt image —
+    /// and narrowing analysis to an entry-stub window is exactly wrong for a file we just unpacked.</param>
+    private async Task LoadFile(string path, bool assumeUnpacked = false)
     {
         // Source/text files (e.g. a saved .cs) open in the read-only source viewer, not the binary/disasm pipeline.
         if (SourceViewerWindow.IsSourceFile(path))
@@ -3644,6 +3645,7 @@ public partial class MainWindow : Window
         // IDA-style: let the user fold optional non-code sections / the PE header into the listing.
         var opts = Dialogs.AskLoadSections(this, image, AnalysisOptions.None);
         if (opts is null) { (image as IDisposable)?.Dispose(); return; }   // cancelled
+        if (assumeUnpacked) opts = opts with { AssumeUnpacked = true };
         var outcome = await StartAnalysis(image, freshMarkup: new Markup(), freshOptions: opts);
         if (outcome != AnalyzeOutcome.Applied) return;
         _projectPath = null;

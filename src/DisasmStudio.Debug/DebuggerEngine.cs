@@ -62,6 +62,12 @@ public sealed partial class DebuggerEngine
     private bool _useJob;
     private IntPtr _job;
     public bool Is32 { get; private set; }
+
+    /// <summary>The debuggee is 64-bit. Exists so callers of the many <c>is64</c>-shaped APIs (the Iced decoder
+    /// factory, <see cref="Unpacking.OepValidator.LooksLikeOep"/>, <see cref="Unpacking.OepScanner"/>) can pass
+    /// a value whose name matches the parameter: handing <see cref="Is32"/> to an <c>is64</c> parameter compiles
+    /// silently and inverts the decode, which is not something the type system will catch for you.</summary>
+    public bool Is64 => !Is32;
     public ulong ImageBase { get; private set; }
     public ulong EntryPoint { get; private set; }
     public IntPtr ProcessHandle => _proc;

@@ -151,6 +151,22 @@ public static class NonInvasiveDumper
                 Log("Using the header entry as the OEP (it already looks like a valid entry, or no packer-stub tail " +
                     "was found). If the target is packed, the rebuilt PE may re-run the stub rather than the original.");
 
+            // A recovered tail-jump target can land on a trampoline or alignment padding a few instructions
+            // ahead of the real prologue. Snap forward, bounded to the containing section: this address becomes
+            // the rebuilt PE's AddressOfEntryPoint and anchors the IAT code-scan below, so a few bytes matter.
+            ulong sectionEnd = 0;
+            foreach (var s in view.Sections)
+            {
+                ulong lo = mainBase + s.VirtualAddress, hi = lo + Math.Max(s.VirtualSize, s.SizeOfRawData);
+                if (mainBase + oepRva >= lo && mainBase + oepRva < hi) { sectionEnd = hi; break; }
+            }
+            ulong snapped = OepScanner.RefineToPrologue(read, mainBase + oepRva, view.Is64, sectionEnd);
+            if (snapped != mainBase + oepRva && snapped > mainBase && snapped < mainBase + sizeOfImage)
+            {
+                Log($"Refined OEP {mainBase + oepRva:X} → {snapped:X} (the prologue starts a few instructions in).");
+                oepRva = (uint)(snapped - mainBase);
+            }
+
             ulong oepVa = mainBase + oepRva;
             var iat = ImportRebuilder.Rebuild(read, resolver, view, mainBase, oepVa);
             foreach (var line in iat.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Log(line);

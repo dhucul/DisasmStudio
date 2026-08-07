@@ -35,6 +35,7 @@ internal static class ProjectSmoke
             CenterTab = 1,
             LoadedSections = [".rdata", ".data"],
             LoadHeader = true,
+            AssumeUnpacked = true,
             Markup = new Markup
             {
                 Names = { [0x401000] = "main", [0x402000] = "decrypt" },
@@ -67,7 +68,7 @@ internal static class ProjectSmoke
         var back = ProjectFile.Load(path);
 
         // ---- base fields ----
-        Check("Version is 10", back.Version == 10);
+        Check("Version is 11", back.Version == 11);
         Check("BinaryPath round-trips", back.BinaryPath == proj.BinaryPath);
         Check("BinarySha256 round-trips", back.BinarySha256 == proj.BinarySha256);
         Check("Mach-O slice offset round-trips", back.MachSliceOffset == 0x123400);
@@ -75,6 +76,7 @@ internal static class ProjectSmoke
         Check("CenterTab round-trips", back.CenterTab == 1);
         Check("LoadedSections round-trips", back.LoadedSections is { Count: 2 } ls && ls[0] == ".rdata" && ls[1] == ".data");
         Check("LoadHeader round-trips", back.LoadHeader);
+        Check("AssumeUnpacked round-trips", back.AssumeUnpacked);
 
         // ---- markup ----
         Check("Markup names", back.Markup?.Names.GetValueOrDefault(0x401000UL) == "main"

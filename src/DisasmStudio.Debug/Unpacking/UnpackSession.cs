@@ -102,6 +102,18 @@ public sealed class UnpackSession
         }
         if (_opt.Strategy == OepMethod.RunFree)
             DumpRunFreeProbe("exit");
+
+        // Last moment the debuggee still exists, so the guards we armed can be re-queried. A guard-based hunt
+        // that never fired is otherwise reported only as "no OEP", which conflates two very different causes:
+        // the program never reached a guarded section, or the stub called VirtualProtect on its own target
+        // section after decompressing and silently restored the execute bit we stripped.
+        try
+        {
+            if (_finder.DiagnoseMissedGuard(_eng) is { } why) Report(why);
+            else if (_eng.GuardedPageCount > 0)
+                Report($"Process exiting with {_eng.GuardedPageCount:N0} guarded page(s) still intact — execution never entered a guarded section.");
+        }
+        catch { /* diagnosis is best-effort; the process is on its way out */ }
     }
 
     private void OnStopped(StopInfo stop)
@@ -377,12 +389,43 @@ public sealed class UnpackSession
         CompleteSuccessfulAfterCleanup(result);
     }
 
+    /// <summary>Exclusive end of the mapped section containing <paramref name="va"/>, or 0 if unknown — the
+    /// bound for OEP refinement, so it can never snap onto an unrelated function past the section's end.</summary>
+    private ulong SectionEndContaining(ulong va)
+    {
+        try
+        {
+            if (!PeView.TryParse(_eng.ReadMemory(_eng.ImageBase, 0x1000), out var view)) return 0;
+            foreach (var s in view.Sections)
+            {
+                ulong lo = _eng.ImageBase + s.VirtualAddress;
+                ulong hi = lo + Math.Max(s.VirtualSize, s.SizeOfRawData);
+                if (va >= lo && va < hi) return hi;
+            }
+        }
+        catch { /* best-effort bound */ }
+        return 0;
+    }
+
     private void CompleteAtOep(ulong oepVa)
     {
         foreach (var line in _finder.Log.Split('\n', StringSplitOptions.RemoveEmptyEntries)) Report(line);
         Report($"OEP reached at {oepVa:X} (method: {_finder.ActiveMethod}).");
 
-        bool confirmed = OepValidator.LooksLikeOep(_eng.ReadMemory(oepVa, 32), _eng.Is32);
+        // The guard breaks on the first instruction fetched in the section, which for some packers is a
+        // trampoline or alignment padding a few instructions ahead of the real prologue. This address is written
+        // into the rebuilt PE's AddressOfEntryPoint, so snapping it forward matters to the artifact, not just to
+        // the report. Bounded to the section containing the candidate; returns it unchanged when nothing better
+        // is found.
+        ulong refined = OepScanner.RefineToPrologue(
+            (va, n) => _eng.ReadMemory(va, n), oepVa, _eng.Is64, SectionEndContaining(oepVa));
+        if (refined != oepVa)
+        {
+            Report($"Refined OEP {oepVa:X} → {refined:X} (execution entered the section at the former; the prologue starts at the latter).");
+            oepVa = refined;
+        }
+
+        bool confirmed = OepValidator.LooksLikeOep(_eng.ReadMemory(oepVa, 32), _eng.Is64);
         Report(confirmed ? "OEP prologue looks valid." : "OEP prologue not recognised (dumping anyway).");
 
         // Dump the frozen image + rebuild the IAT via the shared live-PE pipeline (LivePeDump) — the same code

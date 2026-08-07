@@ -18,7 +18,7 @@ namespace DisasmStudio.Wpf;
 /// </summary>
 public sealed record ProjectFile
 {
-    public int Version { get; init; } = 10;
+    public int Version { get; init; } = 11;
     public long MachSliceOffset { get; init; }   // v8: selected slice in a fat/universal Mach-O (0 for a thin file)
     public string BinaryPath { get; init; } = "";
     public string? BinarySha256 { get; init; }   // v9: pristine backing-file identity before offset-based state is restored
@@ -31,6 +31,11 @@ public sealed record ProjectFile
     public int CenterTab { get; init; }          // active center tab (Linear/Graph/Hex)
     public List<string>? LoadedSections { get; init; }   // v2: non-code sections folded into the listing
     public bool LoadHeader { get; init; }                // v2: PE header folded into the listing
+    /// <summary>v11: the binary is a rebuilt/unpacked image, so packed-image analysis narrowing must stay off.
+    /// Without persisting it, saving a project for an unpacked file and reopening it lets the packer heuristics
+    /// fire again and restrict analysis to an entry-stub window on code that is already decompressed.
+    /// Absent in older projects, which deserialize it as false — the pre-existing behaviour.</summary>
+    public bool AssumeUnpacked { get; init; }
     public Markup? Markup { get; init; }                 // v5: user renames / comments / bookmarks; v6: + user-defined function starts (null on older files)
 
     // v7: live-session state, so reopening a project resumes where you left off. All keyed in STATIC (unslid)
@@ -63,7 +68,7 @@ public sealed record ProjectFile
             || !doc.RootElement.TryGetProperty(nameof(Version), out var version)
             || version.ValueKind != JsonValueKind.Number
             || !version.TryGetInt32(out int v)
-            || v is < 1 or > 10)
+            || v is < 1 or > 11)   // keep in step with Version above, or files this build writes won't reload
             throw new InvalidDataException("Not a valid versioned DisasmStudio project file.");
         var project = JsonSerializer.Deserialize<ProjectFile>(json, Opts)
             ?? throw new InvalidDataException("Not a valid DisasmStudio project file.");

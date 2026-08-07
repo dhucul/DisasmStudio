@@ -537,6 +537,91 @@ public sealed class RegressionTests : IDisposable
         Assert.Equal(imageBase + stubRva, image.EntryVa);   // unchanged for every existing caller
     }
 
+    /// <summary>A reader over a byte block mapped at <paramref name="baseVa"/>, returning [] outside it — the
+    /// short/empty reads a real process gives at the edge of a committed region.</summary>
+    private static MemReader BlockReader(ulong baseVa, byte[] bytes) => (va, n) =>
+    {
+        if (va < baseVa || n <= 0) return [];
+        long off = (long)(va - baseVa);
+        if (off >= bytes.LongLength) return [];
+        int take = (int)Math.Min(n, bytes.LongLength - off);
+        return bytes.AsSpan((int)off, take).ToArray();
+    };
+
+    // push rbp; mov rbp,rsp — what OepValidator recognises as a function prologue.
+    private static readonly byte[] Prologue = [0x55, 0x48, 0x89, 0xE5];
+
+    [Fact]
+    public void RefineToPrologueSnapsPastATrampolineToTheRealEntry()
+    {
+        // Three filler instructions then the prologue: the shape the section guard produces when a packer
+        // lands a few instructions short of the entry point proper.
+        const ulong baseVa = 0x140001000;
+        byte[] code = [0x90, 0x90, 0x90, .. Prologue, 0xC3];
+
+        ulong refined = OepScanner.RefineToPrologue(BlockReader(baseVa, code), baseVa, is64: true);
+
+        Assert.Equal(baseVa + 3, refined);
+    }
+
+    [Fact]
+    public void RefineToPrologueLeavesARealEntryAlone()
+    {
+        const ulong baseVa = 0x140001000;
+        byte[] code = [.. Prologue, 0xC3];
+
+        Assert.Equal(baseVa, OepScanner.RefineToPrologue(BlockReader(baseVa, code), baseVa, is64: true));
+    }
+
+    [Fact]
+    public void RefineToPrologueWillNotCrossTheSectionLimit()
+    {
+        // The prologue sits at +3, but the section ends at +3 — snapping there would be picking up whatever
+        // follows the section, not this function's entry.
+        const ulong baseVa = 0x140001000;
+        byte[] code = [0x90, 0x90, 0x90, .. Prologue, 0xC3];
+
+        ulong refined = OepScanner.RefineToPrologue(BlockReader(baseVa, code), baseVa, is64: true, limit: baseVa + 3);
+
+        Assert.Equal(baseVa, refined);
+    }
+
+    // sub rsp, 28h — a real x64 frame allocation. Decoded as 32-bit the REX prefix splits off as its own
+    // instruction ("dec eax"), so this is one of the byte sequences whose meaning genuinely depends on the mode.
+    private static readonly byte[] X64FrameAlloc = [0x48, 0x83, 0xEC, 0x28];
+
+    [Fact]
+    public void LooksLikeOepHonoursTheBitnessFlag()
+    {
+        // Pins the flag's polarity. Passing a 32-bit-ness value into these is64 parameters compiles silently and
+        // inverts the decode, so the meaning is asserted rather than left to the parameter name.
+        Assert.True(OepValidator.LooksLikeOep(X64FrameAlloc, is64: true));    // sub rsp, 28h
+        Assert.False(OepValidator.LooksLikeOep(X64FrameAlloc, is64: false));  // dec eax — not a prologue
+    }
+
+    [Fact]
+    public void RefineToPrologueDecodesInTheRequestedBitness()
+    {
+        // One filler byte, then an x64 prologue. In 64-bit the walk steps nop -> +1 and accepts. Decoded as
+        // 32-bit the same bytes step nop -> dec eax -> and would accept at +2 instead, so a wrong bitness moves
+        // the answer rather than merely failing — which is what makes it dangerous in a rebuilt PE's entry.
+        const ulong baseVa = 0x140001000;
+        byte[] code = [0x90, .. X64FrameAlloc, 0xC3];
+
+        Assert.Equal(baseVa + 1, OepScanner.RefineToPrologue(BlockReader(baseVa, code), baseVa, is64: true));
+        Assert.Equal(baseVa + 2, OepScanner.RefineToPrologue(BlockReader(baseVa, code), baseVa, is64: false));
+    }
+
+    [Fact]
+    public void RefineToPrologueGivesUpRatherThanInventingAnEntry()
+    {
+        // Nothing prologue-like within the probe window: the candidate must come back untouched.
+        const ulong baseVa = 0x140001000;
+        byte[] code = new byte[64];   // all 0x00 — add [rax], al; never a prologue
+
+        Assert.Equal(baseVa, OepScanner.RefineToPrologue(BlockReader(baseVa, code), baseVa, is64: true));
+    }
+
     [Fact]
     public void PackedAnalysisBoundaryIsUsedByLazyDecompiler()
     {

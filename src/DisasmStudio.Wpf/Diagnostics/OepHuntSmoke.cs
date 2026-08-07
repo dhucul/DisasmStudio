@@ -163,7 +163,7 @@ internal static class OepHuntSmoke
         // cross-section transfer (typically an import thunk), which is not a prologue. Failing here is the
         // correct answer for such a target — it is the signal that this smoke needs a genuinely packed EXE.
         bool prologue = false;
-        try { prologue = OepValidator.LooksLikeOep(eng.ReadMemory(oep, 32), eng.Is32); } catch { }
+        try { prologue = OepValidator.LooksLikeOep(eng.ReadMemory(oep, 32), eng.Is64); } catch { }
         log($"  => prologue recognised: {prologue}"
             + (prologue ? "" : "  (expected on a target that isn't packed — the guard caught an ordinary cross-section jump)"));
 
