@@ -100,6 +100,28 @@ public partial class App : Application
             Shutdown(rc);
             return;
         }
+        // The "run to OEP" hunt driven the way the app drives it — through DebugSession on a real Dispatcher —
+        // to catch an outcome that gets lost between the debug-loop thread and the UI thread.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-oep-session")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int secs = e.Args.Length > 2 && int.TryParse(e.Args[2], out int t) ? t : 25;
+            bool orphan = e.Args.Length > 3 && e.Args[3] == "orphan";
+            int rc = Diagnostics.OepSessionSmoke.Run(e.Args.Length > 1 ? e.Args[1] : null, secs, orphan);
+            Shutdown(rc);
+            return;
+        }
+        // Hidden self-test for the interactive "run to OEP" hunt: launch a packed EXE, stop at the stub entry,
+        // drive OepFinder through the real OepStopRouting policy to the original entry point, and assert the
+        // process is still live and steppable there and that re-analysing the unpacked dump recovers the program.
+        if (e.Args.Length > 0 && e.Args[0] == "--smoke-oep")
+        {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+            int seconds = e.Args.Length > 2 && int.TryParse(e.Args[2], out int s) ? s : 25;
+            int rc = Diagnostics.OepHuntSmoke.Run(e.Args.Length > 1 ? e.Args[1] : null, seconds);
+            Shutdown(rc);
+            return;
+        }
         // Hidden self-test for the Entropy tab's math (EntropyData.Build): build the per-block / per-section
         // entropy profile of a synthetic zero/uniform/constant blob and assert min≈0, max≈8, overall in between.
         if (e.Args.Length > 0 && e.Args[0] == "--smoke-entropy")

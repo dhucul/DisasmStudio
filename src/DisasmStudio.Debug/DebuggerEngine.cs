@@ -1693,6 +1693,24 @@ public sealed partial class DebuggerEngine
 
     public bool HasGuards { get { lock (_lock) return _guarded.Count > 0; } }
 
+    /// <summary>How many pages are currently guarded. Zero after a guard fires (the engine clears them all) or
+    /// if nothing could be re-protected — the two cases a caller must be able to tell apart when a hunt fails.</summary>
+    public int GuardedPageCount { get { lock (_lock) return _guarded.Count; } }
+
+    /// <summary>Whether execute permission is currently absent from the page containing <paramref name="va"/>,
+    /// re-queried from the OS rather than from our own bookkeeping. A packer stub that re-protects its target
+    /// section after decompressing silently undoes a guard, which otherwise looks identical to "the program
+    /// simply never reached the OEP" — this is how a caller detects that.</summary>
+    public bool IsPageNonExecutable(ulong va)
+    {
+        if (_proc == IntPtr.Zero) return false;
+        int mbiSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.MEMORY_BASIC_INFORMATION>();
+        if (Native.VirtualQueryEx(_proc, va, out var mbi, (nuint)mbiSize) == 0) return false;
+        if (mbi.State != Native.MEM_COMMIT) return false;
+        return (mbi.Protect & 0xFF) is not (Native.PAGE_EXECUTE or Native.PAGE_EXECUTE_READ
+            or Native.PAGE_EXECUTE_READWRITE or Native.PAGE_EXECUTE_WRITECOPY);
+    }
+
     /// <summary>Capture the full in-memory image at <paramref name="imageBase"/> as a virtual-address-indexed
     /// buffer (buffer offset == RVA) by reading every committed region across SizeOfImage. Breakpoints are
     /// masked by <see cref="ReadMemory"/>, so the dump is clean. Returns [] if the PE headers can't be parsed.

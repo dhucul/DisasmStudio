@@ -13,14 +13,17 @@ public sealed class PeMemoryImage : IBinaryImage
     private readonly PeView _view;
     private readonly List<Section> _sections;
     private readonly InPlacePatchMap _edits;
+    private readonly ulong? _entryOverride;
 
-    private PeMemoryImage(string path, byte[] bytes, PeView view, ulong? imageBaseOverride)
+    private PeMemoryImage(string path, byte[] bytes, PeView view, ulong? imageBaseOverride,
+                          ulong? entryVaOverride = null)
     {
         FilePath = path;
         _bytes = bytes;
         _edits = new InPlacePatchMap(_bytes);
         _view = view;
         ImageBase = imageBaseOverride is { } b && b != 0 ? b : view.ImageBase;
+        _entryOverride = entryVaOverride is { } e && e != 0 ? e : null;
         _sections = BuildSections(bytes, view, ImageBase);
     }
 
@@ -79,14 +82,18 @@ public sealed class PeMemoryImage : IBinaryImage
 
     /// <summary>Build a memory-image view directly from an in-memory dump (e.g. <c>DebuggerEngine.DumpImage</c>),
     /// with no file on disk. <paramref name="displayPath"/> is what the UI shows as the "file" (the process's
-    /// module path, or a placeholder). Returns false if the bytes aren't a parseable PE.</summary>
-    public static bool TryLoadFromBytes(byte[] bytes, ulong? imageBaseOverride, string displayPath, out PeMemoryImage image)
+    /// module path, or a placeholder). Returns false if the bytes aren't a parseable PE.
+    /// <paramref name="entryVaOverride"/> supplies the real entry point when the dumped headers no longer name
+    /// it — a packed image stopped at its original entry point still has <c>AddressOfEntryPoint</c> pointing at
+    /// the loader stub, so the caller passes the located OEP to seed analysis there instead.</summary>
+    public static bool TryLoadFromBytes(byte[] bytes, ulong? imageBaseOverride, string displayPath,
+                                        out PeMemoryImage image, ulong? entryVaOverride = null)
     {
         image = null!;
         try
         {
             if (bytes is null || bytes.Length == 0 || !PeView.TryParse(bytes, out var view)) return false;
-            image = new PeMemoryImage(displayPath, bytes, view, imageBaseOverride);
+            image = new PeMemoryImage(displayPath, bytes, view, imageBaseOverride, entryVaOverride);
             return true;
         }
         catch { return false; }
@@ -110,7 +117,9 @@ public sealed class PeMemoryImage : IBinaryImage
         _ => "x86",
     };
     public ulong ImageBase { get; }
-    public ulong EntryVa => _view.EntryRva != 0 ? ImageBase + _view.EntryRva : 0;
+    /// <summary>The entry point. When the dump was captured at a located original entry point the caller
+    /// supplies it as an override, because the dumped headers still point at the packer's loader stub.</summary>
+    public ulong EntryVa => _entryOverride ?? (_view.EntryRva != 0 ? ImageBase + _view.EntryRva : 0);
     public bool IsDll => (_view.Characteristics & 0x2000) != 0;
     public IReadOnlyList<Section> Sections => _sections;
     public IReadOnlyList<NamedSymbol> Symbols => [];

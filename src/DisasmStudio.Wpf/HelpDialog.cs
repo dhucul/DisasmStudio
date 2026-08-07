@@ -24,6 +24,7 @@ internal static class HelpDialog
             ("F8", "Step over"),
             ("Shift+F11", "Step out"),
             ("Ctrl+F9", "Continue until the current function returns (stop on its ret)"),
+            ("Ctrl+F10", "Run to OEP: continue past a packer stub and stop at the unpacked program's original entry point, with the process still live (▶◎ To OEP; the button beside it picks the strategy)"),
             ("F2", "Toggle breakpoint on the caret instruction"),
             ("Click the gutter", "Toggle a breakpoint on that instruction (the left margin)"),
             ("Breakpoints panel", "Lists your breakpoints; double-click to jump, tick/untick a row to enable/disable it (kept, not armed), right-click to enable-disable · edit · remove (Delete removes)"),

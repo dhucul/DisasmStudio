@@ -487,6 +487,57 @@ public sealed class RegressionTests : IDisposable
     }
 
     [Fact]
+    public void AssumeUnpackedSkipsEntryStubNarrowing()
+    {
+        // Same packed file as above, but analysed as already-unpacked (the "run to OEP" re-analysis path).
+        // Detection must still report UPX, while the loader-stub restriction is skipped.
+        string path = Write("packed-unpacked.exe", MinimalUpxPe());
+        using var image = PeImage.Load(path);
+
+        AnalysisResult result = AnalysisEngine.Analyze(image, new AnalysisOptions { AssumeUnpacked = true });
+
+        Assert.Same(image, result.Image);
+        Assert.Same(image, result.AnalysisImage);      // NOT narrowed to the stub window
+        Assert.False(result.PackedAnalysisRestricted);
+        Assert.Equal("UPX", result.PackerVerdict?.Name);
+        Assert.Contains(result.Warnings, w => w.Contains("analysed as unpacked", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void MemoryImageEntryOverrideSeedsAnalysisAtTheOep()
+    {
+        // The shape a "run to OEP" dump has: memory layout, headers still naming the packer stub as the entry.
+        const ulong imageBase = 0x140000000UL;
+        const uint oepRva = 0x1000, stubRva = 0x3000;
+        ulong oepVa = imageBase + oepRva;
+
+        Assert.True(PeMemoryImage.TryLoadFromBytes(UnpackedMemoryImagePe(oepRva, stubRva), imageBase,
+            "(unpacked process)", out var image, entryVaOverride: oepVa));
+
+        Assert.Equal(oepVa, image.EntryVa);   // the override wins over AddressOfEntryPoint (the stub)
+
+        AnalysisResult result = AnalysisEngine.Analyze(image, new AnalysisOptions { AssumeUnpacked = true });
+
+        // The override is what seeds naming, recursive descent and the function list.
+        Assert.True(result.Names.TryGetValue(oepVa, out string? entryName));
+        Assert.Equal("start", entryName);
+        Assert.Contains(oepVa, result.FunctionByVa.Keys);
+        Assert.False(result.PackedAnalysisRestricted);
+    }
+
+    [Fact]
+    public void MemoryImageWithoutEntryOverrideStillReportsTheHeaderEntry()
+    {
+        const ulong imageBase = 0x140000000UL;
+        const uint oepRva = 0x1000, stubRva = 0x3000;
+
+        Assert.True(PeMemoryImage.TryLoadFromBytes(UnpackedMemoryImagePe(oepRva, stubRva), imageBase,
+            "(process)", out var image));
+
+        Assert.Equal(imageBase + stubRva, image.EntryVa);   // unchanged for every existing caller
+    }
+
+    [Fact]
     public void PackedAnalysisBoundaryIsUsedByLazyDecompiler()
     {
         string path = Write("packed-jump.exe", MinimalUpxPe(jumpOutsideWindow: true));
@@ -1257,6 +1308,52 @@ public sealed class RegressionTests : IDisposable
         uint rawOffset, uint rawSize, uint characteristics) =>
         PutOriginalSection(
             bytes, offset, name, virtualAddress, virtualSize, rawOffset, rawSize, characteristics);
+
+    /// <summary>A packed PE laid out the way <c>DumpImage</c> produces it (file offset == RVA), with the
+    /// header's entry still pointing at the loader stub in UPX1 and a recovered function prologue at
+    /// <paramref name="oepRva"/> in UPX0 — the shape of an image dumped from a process stopped at its OEP.</summary>
+    private static byte[] UnpackedMemoryImagePe(uint oepRva, uint stubRva)
+    {
+        byte[] pe = new byte[0x4000];
+        pe[0] = (byte)'M';
+        pe[1] = (byte)'Z';
+        Put32(pe, PeConstants.DosLfanewOffset, 0x80);
+        Put32(pe, 0x80, PeConstants.PeSignature);
+        Put16(pe, 0x84, PeConstants.Machine_x64);
+        Put16(pe, 0x86, 2);
+        Put16(pe, 0x94, 0xF0);
+        Put16(pe, 0x96, PeConstants.IMAGE_FILE_EXECUTABLE_IMAGE);
+        int opt = 0x80 + PeConstants.OptHeaderFromSig;
+        Put16(pe, opt, PeConstants.Pe32PlusMagic);
+        Put32(pe, opt + PeConstants.Opt_AddressOfEntryPoint, stubRva);   // the packer stub, not the OEP
+        BitConverter.GetBytes(0x140000000UL).CopyTo(pe, opt + PeConstants.Opt_ImageBase64);
+        Put32(pe, opt + PeConstants.Opt_SectionAlignment, 0x1000);
+        Put32(pe, opt + PeConstants.Opt_FileAlignment, 0x1000);   // == SectionAlignment: a memory layout
+        Put32(pe, opt + PeConstants.Opt_SizeOfImage, 0x4000);
+        Put32(pe, opt + PeConstants.Opt_SizeOfHeaders, 0x1000);
+        Put32(pe, opt + PeConstants.Opt_NumberOfRvaAndSizes64, 16);
+
+        int upx0 = opt + 0xF0;
+        "UPX0"u8.CopyTo(pe.AsSpan(upx0));
+        Put32(pe, upx0 + PeConstants.Sec_VirtualSize, 0x2000);
+        Put32(pe, upx0 + PeConstants.Sec_VirtualAddress, 0x1000);
+        Put32(pe, upx0 + PeConstants.Sec_SizeOfRawData, 0x2000);
+        Put32(pe, upx0 + PeConstants.Sec_PointerToRawData, 0x1000);
+        Put32(pe, upx0 + PeConstants.Sec_Characteristics, 0xE0000080);
+
+        int upx1 = upx0 + 40;
+        "UPX1"u8.CopyTo(pe.AsSpan(upx1));
+        Put32(pe, upx1 + PeConstants.Sec_VirtualSize, 0x1000);
+        Put32(pe, upx1 + PeConstants.Sec_VirtualAddress, 0x3000);
+        Put32(pe, upx1 + PeConstants.Sec_SizeOfRawData, 0x1000);
+        Put32(pe, upx1 + PeConstants.Sec_PointerToRawData, 0x3000);
+        Put32(pe, upx1 + PeConstants.Sec_Characteristics, 0xE0000040);
+
+        // The recovered program at the OEP: push rbp; mov rbp,rsp; xor eax,eax; pop rbp; ret
+        new byte[] { 0x55, 0x48, 0x89, 0xE5, 0x31, 0xC0, 0x5D, 0xC3 }.CopyTo(pe, (int)oepRva);
+        pe[(int)stubRva] = 0xC3;   // the spent loader stub
+        return pe;
+    }
 
     private static byte[] MinimalMappedPe()
     {

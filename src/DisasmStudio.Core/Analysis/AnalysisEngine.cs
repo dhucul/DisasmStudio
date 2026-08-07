@@ -46,7 +46,15 @@ public static class AnalysisEngine
             if (image.Format == BinaryFormat.Pe)
             {
                 packerVerdict = PackerDetector.Detect(image);
-                if (packerVerdict.IsPacked && PackedAnalysisImage.TryCreate(image, out var packedView))
+                if (options.AssumeUnpacked)
+                {
+                    // Captured from process memory at the OEP: the payload is already decompressed in these
+                    // bytes, but the packer's section names and entropy survive the dump and would otherwise
+                    // narrow analysis back onto the loader stub — exactly the code we ran past.
+                    if (packerVerdict.IsPacked)
+                        warnings.Add($"{packerVerdict.Name ?? "Packed"} signature is still present, but the image was analysed as unpacked — the loader-stub restriction was skipped.");
+                }
+                else if (packerVerdict.IsPacked && PackedAnalysisImage.TryCreate(image, out var packedView))
                 {
                     image = packedView;
                     packedAnalysisRestricted = true;

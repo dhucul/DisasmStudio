@@ -192,6 +192,23 @@ and responsive on large files.
   maps into the host the debugger retargets to it — `ImageBase`/disassembly rebased to the DLL's real
   load address — and breaks at the chosen export (or, by default, the DLL's DllMain), from where everything above (stepping,
   breakpoints, registers, stack) works on the DLL itself.
+- **Run to OEP (interactive, no dump):** opening a packed file lands the listing — and the debugger's first
+  break — on the *packer stub's* entry point, because that is what the PE header names; the real program isn't
+  in memory yet. **▶◎ To OEP** (toolbar, or **Ctrl+F10**) continues past the stub and stops at the **Original Entry Point** with the
+  process still live: registers, stack, stepping and breakpoints all work there, nothing is written to disk and
+  the target is not terminated (the full **Unpack…** pipeline below is still the tool when you want a *file*).
+  It reuses the unpacker's OEP strategies — *Auto* (the x86 ESP-trick, else the section guard), *Section guard*,
+  *Section execute breakpoint*, *ESP-trick*, or an address you type — picked from a dropdown beside the button.
+  Run (F5) deliberately still stops at the stub first, so it stays inspectable. While the hunt runs your own
+  breakpoints are skipped (the count is reported when it lands) so a stub looping through instrumented code
+  can still reach the OEP; **Pause** remains the escape hatch and exceptions are never hidden. On arrival it
+  offers to **re-analyze from the unpacked process memory** — dumping the live image and running the full
+  analyzer over it *seeded at the OEP*, so the listing, functions, strings and cross-references become the real
+  program instead of the stub. Opening a file the packer detector flags prompts once for this, together with
+  *Hide debugger*, which has to be chosen before Run because the anti-anti-debug layer installs at the loader
+  breakpoint. Two honest caveats: a target that isn't really packed has no OEP, so the guard just catches the
+  first cross-section jump (the prologue check says so); and while the section guard is armed, a breakpoint
+  inside a not-yet-executed section surfaces as the OEP, because the NX fetch fault beats the `int3`.
 - **Generic unpacker (run-to-OEP → dump → rebuild imports):** for packed/compressed executables, the
   **Unpack…** toolbar button runs the target under the debugger, automatically stops at the **Original
   Entry Point** (an *Auto* strategy: the x86 ESP-trick, then NX/execute section breakpoints — the original

@@ -7,6 +7,7 @@ using System.Windows.Data;
 using System.Windows.Media;
 using DisasmStudio.Core.Analysis;
 using DisasmStudio.Core.Formats;
+using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug;
 using DisasmStudio.Wpf.Services;
 using DisasmStudio.Wpf.ViewModels;
@@ -521,6 +522,87 @@ internal static class Dialogs
         panel.Children.Add(box);
         bool ok = ShowModal(owner, "Go to address", panel, box);
         return ok ? ParseHex(box.Text) : null;
+    }
+
+    /// <summary>Ask for an original entry point to break at, for the Manual "run to OEP" strategy. Typed as it
+    /// appears in the static listing — the finder rebases it onto the runtime image base for ASLR.</summary>
+    public static ulong? AskOepAddress(Window owner, ulong? current)
+    {
+        var box = new TextBox { Text = current is { } c ? c.ToString("X") : "", FontFamily = AppFonts.Code };
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        panel.Children.Add(Label("Break at OEP address (hex)"));
+        panel.Children.Add(box);
+        var hint = Label("Use the address as shown in the static listing; it is rebased onto the process's actual load address for you.");
+        hint.Foreground = Muted;
+        hint.TextWrapping = TextWrapping.Wrap;
+        hint.Margin = new Thickness(0, 8, 0, 0);
+        panel.Children.Add(hint);
+        bool ok = ShowModal(owner, "Run to OEP — manual address", panel, box, 380);
+        return ok ? ParseHex(box.Text) : null;
+    }
+
+    /// <summary>What the user chose when a packed PE finished analysing.</summary>
+    public sealed record PackedOpenOptions(bool ArmOepBreak, bool HideDebugger);
+
+    /// <summary>Offered right after a packed PE is opened and analysed. The OEP option only *arms* the session:
+    /// Run/F5 still stops at the packer stub, and "▶◎ To OEP" then continues to the original entry point.
+    /// Hide-debugger is offered here rather than left to the toolbar because the anti-anti-debug layer installs
+    /// at the loader breakpoint — before the entry point — so it cannot be switched on once you are stopped.
+    /// Returns null if cancelled (treated as "neither").</summary>
+    public static PackedOpenOptions? AskPackedOpen(Window owner, PackerVerdict verdict)
+    {
+        var panel = new StackPanel { Margin = new Thickness(16) };
+
+        var head = Label($"{verdict.Name ?? "A packer"} detected — {verdict.Kind.ToString().ToLowerInvariant()}.");
+        head.FontWeight = FontWeights.SemiBold;
+        panel.Children.Add(head);
+
+        var notes = Label(verdict.Notes);
+        notes.Foreground = Muted;
+        notes.TextWrapping = TextWrapping.Wrap;
+        notes.Margin = new Thickness(0, 6, 0, 12);
+        panel.Children.Add(notes);
+
+        // A code virtualizer has no original entry point to reach — the protected functions never exist as
+        // native code — so don't offer a hunt that cannot succeed.
+        bool virtualizer = verdict.Kind == PackerKind.Virtualizer;
+
+        var oepCheck = new CheckBox
+        {
+            Content = "Break at the unpacked OEP when you run",
+            Foreground = virtualizer ? Muted : Fg,
+            IsChecked = !virtualizer,
+            IsEnabled = !virtualizer,
+        };
+        panel.Children.Add(oepCheck);
+
+        var oepHint = Label(virtualizer
+            ? "Unavailable: this is a code virtualizer, so the protected code is never restored to native instructions — there is no original entry point to stop at."
+            : "Run (F5) still stops at the packer stub, so you can inspect it. Press ▶◎ To OEP from there to continue to the original entry point with the process still live and steppable.");
+        oepHint.Foreground = Muted;
+        oepHint.TextWrapping = TextWrapping.Wrap;
+        oepHint.Margin = new Thickness(22, 2, 0, 10);
+        panel.Children.Add(oepHint);
+
+        var hideCheck = new CheckBox
+        {
+            Content = "Hide the debugger from the packer's anti-debug checks",
+            Foreground = Fg,
+            IsChecked = true,
+        };
+        panel.Children.Add(hideCheck);
+
+        var hideHint = Label("Must be decided now: the hide layer is installed at the loader breakpoint, before the program's own code runs, so it cannot be switched on later. Untick it to test whether a self-checking packer is detecting the debugger itself.");
+        hideHint.Foreground = Muted;
+        hideHint.TextWrapping = TextWrapping.Wrap;
+        hideHint.Margin = new Thickness(22, 2, 0, 0);
+        panel.Children.Add(hideHint);
+
+        // Reaching the OEP against a packer that looks for a debugger needs the hide layer, so opting in ticks it.
+        oepCheck.Checked += (_, _) => hideCheck.IsChecked = true;
+
+        bool ok = ShowModal(owner, "Packed executable", panel, virtualizer ? hideCheck : oepCheck, 470);
+        return ok ? new PackedOpenOptions(oepCheck.IsChecked == true, hideCheck.IsChecked == true) : null;
     }
 
     /// <summary>A parsed byte-search pattern from <see cref="AskSearchPattern"/>: the bytes to match, an

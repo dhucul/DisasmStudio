@@ -47,11 +47,20 @@ public sealed class OepFinder
     private readonly StringBuilder _log = new();
     private Phase _phase = Phase.Init;
     private ulong _entrySp, _espWatch;
-    private ulong _entrySectionLo;
-    private readonly List<ulong> _execBpStarts = [];   // section execute mem-bp starts armed by SectionExecBp
+    /// <summary>Section spans covered by the execute memory breakpoints armed by <see cref="StartSectionExecBp"/>.
+    /// Kept as ranges (not just starts) so <see cref="Owns"/> can tell our own section execute-breakpoint apart
+    /// from a user memory breakpoint, which reports the same <see cref="StopReason.MemoryBreakpoint"/>.</summary>
+    private readonly List<(ulong Lo, ulong Hi)> _execBps = [];
+    /// <summary>The user already had a breakpoint at the manual OEP, so <see cref="Abort"/> must leave it alone.</summary>
+    private bool _manualWasUserBp;
+    /// <summary>Sections the section-guard strategy actually stripped execute from, so a hunt that ends without
+    /// faulting can re-query them and tell "the target undid our guard" from "it never reached the OEP".</summary>
+    private readonly List<(string Name, ulong Lo, ulong Size)> _guardedSections = [];
 
     public string Log => _log.ToString();
     public OepMethod ActiveMethod { get; private set; }
+    /// <summary>The hunt has finished (found the OEP, or was aborted) and holds no armed state.</summary>
+    public bool IsDone => _phase == Phase.Done;
 
     public OepFinder(OepMethod method, ulong? manualOep, ulong staticImageBase = 0)
     {
@@ -64,8 +73,6 @@ public sealed class OepFinder
     /// non-null OEP if it is already reached (e.g. a manual OEP equal to the entry point); otherwise null.</summary>
     public ulong? Begin(DebuggerEngine eng)
     {
-        _entrySectionLo = SectionLoContaining(eng, eng.EntryPoint);
-
         if (_requested == OepMethod.Manual && _manualOep is { } moep)
         {
             // The user types a static VA (file image base); rebase it to the runtime load base for ASLR.
@@ -79,6 +86,7 @@ public sealed class OepFinder
                 _log.Append($"Manual OEP {moep:X} is the entry point — already there.\n");
                 return moep;
             }
+            _manualWasUserBp = eng.HasBreakpoint(moep);   // don't delete the user's own breakpoint on abort
             if (!eng.TrySetBreakpoint(moep))
                 throw new InvalidOperationException($"Could not arm manual OEP breakpoint at {moep:X}.");
             _phase = Phase.WaitManual;
@@ -138,8 +146,13 @@ public sealed class OepFinder
             {
                 if (stop.Reason == StopReason.Watchpoint)
                 {
-                    if (_espWatch != 0) eng.RemoveBreakpoint(_espWatch);
-                    _log.Append("ESP-trick: popad watch hit; guarding non-stub sections.\n");
+                    // A hardware watchpoint stop carries no indication of which register fired it, so a user's
+                    // own watchpoint landing here is indistinguishable from the popad hit and is consumed as
+                    // one. Recorded rather than hidden: if the guard then reports a surprising OEP, the log says
+                    // this is where the state machine could have been misled.
+                    if (_espWatch != 0) { eng.RemoveBreakpoint(_espWatch); _espWatch = 0; }
+                    _log.Append($"ESP-trick: watchpoint at {stop.Address:X} taken as the popad hit (a user watchpoint "
+                              + "would be indistinguishable here); guarding non-stub sections.\n");
                     StartSectionGuard(eng);   // keep ActiveMethod = EspTrick for reporting
                 }
                 else eng.Go();                // unrelated stop — keep running toward popad
@@ -149,7 +162,7 @@ public sealed class OepFinder
             {
                 if (stop.Reason == StopReason.GuardExec)
                 {
-                    _phase = Phase.Done;
+                    Disarm(eng);
                     _log.Append($"OEP candidate (guard-exec) at {stop.Address:X}.\n");
                     return stop.Address;
                 }
@@ -160,9 +173,7 @@ public sealed class OepFinder
             {
                 if (stop.Reason == StopReason.MemoryBreakpoint)
                 {
-                    _phase = Phase.Done;
-                    foreach (ulong s in _execBpStarts) eng.RemoveMemoryBreakpoint(s);
-                    _execBpStarts.Clear();
+                    Disarm(eng);
                     _log.Append($"OEP candidate (section execute-bp) at {stop.Address:X}.\n");
                     return stop.Address;
                 }
@@ -173,7 +184,7 @@ public sealed class OepFinder
             {
                 if (stop.Reason == StopReason.Breakpoint && _manualOep is { } m && stop.Address == m)
                 {
-                    _phase = Phase.Done;
+                    Disarm(eng);
                     _log.Append($"OEP (manual breakpoint) at {stop.Address:X}.\n");
                     return stop.Address;
                 }
@@ -192,20 +203,66 @@ public sealed class OepFinder
         if (PeView.TryParse(hdr, out var view))
         {
             int guarded = 0;
+            _guardedSections.Clear();
             foreach (var s in view.Sections)
             {
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
                 bool containsEntry = eng.EntryPoint >= lo && eng.EntryPoint - lo < size;
-                if (size == 0 || containsEntry) continue;
-                if (eng.TryGuardRegion(lo, size)) guarded++;
+                if (size == 0 || containsEntry)
+                {
+                    _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — skipped ({(size == 0 ? "empty" : "holds the entry point")}).\n");
+                    continue;
+                }
+                // Only executable sections can be an OEP: reaching it is an instruction fetch, and the loader
+                // only permits that where it mapped the section executable. Walking the rest is not merely
+                // useless, it is ruinous — guarding is per 4 KB page, so a resource section (routinely hundreds
+                // of megabytes) costs hundreds of thousands of VirtualQueryEx/VirtualProtectEx calls and
+                // shatters the target's VA descriptor tree. Cost aside, a non-executable section already faults
+                // on a fetch without our help; the only case skipped here is a packer that re-protects a data
+                // section to executable at runtime, which by definition would no longer fault anyway.
+                if (!s.IsExecutable)
+                {
+                    _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — skipped (not executable; an OEP cannot be fetched from it).\n");
+                    continue;
+                }
+                if (eng.TryGuardRegion(lo, size))
+                {
+                    guarded++;
+                    _guardedSections.Add((s.Name, lo, size));
+                    _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — guarded.\n");
+                }
+                else _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — could NOT be guarded (uncommitted or already no-access).\n");
             }
-            if (guarded == 0) throw new InvalidOperationException("No OEP section guard could be armed.");
-            _log.Append($"Section guard: guarded {guarded} non-stub section(s).\n");
+            if (guarded == 0)
+                throw new InvalidOperationException(
+                    "No executable section outside the entry point's own could be guarded — this image's code all "
+                  + "lives in the section the entry point is in, so execution never crosses a boundary the guard "
+                  + "can catch and the OEP cannot be found this way. Use \"Break at address…\" with a known OEP, "
+                  + "or the ESP-trick on a 32-bit target.");
+            _log.Append($"Section guard: guarded {guarded} non-stub section(s), {eng.GuardedPageCount} page(s) total.\n");
         }
         else throw new InvalidOperationException("Section guard could not parse the image headers.");
         _phase = Phase.WaitGuard;
         eng.Go();
+    }
+
+    /// <summary>Explain why a guard-based hunt ended without ever faulting. The common cause is a stub that
+    /// calls <c>VirtualProtect</c> on its own target section after decompressing, which restores the execute bit
+    /// we stripped — from the debugger's side that is indistinguishable from "the program never reached the
+    /// OEP" unless the page protections are re-queried, which is what this does. Call while the process is
+    /// still alive; returns null when nothing conclusive can be said.</summary>
+    public string? DiagnoseMissedGuard(DebuggerEngine eng)
+    {
+        if (_phase != Phase.WaitGuard || _guardedSections.Count == 0) return null;
+        var restored = new List<string>();
+        foreach (var (name, lo, _) in _guardedSections)
+            if (!eng.IsPageNonExecutable(lo)) restored.Add(name);
+        if (restored.Count == 0) return null;
+        return $"The guard on {string.Join(", ", restored)} is no longer in place — the target re-protected its "
+             + "own section(s) (a stub calling VirtualProtect after decompressing), so the code fetch at the OEP "
+             + "never faulted. Try the Section execute breakpoint strategy, which re-arms itself, or the "
+             + "ESP-trick on a 32-bit target.";
     }
 
     /// <summary>Arm a whole-section <see cref="MemAccess.Execute"/> memory breakpoint on every non-stub section
@@ -213,7 +270,7 @@ public sealed class OepFinder
     /// them faults on the instruction fetch and surfaces a <see cref="StopReason.MemoryBreakpoint"/> — the OEP.</summary>
     private void StartSectionExecBp(DebuggerEngine eng)
     {
-        _execBpStarts.Clear();
+        _execBps.Clear();
         var hdr = eng.ReadMemory(eng.ImageBase, 0x1000);
         if (PeView.TryParse(hdr, out var view))
         {
@@ -222,29 +279,72 @@ public sealed class OepFinder
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
                 bool containsEntry = eng.EntryPoint >= lo && eng.EntryPoint - lo < size;
-                if (size == 0 || containsEntry) continue;
+                // Executable sections only, for the same reason as the section guard: an OEP is an instruction
+                // fetch, and arming a whole resource/reloc section costs a page-granular walk over hundreds of
+                // megabytes for something that can never be the answer.
+                if (size == 0 || containsEntry || !s.IsExecutable) continue;
                 if (eng.TrySetMemoryBreakpoint(lo, size, MemAccess.Execute))
-                    _execBpStarts.Add(lo);
+                    _execBps.Add((lo, lo + size));
             }
-            if (_execBpStarts.Count == 0)
-                throw new InvalidOperationException("No OEP execute breakpoint could be armed.");
-            _log.Append($"Section execute-bp: armed execute memory breakpoints on {_execBpStarts.Count} non-stub section(s).\n");
+            if (_execBps.Count == 0)
+                throw new InvalidOperationException(
+                    "No executable section outside the entry point's own could be armed — this image's code all "
+                  + "lives in the section the entry point is in. Use \"Break at address…\" with a known OEP.");
+            _log.Append($"Section execute-bp: armed execute memory breakpoints on {_execBps.Count} non-stub section(s).\n");
         }
         else throw new InvalidOperationException("Section execute breakpoint could not parse the image headers.");
         _phase = Phase.WaitMemBp;
         eng.Go();
     }
 
-    private static ulong SectionLoContaining(DebuggerEngine eng, ulong va)
+    /// <summary>Whether <paramref name="stop"/> is one this finder's current phase produced itself — its own
+    /// single-step, ESP watch, section guard, section execute-breakpoint or manual OEP breakpoint.
+    /// <para>
+    /// An interactive host needs this because <see cref="StopReason"/> is ambiguous: a section execute-breakpoint
+    /// and a user memory breakpoint both report <see cref="StopReason.MemoryBreakpoint"/>, and the ESP-trick watch
+    /// and a user hardware watchpoint both report <see cref="StopReason.Watchpoint"/>. Only the phase (and, for the
+    /// memory breakpoint, which range was hit) can tell them apart. <see cref="UnpackSession"/> drives its own
+    /// dedicated process where nothing else plants breakpoints, so it does not need this.
+    /// </para></summary>
+    public bool Owns(DebuggerEngine eng, StopInfo stop) => _phase switch
     {
-        var hdr = eng.ReadMemory(eng.ImageBase, 0x1000);
-        if (PeView.TryParse(hdr, out var view))
-            foreach (var s in view.Sections)
-            {
-                ulong lo = eng.ImageBase + s.VirtualAddress;
-                ulong hi = lo + Math.Max(s.VirtualSize, s.SizeOfRawData);
-                if (va >= lo && va < hi) return lo;
-            }
-        return 0;
+        Phase.StepPushad => stop.Reason == StopReason.Step,
+        Phase.WaitPopad => stop.Reason == StopReason.Watchpoint,
+        Phase.WaitGuard => stop.Reason == StopReason.GuardExec,
+        Phase.WaitMemBp => stop.Reason == StopReason.MemoryBreakpoint && OwnsExecBp(eng.LastMemoryHitVa),
+        Phase.WaitManual => stop.Reason == StopReason.Breakpoint && _manualOep is { } m && stop.Address == m,
+        _ => false,
+    };
+
+    private bool OwnsExecBp(ulong va)
+    {
+        foreach (var (lo, hi) in _execBps) if (va >= lo && va < hi) return true;
+        return false;
+    }
+
+    /// <summary>Disarm everything this finder planted and park it in the finished phase, without resuming.
+    /// Call while the debuggee is stopped. Idempotent, and safe to call after the OEP was already found.
+    /// <para>
+    /// An interactive host must call this when the user cancels, because the section guards and execute
+    /// breakpoints outlive the finder otherwise — a later Continue would then produce a bare
+    /// <see cref="StopReason.GuardExec"/> stop that nothing interprets.
+    /// </para></summary>
+    public void Abort(DebuggerEngine eng)
+    {
+        Disarm(eng);
+        _log.Append("Hunt aborted; guards and breakpoints disarmed.\n");
+    }
+
+    /// <summary>Remove the guards, execute breakpoints, ESP watch and manual breakpoint this finder armed.</summary>
+    private void Disarm(DebuggerEngine eng)
+    {
+        _phase = Phase.Done;
+        // Guards are only ever armed by this class, so clearing them all is safe.
+        if (eng.HasGuards) eng.ClearGuards();
+        foreach (var (lo, _) in _execBps) eng.RemoveMemoryBreakpoint(lo);
+        _execBps.Clear();
+        if (_espWatch != 0) { eng.RemoveBreakpoint(_espWatch); _espWatch = 0; }
+        // Leave a breakpoint the user had already set at the manual OEP alone.
+        if (_manualOep is { } m && !_manualWasUserBp) { eng.RemoveBreakpoint(m); _manualOep = null; }
     }
 }

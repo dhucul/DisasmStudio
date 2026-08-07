@@ -20,6 +20,7 @@ using DisasmStudio.Core.Export;
 using DisasmStudio.Core.Formats;
 using DisasmStudio.Core.Unpacking;
 using DisasmStudio.Debug;
+using DisasmStudio.Debug.Unpacking;
 using DisasmStudio.Managed;
 using DisasmStudio.ManagedDebug;
 using Architecture = DisasmStudio.Core.Formats.Architecture;   // disambiguate from System.Runtime.InteropServices.Architecture
@@ -170,6 +171,10 @@ public partial class MainWindow : Window
         WireControls();
         EnableFileDrop();
         _nav.Navigated += OnNavigated;
+        // Watches for the UI thread going unresponsive and records which operation it was in — see
+        // %TEMP%\ds_ui_stall.txt. Cheap (one heartbeat a second) and always on, because the stalls worth
+        // catching happen on a user's own target, not in a harness here.
+        Diagnostics.UiWatchdog.Start(Dispatcher);
 
         // Allow "DisasmStudio <file>" (CLI / Open-with) to load a target on startup.
         Loaded += async (_, _) =>
@@ -449,6 +454,7 @@ public partial class MainWindow : Window
             case Key.F8: OnStepOver(sender, e); e.Handled = true; break;
             case Key.F11 when shift: OnStepOut(sender, e); e.Handled = true; break;
             case Key.F9 when ctrl: OnRunToReturn(sender, e); e.Handled = true; break;
+            case Key.F10 when ctrl: OnRunToOep(sender, e); e.Handled = true; break;
             case Key.F1: HelpDialog.ShowShortcuts(this); e.Handled = true; break;
             case Key.F when ctrl:
                 // Context-aware: on the Hex tab, Ctrl+F finds bytes; elsewhere it opens the instruction Find tab.
@@ -511,6 +517,254 @@ public partial class MainWindow : Window
         // No file required: with a binary open we rebase its analysis onto the process; without one we analyze
         // the process's own image after attaching. The bitness hint is 0 ("unknown") when nothing is open.
         if (Dialogs.AskProcess(this, _result?.Image.Bitness ?? 0) is uint pid) BeginDebug(d => d.Attach(pid));
+    }
+
+    // ---- run to OEP ----
+
+    private OepMethod _oepMethod = OepMethod.Auto;
+    private ulong? _oepManualVa;
+    /// <summary>The user opted in when this packed file was opened. Only affects prompting/emphasis — the hunt
+    /// itself is always an explicit button press, and the button works on any native target.</summary>
+    private bool _oepBreakArmed;
+
+    /// <summary>The OEP hunt is meaningful only while a native PE session is stopped in the loaded image. While a
+    /// hunt is armed the same button cancels it — otherwise pausing mid-hunt would be a dead end, with the guards
+    /// still in place and no way to disarm them.</summary>
+    private void UpdateRunToOepEnabled()
+    {
+        bool hunting = _dbg is { IsHuntingOep: true };
+        RunToOepBtn.Content = hunting ? "✕ Cancel OEP" : "▶◎ To OEP";
+        // While hunting the target is *running*, so gating on IsStopped would disable the button exactly when a
+        // cancel is wanted. Cancelling a running hunt pauses it and disarms on the resulting stop.
+        RunToOepBtn.IsEnabled = hunting
+            ? _dbg is not null
+            : _dbg is { IsStopped: true }
+              && _dbg.Engine.ImageBase != 0
+              && _result?.Image is { Format: BinaryFormat.Pe } img && !img.IsNonX86;
+        OepMethodBtn.IsEnabled = !hunting;
+    }
+
+    private void OnOepMethodMenu(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button b) return;
+        var cm = new ContextMenu { PlacementTarget = b, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
+        void Add(string label, OepMethod m, string tip)
+        {
+            var mi = new MenuItem { Header = label, IsCheckable = true, IsChecked = _oepMethod == m, ToolTip = tip };
+            mi.Click += (_, _) => { _oepMethod = m; if (m != OepMethod.Manual) _oepManualVa = null; UpdateOepMethodCaption(); };
+            cm.Items.Add(mi);
+        }
+        Add("Auto", OepMethod.Auto, "x86: the ESP-trick (watch the stub's pushad-saved registers for the matching popad), then the section guard. x64: the section guard.");
+        Add("Section guard", OepMethod.SectionGuard, "Strip execute permission from every section the stub doesn't live in, so only the first code fetch into the unpacked code faults.");
+        Add("Section execute breakpoint", OepMethod.SectionExecBp, "The same idea through the re-armable memory-breakpoint path; the stop lands one instruction into the OEP.");
+        Add("ESP-trick", OepMethod.EspTrick, "x86 only, and only from the entry-point stop: watch the stack slot the stub's pushad wrote, then guard the remaining sections after the popad.");
+        var manual = new MenuItem { Header = "Break at address…", IsCheckable = true, IsChecked = _oepMethod == OepMethod.Manual, ToolTip = "Break at an OEP you already know. Type it as it appears in the static listing — it is rebased onto the runtime image base for you." };
+        manual.Click += (_, _) =>
+        {
+            if (Dialogs.AskOepAddress(this, _oepManualVa) is { } va) { _oepMethod = OepMethod.Manual; _oepManualVa = va; }
+            UpdateOepMethodCaption();
+        };
+        cm.Items.Add(manual);
+        cm.IsOpen = true;
+    }
+
+    private void UpdateOepMethodCaption()
+        => OepMethodBtn.Content = _oepMethod switch
+        {
+            OepMethod.SectionGuard => "Guard ▾",
+            OepMethod.SectionExecBp => "Exec-bp ▾",
+            OepMethod.EspTrick => "ESP ▾",
+            OepMethod.Manual => $"{_oepManualVa:X} ▾",
+            _ => "Auto ▾",
+        };
+
+    private void OnRunToOep(object sender, RoutedEventArgs e)
+    {
+        using var _watch = Diagnostics.UiWatchdog.Scope("OnRunToOep (arming the OEP strategy)");
+        // Cancel is checked before the stopped-ness gate: a hunt is cancellable while the target is running,
+        // which is precisely when the user wants out of one.
+        if (_dbg is { IsHuntingOep: true } hunting)
+        {
+            bool wasStopped = hunting.IsStopped;
+            hunting.CancelOepHunt();
+            StatusText.Text = wasStopped
+                ? "OEP hunt cancelled — guards disarmed. The program is still stopped; press ▶◎ To OEP to try again."
+                : "OEP hunt cancelled — pausing the target to remove its guards; it will stop shortly.";
+            UpdateRunToOepEnabled();
+            return;
+        }
+        if (_dbg is not { IsStopped: true } d) { StatusText.Text = "Run to OEP: start the program and stop first (Run, then To OEP)."; return; }
+        if (NotForArm("Run to OEP")) return;
+        if (d.Engine.ImageBase == 0) { StatusText.Text = "Run to OEP: the target image isn't mapped yet."; return; }
+
+        // The strategies all work by instrumenting the sections the stub does NOT live in, so the hunt has to
+        // start from inside the stub. Guarding the section we are already executing in would fault immediately
+        // and report the current address as a bogus OEP.
+        ulong entry = d.Engine.EntryPoint;
+        var ipSec = d.LiveResult?.Image.SectionAt(d.CurrentIp);
+        var entrySec = d.LiveResult?.Image.SectionAt(entry);
+        if (ipSec is not null && entrySec is not null && ipSec.Name != entrySec.Name)
+        {
+            StatusText.Text = $"Run to OEP: execution has already left the loader stub (you are in {ipSec.Name}, the stub is in {entrySec.Name}). Restart and run it again from the entry-point stop.";
+            return;
+        }
+
+        // The ESP-trick single-steps the stub's *first* instruction and compares the stack pointer against the
+        // one it recorded at entry, so it is only valid at the entry-point stop itself.
+        bool atEntry = d.LastReason == StopReason.EntryPoint && d.CurrentIp == entry;
+        var method = _oepMethod;
+        string note = "";
+        if (method == OepMethod.EspTrick && !atEntry)
+        {
+            StatusText.Text = "Run to OEP: the ESP-trick only works from the entry-point stop. Restart, or pick Section guard.";
+            return;
+        }
+        if (method == OepMethod.Auto && !atEntry) { method = OepMethod.SectionGuard; note = " (past the entry point — using the section guard)"; }
+        if (method == OepMethod.Manual && _oepManualVa is null)
+        {
+            if (Dialogs.AskOepAddress(this, null) is not { } va) return;
+            _oepManualVa = va; UpdateOepMethodCaption();
+        }
+
+        if (d.StartOepHunt(method, _oepManualVa, _image?.ImageBase ?? 0) is { } err)
+        {
+            StatusText.Text = "Run to OEP: " + err;
+            return;
+        }
+        RunToOepBtn.IsEnabled = false; DbgRunBtn.IsEnabled = false; SetStepButtons(false);
+        StatusText.Text = $"Running to OEP ({method}){note}… your breakpoints are skipped while it hunts; ⏸ Pause stops it. First-chance exceptions are passed to the program (your exception filter still applies to second-chance).";
+    }
+
+    private async void OnOepHuntFinished(DebugSession.OepHuntResult r)
+    {
+        using var _watch = Diagnostics.UiWatchdog.Scope($"OnOepHuntFinished (found={r.Found})");
+        UpdateRunToOepEnabled();
+        if (!r.Found)
+        {
+            string why = r.Error ?? "no OEP was found";
+            StatusText.Text = $"Run to OEP: {why} ({r.Method}).";
+            if (_dbg is { IsStopped: true }) { DbgRunBtn.IsEnabled = true; SetStepButtons(true); }
+            if (r.Error == "Cancelled.") return;
+
+            // A hunt that never fires is otherwise completely silent, so write the full record — which sections
+            // were guarded, every stop and what was done with it, why it ended — to a file. The dialog itself
+            // stays short: a MessageBox has no scrollbar, so pasting a few hundred timeline lines into one
+            // produces a box taller than the screen with an OK button you cannot reach.
+            string report = $"{why}\r\n\r\nStrategy: {r.Method}\r\n\r\n{r.Log.Trim()}\r\n\r\n--- stop timeline ---\r\n{_dbg?.OepTimeline}";
+            string? logPath = null;
+            try
+            {
+                logPath = Path.Combine(Path.GetTempPath(), "ds_oep_hunt.txt");
+                File.WriteAllText(logPath, report);
+            }
+            catch { logPath = null; }
+            using (Diagnostics.UiWatchdog.ModalScope("Run to OEP — hunt failed"))
+                MessageBox.Show(this,
+                    $"{why}\n\nStrategy: {r.Method}\n" +
+                    (logPath is null ? "" : $"\nThe full timeline (guarded sections, every stop, why it ended) was written to:\n{logPath}"),
+                    "Run to OEP", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        if (_dbg is not { IsStopped: true } d)
+        {
+            StatusText.Text = $"Run to OEP: reached {r.Oep:X}, but the session ended.";
+            return;
+        }
+
+        string skipped = r.SkippedBreakpoints > 0 ? $", {r.SkippedBreakpoints} breakpoint hit(s) skipped" : "";
+        ulong oep = RefineOep(d, r.Oep);
+        string approach = oep != r.Oep ? $" (execution entered the section at {r.Oep:X})" : "";
+        bool looksOk = OepValidator.LooksLikeOep(d.Engine.ReadMemory(oep, 32), d.Engine.Is32);
+        string caveat = looksOk ? "" : " — the bytes there don't look like a function prologue, so treat it with suspicion";
+        StatusText.Text = $"OEP at {oep:X} via {r.Method}{approach}{skipped}{caveat}. The program is live: step, set breakpoints, or continue.";
+
+        // Modal, and raised straight off a debugger stop: while it is up the UI thread services nothing, so it
+        // must be marked or the watchdog reports it as a hang — and if it opens behind the main window that is
+        // exactly what it looks like to the user, too. Scoped to the dialog alone, not the work that follows.
+        MessageBoxResult ans;
+        using (Diagnostics.UiWatchdog.ModalScope("Run to OEP — re-analyze from unpacked memory?"))
+            ans = MessageBox.Show(this,
+                $"Stopped at the original entry point ({oep:X}).\n\n" +
+                "Re-analyze the disassembly from the now-unpacked process memory? This dumps the live image, runs the " +
+                "full analyzer over it seeded at the OEP, and replaces the listing, functions, strings and cross-references " +
+                "with the real program instead of the loader stub.\n\n" +
+                "The process stays live and steppable, and nothing is written to disk.",
+                "Run to OEP", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (ans == MessageBoxResult.Yes) await ReanalyzeFromUnpackedMemory(oep, r.Method);
+    }
+
+    /// <summary>Snap a guard-reported OEP forward to the function prologue it approaches.
+    /// <para>
+    /// The section guard stops on the <i>first instruction fetched</i> inside a guarded section, which is not
+    /// always the entry point proper: a packer commonly lands on a short trampoline, a jump thunk, or alignment
+    /// padding a few instructions ahead of the real prologue. Reporting the fetch address is accurate about
+    /// where execution is, but seeding analysis there names the wrong address <c>start</c> and can recover the
+    /// function with a stray head. Walk a few instructions forward and take the first address that looks like a
+    /// prologue; if none does, keep the original rather than inventing one.
+    /// </para></summary>
+    private static ulong RefineOep(DebugSession d, ulong oep)
+    {
+        const int MaxProbeInstructions = 8;
+        if (OepValidator.LooksLikeOep(d.Engine.ReadMemory(oep, 32), d.Engine.Is32)) return oep;
+        if (d.LiveDecoder is not { } dec) return oep;
+        // Never walk out of the section the guard fired in: past its end the bytes belong to something else, and
+        // a prologue found there would be a coincidence, not this function's entry.
+        var section = d.LiveResult?.Image.SectionAt(oep);
+        ulong va = oep;
+        for (int i = 0; i < MaxProbeInstructions; i++)
+        {
+            if (!dec.TryDecodeAt(va, out var insn) || insn.Length <= 0) break;
+            va += (ulong)insn.Length;
+            if (section is not null && !section.ContainsVa(va)) break;
+            if (OepValidator.LooksLikeOep(d.Engine.ReadMemory(va, 32), d.Engine.Is32)) return va;
+        }
+        return oep;
+    }
+
+    /// <summary>Rebuild the analysis from the unpacked image now in process memory and swap it into the live view.
+    /// Both the dump and the analysis run on a background thread: an unpacked payload is routinely hundreds of
+    /// megabytes, and reading it out of the process on the UI thread froze the window for the whole transfer.
+    /// The debuggee is frozen at the stop, so reading it from another thread is equally safe.</summary>
+    private async Task ReanalyzeFromUnpackedMemory(ulong oepVa, OepMethod method)
+    {
+        using var _watch = Diagnostics.UiWatchdog.Scope("ReanalyzeFromUnpackedMemory");
+        if (_dbg is not { IsStopped: true } d) return;
+
+        Progress.Visibility = Visibility.Visible; Progress.IsIndeterminate = true;
+        DbgRunBtn.IsEnabled = false; SetStepButtons(false); RunToOepBtn.IsEnabled = false;
+        StatusText.Text = "Dumping the unpacked image…";
+        var progress = new Progress<string>(s => StatusText.Text = s);
+        try
+        {
+            var opts = _loadOptions;   // keep the user's folded data sections / PE header choice
+            // The dump runs on the worker too. An unpacked payload is routinely hundreds of megabytes, and
+            // reading that out of the process on the UI thread froze the window for the whole transfer — the
+            // debuggee is frozen at the stop, so reading it from another thread is just as safe.
+            var built = await Task.Run(() =>
+            {
+                var dump = d.DumpMainImage();
+                return dump is null || dump.Length == 0
+                    ? null
+                    : d.BuildUnpackedAnalysis(dump, oepVa, opts, progress, CancellationToken.None);
+            });
+            if (built is not { } b) { StatusText.Text = "Re-analyze: the live image could not be dumped or parsed as a PE."; return; }
+            d.AdoptUnpackedAnalysis(b.Static, b.Live);
+            _dbgViewLive = false;   // re-open the one-shot gate so the whole UI rebinds to the new analysis
+            _dbgViewForeignBase = 0;
+            SwitchToLiveAnalysis();
+            _nav.Navigate(oepVa);
+            Linear.SetCurrentIp(oepVa);
+            Linear.Refresh();
+            StatusText.Text = $"Re-analyzed from unpacked memory at OEP {oepVa:X} ({method}) — " +
+                              $"{_result!.Functions.Count:N0} functions, {_result.Strings.Count:N0} strings.";
+        }
+        catch (Exception ex) { StatusText.Text = "Re-analyze failed: " + ex.Message; }
+        finally
+        {
+            Progress.Visibility = Visibility.Collapsed; Progress.IsIndeterminate = false;
+            DbgRunBtn.IsEnabled = true; SetStepButtons(_dbg is { IsStopped: true });
+            UpdateRunToOepEnabled();
+        }
     }
 
     private async void OnUnpack(object sender, RoutedEventArgs e)
@@ -1490,11 +1744,12 @@ public partial class MainWindow : Window
         _dbgViewLive = false; _dbgViewForeignBase = 0;   // fresh session starts on the main image
         _dbg = new DebugSession(Dispatcher, _result);   // _result may be null: attach with no file open
         _dbg.Stopped += OnDbgStopped;
-        _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); };   // no continue/step while running
+        _dbg.Running += () => { StatusText.Text = "Running…"; DbgRunBtn.IsEnabled = false; SetStepButtons(false); RunToOepBtn.IsEnabled = false; };   // no continue/step while running
         _dbg.StartFailed += failure => _debugStartFailure = failure;
         _dbg.Exited += OnDbgExited;
         _dbg.Detached += OnDbgDetached;
         _dbg.CaptureFinished += OnCaptureFinished;
+        _dbg.OepHuntFinished += OnOepHuntFinished;
         _dbg.Output += m => StatusText.Text = m;
         Debug.SetSession(_dbg);
         DebugDock.Visibility = Visibility.Visible;
@@ -1641,7 +1896,12 @@ public partial class MainWindow : Window
 
     private void StopCoverageTimer() => _coverageTimer?.Stop();
     private void OnDebugPause(object sender, RoutedEventArgs e) { if (_mdbg is not null) { _mdbg.Pause(); return; } _dbg?.Pause(); }
-    private void OnDebugStop(object sender, RoutedEventArgs e) { if (_mdbg is not null) { EndManagedDebug(); return; } _dbg?.Stop(); }
+    private void OnDebugStop(object sender, RoutedEventArgs e)
+    {
+        using var _ = Diagnostics.UiWatchdog.Scope("OnDebugStop");
+        if (_mdbg is not null) { EndManagedDebug(); return; }
+        _dbg?.Stop();
+    }
     // Detach keeps the debuggee running; only valid from a stop (so breakpoints/hooks can be cleanly removed).
     private void OnDebugDetach(object sender, RoutedEventArgs e) { if (_mdbg is not null) { _mdbg.Detach(); EndManagedDebug(); return; } if (_dbg is { IsStopped: true }) _dbg.Detach(); }
 
@@ -2388,35 +2648,44 @@ public partial class MainWindow : Window
         if (cap.Active) StatusText.Text = $"Capturing… {cap.TotalCount:N0} events → {cap.CurrentLogPart ?? "(log unavailable)"}";
     }
 
+    /// <summary>Switch the whole UI to the live (rebased) analysis + live decoder. Runs once on the first stop
+    /// of a session, and again after "run to OEP" re-analyzes the unpacked image (the caller re-opens the
+    /// <see cref="_dbgViewLive"/> gate for that). Re-entry is safe: <see cref="ApplyPendingBreakpoints"/> is
+    /// idempotent per address and <see cref="ArmCoverageTrace"/> short-circuits once armed.</summary>
+    private void SwitchToLiveAnalysis()
+    {
+        using var _watch = Diagnostics.UiWatchdog.Scope("SwitchToLiveAnalysis");
+        if (_dbg?.LiveResult is null) return;
+        DeferStaticStringRefreshForDebug();
+        _dbgViewLive = true;
+        _result = _dbg.LiveResult;
+        _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
+        PopulateLists(_result);
+        Linear.SetResult(_result, _dbg.LiveDecoder);
+        Decompiler.LiveDecoder = _dbg.LiveDecoder;   // decompile over process memory (the file decoder can't read it)
+        Hex.SetImage(_result.Image);
+        Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
+        CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true; DerefCheck.IsEnabled = true;
+        CoverageToggle.IsEnabled = true;   // execution-coverage recording can now be armed
+        RestartBtn.IsEnabled = _image is not null;   // a fileless attach has no binary to relaunch
+        ApplyPendingBreakpoints();   // arm breakpoints set on the static listing before launch, now that memory exists
+        ArmCoverageTrace();          // arm hit-tracing (Find-tab "Trace hits") on the same first stop
+        if (_image is null)   // attach-without-file: label the window from the analyzed process image
+        {
+            var img = _result.Image;
+            string fn = Path.GetFileName(img.FilePath);
+            Title = $"DisasmStudio — {fn} (attached)";
+            FileInfo.Text = $"{fn}  ·  attached  ·  {img.ArchName}  ·  base {img.ImageBase:X}";
+        }
+    }
+
     private void OnDbgStopped()
     {
+        using var _watch = Diagnostics.UiWatchdog.Scope("OnDbgStopped");
         if (_dbg is null) return;
-        if (!_dbgViewLive && _dbg.LiveResult is not null)
-        {
-            // switch the whole UI to the live (rebased) analysis + live decoder on the first stop
-            DeferStaticStringRefreshForDebug();
-            _dbgViewLive = true;
-            _result = _dbg.LiveResult;
-            _funcStarts = _result.Functions.Select(f => f.Va).ToArray();
-            PopulateLists(_result);
-            Linear.SetResult(_result, _dbg.LiveDecoder);
-            Decompiler.LiveDecoder = _dbg.LiveDecoder;   // decompile over process memory (the file decoder can't read it)
-            Hex.SetImage(_result.Image);
-            Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
-            CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true; DerefCheck.IsEnabled = true;
-            CoverageToggle.IsEnabled = true;   // execution-coverage recording can now be armed
-            RestartBtn.IsEnabled = _image is not null;   // a fileless attach has no binary to relaunch
-            ApplyPendingBreakpoints();   // arm breakpoints set on the static listing before launch, now that memory exists
-            ArmCoverageTrace();          // arm hit-tracing (Find-tab "Trace hits") on the same first stop
-            if (_image is null)   // attach-without-file: label the window from the analyzed process image
-            {
-                var img = _result.Image;
-                string fn = Path.GetFileName(img.FilePath);
-                Title = $"DisasmStudio — {fn} (attached)";
-                FileInfo.Text = $"{fn}  ·  attached  ·  {img.ArchName}  ·  base {img.ImageBase:X}";
-            }
-        }
+        if (!_dbgViewLive && _dbg.LiveResult is not null) SwitchToLiveAnalysis();
         DbgRunBtn.Content = "▶ Continue"; DbgRunBtn.IsEnabled = true; SetStepButtons(true);   // Run doubles as Continue (F5) during a session
+        UpdateRunToOepEnabled();
         // Point the listing at the module the IP is in (main image, or a foreign module like ntdll at the loader
         // break) so the current-instruction highlight follows the step. `shown` is the analysis now displayed (for
         // the status name); `ipInMain` gates the panes/state that only make sense in the main image.
@@ -2466,6 +2735,13 @@ public partial class MainWindow : Window
             _ => "",
         };
         StatusText.Text = $"{_dbg.LastReason}{extra} @ {_dbg.CurrentIp:X}{(name is null ? "" : "   " + name)}";
+        // Armed on open for a packed file: this first stop is the loader stub, not the program. Say so once,
+        // and point at the button rather than silently continuing past it (Run/F5 deliberately still stops here).
+        if (_oepBreakArmed && !_dbg.IsHuntingOep && _dbg.LastReason == StopReason.EntryPoint)
+        {
+            StatusText.Text = $"Stopped at the packer stub entry ({_dbg.CurrentIp:X}) — the real program isn't unpacked yet. Press ▶◎ To OEP on the toolbar (or Ctrl+F10) to continue to the original entry point.";
+            if (RunToOepBtn.IsEnabled) RunToOepBtn.Focus();
+        }
         SignalElevationReady();
     }
 
@@ -2474,6 +2750,7 @@ public partial class MainWindow : Window
     /// hides the debugger dock. The caller sets the status line (exit code vs. "still running").</summary>
     private void TeardownDebugSessionUi()
     {
+        using var _watch = Diagnostics.UiWatchdog.Scope("TeardownDebugSessionUi");
         _captureTimer?.Stop();
         _captureFlushTimer?.Dispose(); _captureFlushTimer = null;
         OnCaptureTick(null, EventArgs.Empty);   // flush the last records to the panel
@@ -2481,6 +2758,7 @@ public partial class MainWindow : Window
         _dbg?.AbortCapture();   // drop capture state and close the log (the engine already removed its breakpoints)
         CaptureBtn.Content = "⦿ Capture"; CaptureBtn.IsEnabled = false; CaptureFnBtn.IsEnabled = false; OnceCheck.IsEnabled = false; RetCheck.IsEnabled = false; DerefCheck.IsEnabled = false;
         RestartBtn.IsEnabled = false; DbgRunBtn.Content = "▶ Run"; DbgRunBtn.IsEnabled = true; SetStepButtons(false);   // re-enable for a fresh Run
+        RunToOepBtn.IsEnabled = false;   // no process to hunt in
         // Trace is per-session: turn it off so a Restart doesn't keep single-stepping into the next run. Keep
         // _coveredInstrs (static VAs) so the run's highlights persist for inspection on the static listing; the
         // user re-enables ◴ Trace if they want more. The engine's trace state is gone with the session.
@@ -3386,6 +3664,17 @@ public partial class MainWindow : Window
                     : "Full static analysis was retained because no safe file-backed entry-stub window was available.";
                 StatusText.Text = $"{verdict.Notes}  Opened without unpacking; {analysisScope} " +
                                   "Use Unpack… only if you want to recover the original code.";
+
+                // Offer the interactive OEP break for the next Run. Hide-debugger is part of the same prompt
+                // because it can only be enabled before launch (it installs at the loader breakpoint).
+                // Skipped on an elevated relaunch, which re-opens the same file with the options already chosen.
+                if (!image.IsDll && !image.IsNonX86
+                    && Application.Current is not App { PendingDebugElevationRequest: not null }
+                    && Dialogs.AskPackedOpen(this, verdict) is { } choice)
+                {
+                    _oepBreakArmed = choice.ArmOepBreak;
+                    if (choice.HideDebugger) HideDebuggerCheck.IsChecked = true;
+                }
             }
         }
     }
@@ -3433,6 +3722,9 @@ public partial class MainWindow : Window
             // lists and navigation visible until the new results replace them (no empty flash).
             _result = null;
             _dllDebug = null;   // a stale DLL-host config must not leak into a later EXE's Restart
+            // The OEP opt-in and any manual OEP belong to the old file — re-asked when the next packed file opens.
+            _oepBreakArmed = false; _oepManualVa = null; _oepMethod = OepMethod.Auto;
+            if (OepMethodBtn is not null) UpdateOepMethodCaption();
             _pendingBreakpoints.Clear();   // breakpoints belong to the old file's addresses
             _jumpAssume.Clear();           // jump what-if assumptions belong to the old file's addresses too
             // Trace highlights belong to the old image's addresses — drop them.
@@ -3574,6 +3866,7 @@ public partial class MainWindow : Window
 
     private void PopulateLists(AnalysisResult result)
     {
+        using var _watch = Diagnostics.UiWatchdog.Scope($"PopulateLists ({result.Functions.Count:N0} fn, {result.Linear.Count:N0} lines)");
         var funcRows = result.Functions.Select(f => new FunctionItem(f, result.Image.SectionAt(f.Va)?.Name ?? ""));
         var importRows = result.Image.Imports.Select(i =>
             new FunctionItem(i.IatVa, Demangler.Demangle(i.Name), result.Image.SectionAt(i.IatVa)?.Name ?? ""));
@@ -4234,20 +4527,40 @@ public partial class MainWindow : Window
         var rows = new List<InsnMatchItem>();
         using var dis = NeutralDisasm.For(r.Image, r.Names);
         {
+            // Normalize into a reused buffer rather than building two fresh strings per instruction (a LINQ
+            // concat plus a whitespace-stripped copy). Over an image with millions of instructions — which is
+            // exactly what a packed binary becomes once "run to OEP" re-analyzes it unpacked — that allocation
+            // churn triggers continuous collections, and a GC pause suspends every thread including the UI, so
+            // the window reports "Not Responding" even though the scan itself is on a background thread.
+            char[] norm = new char[256];
             long count = r.Linear.Count;
             for (long i = 0; i < count; i++)
             {
                 if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
                 if (r.Linear.IsDataAt(i)) continue;                       // instructions only
                 ulong va = r.Linear.VaAt(i);
-                var toks = dis.Format(va);                                // reused buffer — concat before the next Format
+                var toks = dis.Format(va);                                // reused buffer — consume before the next Format
                 if (toks.Count == 0) continue;
-                string text = string.Concat(toks.Select(t => t.Text));
-                if (Norm(text).Contains(needle, StringComparison.Ordinal))
+
+                int len = 0;
+                for (int t = 0; t < toks.Count; t++)
                 {
-                    rows.Add(new InsnMatchItem(va, text.Trim()));
-                    if (rows.Count >= MaxInsnMatches) return (rows, true);
+                    string s = toks[t].Text;
+                    for (int c = 0; c < s.Length; c++)
+                    {
+                        char ch = s[c];
+                        if (char.IsWhiteSpace(ch)) continue;
+                        if (len == norm.Length) Array.Resize(ref norm, len * 2);
+                        norm[len++] = char.ToLowerInvariant(ch);
+                    }
                 }
+                if (!norm.AsSpan(0, len).Contains(needle.AsSpan(), StringComparison.Ordinal)) continue;
+
+                // Only a match pays for a display string.
+                var sb = new StringBuilder(len + toks.Count);
+                for (int t = 0; t < toks.Count; t++) sb.Append(toks[t].Text);
+                rows.Add(new InsnMatchItem(va, sb.ToString().Trim()));
+                if (rows.Count >= MaxInsnMatches) return (rows, true);
             }
         }
         return (rows, false);
