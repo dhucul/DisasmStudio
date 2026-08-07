@@ -947,7 +947,12 @@ internal static class Dialogs
         Margin = new Thickness(0, 0, 0, 4),
     };
 
-    private static bool ShowModal(Window owner, string title, Panel content, Control focus, int width = 320)
+    /// <param name="focus">Control to focus on open; null focuses the confirm button (a message-only dialog).</param>
+    /// <param name="okText">Label for the confirming button.</param>
+    /// <param name="cancelText">Label for the dismissing button, or null for a single-button notice — the one
+    /// button then also answers Esc and the window close box.</param>
+    private static bool ShowModal(Window owner, string title, Panel content, Control? focus, int width = 320,
+                                  string okText = "OK", string? cancelText = "Cancel")
     {
         var win = new Window
         {
@@ -963,8 +968,7 @@ internal static class Dialogs
         };
 
         bool result = false;
-        var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 70, Margin = new Thickness(0, 0, 8, 0) };
-        var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 70 };
+        var ok = new Button { Content = okText, IsDefault = true, MinWidth = 70 };
         ok.Click += (_, _) => { result = true; win.DialogResult = true; };
 
         var buttons = new StackPanel
@@ -973,8 +977,17 @@ internal static class Dialogs
             HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(16, 0, 16, 16),
         };
-        buttons.Children.Add(ok);
-        buttons.Children.Add(cancel);
+        if (cancelText is null)
+        {
+            ok.IsCancel = true;   // sole button: Esc and the close box resolve to it too
+            buttons.Children.Add(ok);
+        }
+        else
+        {
+            ok.Margin = new Thickness(0, 0, 8, 0);
+            buttons.Children.Add(ok);
+            buttons.Children.Add(new Button { Content = cancelText, IsCancel = true, MinWidth = 70 });
+        }
 
         var root = new DockPanel();
         DockPanel.SetDock(buttons, Dock.Bottom);
@@ -982,10 +995,46 @@ internal static class Dialogs
         root.Children.Add(content);
         win.Content = root;
 
-        focus.Loaded += (_, _) => focus.Focus();
+        var toFocus = focus ?? ok;
+        toFocus.Loaded += (_, _) => toFocus.Focus();
         win.ShowDialog();
         return result;
     }
+
+    /// <summary>Body text for a themed message dialog: a bold headline plus wrapped paragraphs.</summary>
+    private static StackPanel MessagePanel(string headline, string body, Brush? headlineBrush = null)
+    {
+        var panel = new StackPanel { Margin = new Thickness(16) };
+        var head = Label(headline);
+        head.FontWeight = FontWeights.SemiBold;
+        head.TextWrapping = TextWrapping.Wrap;
+        if (headlineBrush is not null) head.Foreground = headlineBrush;
+        panel.Children.Add(head);
+
+        // Blank-line-separated paragraphs become separate blocks so they get real spacing rather than a
+        // run-on wall of text.
+        foreach (string para in body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+        {
+            var tb = Label(para.Trim());
+            tb.TextWrapping = TextWrapping.Wrap;
+            tb.Margin = new Thickness(0, 10, 0, 0);
+            panel.Children.Add(tb);
+        }
+        return panel;
+    }
+
+    /// <summary>Themed stand-in for a Yes/No <see cref="MessageBox"/>. Beyond matching the theme, this is a WPF
+    /// window rather than the Win32 message box, so the dispatcher keeps running while it is open — the owner
+    /// carries on painting instead of being left as an unpainted white rectangle.</summary>
+    public static bool AskConfirm(Window owner, string title, string headline, string body,
+                                  string yes = "Yes", string no = "No", int width = 470)
+        => ShowModal(owner, title, MessagePanel(headline, body, Palette.AccentBrush), null, width, yes, no);
+
+    /// <summary>Themed stand-in for a single-button informational / warning <see cref="MessageBox"/>.</summary>
+    public static void ShowNotice(Window owner, string title, string headline, string body, bool warning = false,
+                                  int width = 470)
+        => ShowModal(owner, title, MessagePanel(headline, body, warning ? Palette.WarnTextBrush : Palette.AccentBrush),
+                     null, width, "OK", cancelText: null);
 
     private static ulong? ParseHex(string? s)
     {

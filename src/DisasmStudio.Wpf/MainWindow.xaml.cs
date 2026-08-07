@@ -659,10 +659,10 @@ public partial class MainWindow : Window
             }
             catch { logPath = null; }
             using (Diagnostics.UiWatchdog.ModalScope("Run to OEP — hunt failed"))
-                MessageBox.Show(this,
-                    $"{why}\n\nStrategy: {r.Method}\n" +
-                    (logPath is null ? "" : $"\nThe full timeline (guarded sections, every stop, why it ended) was written to:\n{logPath}"),
-                    "Run to OEP", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Dialogs.ShowNotice(this, "Run to OEP", why,
+                    $"Strategy: {r.Method}" +
+                    (logPath is null ? "" : $"\n\nThe full timeline — which sections were guarded, every stop and what was done with it, and why it ended — was written to:\n{logPath}"),
+                    warning: true);
             return;
         }
         if (_dbg is not { IsStopped: true } d)
@@ -678,19 +678,20 @@ public partial class MainWindow : Window
         string caveat = looksOk ? "" : " — the bytes there don't look like a function prologue, so treat it with suspicion";
         StatusText.Text = $"OEP at {oep:X} via {r.Method}{approach}{skipped}{caveat}. The program is live: step, set breakpoints, or continue.";
 
-        // Modal, and raised straight off a debugger stop: while it is up the UI thread services nothing, so it
-        // must be marked or the watchdog reports it as a hang — and if it opens behind the main window that is
-        // exactly what it looks like to the user, too. Scoped to the dialog alone, not the work that follows.
-        MessageBoxResult ans;
+        // Raised straight off a debugger stop, so it is marked for the watchdog. A themed WPF dialog rather
+        // than a Win32 message box: it matches the window, and it keeps the dispatcher pumping so the owner
+        // carries on painting instead of ghosting white behind it. Scoped to the dialog alone, not the work
+        // that follows.
+        bool reanalyze;
         using (Diagnostics.UiWatchdog.ModalScope("Run to OEP — re-analyze from unpacked memory?"))
-            ans = MessageBox.Show(this,
-                $"Stopped at the original entry point ({oep:X}).\n\n" +
-                "Re-analyze the disassembly from the now-unpacked process memory? This dumps the live image, runs the " +
-                "full analyzer over it seeded at the OEP, and replaces the listing, functions, strings and cross-references " +
-                "with the real program instead of the loader stub.\n\n" +
+            reanalyze = Dialogs.AskConfirm(this, "Run to OEP",
+                $"Stopped at the original entry point ({oep:X}).",
+                "Re-analyze the disassembly from the now-unpacked process memory?\n\n" +
+                "This dumps the live image, runs the full analyzer over it seeded at the OEP, and replaces the " +
+                "listing, functions, strings and cross-references with the real program instead of the loader stub.\n\n" +
                 "The process stays live and steppable, and nothing is written to disk.",
-                "Run to OEP", MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (ans == MessageBoxResult.Yes) await ReanalyzeFromUnpackedMemory(oep, r.Method);
+                yes: "Re-analyze", no: "Not now");
+        if (reanalyze) await ReanalyzeFromUnpackedMemory(oep, r.Method);
     }
 
     /// <summary>Snap a guard-reported OEP forward to the function prologue it approaches.
