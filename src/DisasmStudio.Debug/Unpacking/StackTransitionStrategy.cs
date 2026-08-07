@@ -50,9 +50,19 @@ public sealed class StackTransitionStrategy : IOepStrategy
         {
             case Phase.Stepping:
             {
+                // Not our single-step. Re-issue the step rather than Go(): this phase only ever advances on a
+                // Step stop, so resuming freely would abandon the walk and leave it waiting for a stop that can
+                // no longer arrive. Counted so MaxSteps bounds this path too, rather than spinning on a stop
+                // that keeps recurring.
                 if (stop.Reason != StopReason.Step)
                 {
-                    eng.Go();
+                    if (++_stepCount >= MaxSteps)
+                    {
+                        _log.Append($"  Step limit ({MaxSteps}) reached while resynchronising; no OEP found.\n");
+                        _phase = Phase.Done;
+                        return null;
+                    }
+                    eng.StepInto();
                     return null;
                 }
 

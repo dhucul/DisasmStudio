@@ -102,9 +102,13 @@ public sealed class EntropyWatchStrategy : IOepStrategy
             case Phase.Sampling:
             {
                 if (!_timerFired) { eng.Go(); return null; }
-                // Only consume stops our timer produced (Paused). An exception or user breakpoint
-                // must not be silently resumed over — surface it so the caller can handle it.
-                if (stop.Reason != StopReason.Paused) return null;
+                // Only consume stops our timer produced (Paused); anything else is not ours, so resume and keep
+                // sampling. It must resume rather than return: DebugSession gates OnStop behind Owns, but
+                // UnpackSession forwards every stop, and a bare `return null` there leaves the debuggee frozen
+                // with nothing pending — the unpack run would hang instead of finishing. Deciding what a
+                // non-timer stop means is the host's job, and both hosts already do it before this point
+                // (UnpackSession handles Exception ahead of the call; DebugSession routes it to the user).
+                if (stop.Reason != StopReason.Paused) { eng.Go(); return null; }
                 _timerFired = false;
                 _sampleCount++;
 

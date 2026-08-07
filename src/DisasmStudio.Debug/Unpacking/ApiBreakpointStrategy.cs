@@ -21,6 +21,9 @@ public sealed class ApiBreakpointStrategy : IOepStrategy
     private readonly Dictionary<ulong, string> _apiBps = [];   // va -> api name
     private readonly Dictionary<string, int> _callCounts = [];
     private int _totalCalls;
+    /// <summary>Return address the in-flight step-out should land on, or 0 when none is pending. Recorded
+    /// because the landing is otherwise indistinguishable from any other breakpoint stop.</summary>
+    private ulong _stepOutRet;
 
     // APIs to break on, in priority order.
     private static readonly string[] TargetApis =
@@ -166,41 +169,16 @@ public sealed class ApiBreakpointStrategy : IOepStrategy
                 // For VirtualProtect: step out and see where execution returns.
                 // The return address is often near the OEP.
                 if (apiName == "VirtualProtect")
-                {
-                    // Read the return address from the stack.
-                    var sp = eng.GetRegisters()?.Sp ?? 0;
-                    var retBytes = eng.ReadMemory(sp, eng.Is64 ? 8 : 4);
-                    ulong retAddr = retBytes.Length >= (eng.Is64 ? 8 : 4)
-                        ? (eng.Is64 ? BitConverter.ToUInt64(retBytes, 0) : BitConverter.ToUInt32(retBytes, 0))
-                        : 0;
-
-                    if (retAddr != 0)
-                    {
-                        _log.Append($"    VirtualProtect return address: {retAddr:X}. Stepping out…\n");
-                        _phase = Phase.StepOut;
-                        eng.StepOut();
-                        return null;
-                    }
-                }
+                    return BeginStepOut(eng, "VirtualProtect");
 
                 // For GetProcAddress: if it's been called several times already, the stub may be
                 // finishing import resolution. Step out and watch.
                 if (apiName == "GetProcAddress" && _callCounts[apiName] >= 3)
-                {
-                    _log.Append($"    GetProcAddress called {_callCounts[apiName]}x — stepping out to find OEP.\n");
-                    _phase = Phase.StepOut;
-                    eng.StepOut();
-                    return null;
-                }
+                    return BeginStepOut(eng, $"GetProcAddress called {_callCounts[apiName]}x");
 
                 // For LoadLibrary: step out to see what happens after the DLL load.
                 if (apiName.StartsWith("LoadLibrary", StringComparison.OrdinalIgnoreCase))
-                {
-                    _log.Append($"    {apiName} called — stepping out.\n");
-                    _phase = Phase.StepOut;
-                    eng.StepOut();
-                    return null;
-                }
+                    return BeginStepOut(eng, apiName);
 
                 // Default: just continue running.
                 eng.Go();
@@ -209,6 +187,31 @@ public sealed class ApiBreakpointStrategy : IOepStrategy
 
             case Phase.StepOut:
             {
+                // One of our own API breakpoints fired before the step-out landed. Resuming here would cancel
+                // the pending step-out and strand this phase, so fold the hit back into WaitApiCall, which
+                // counts it — MaxApiCalls then still bounds the run.
+                if (stop.Reason == StopReason.Breakpoint && stop.Address != _stepOutRet
+                    && _apiBps.ContainsKey(stop.Address))
+                {
+                    _stepOutRet = 0;
+                    _phase = Phase.WaitApiCall;
+                    return OnStop(eng, stop);
+                }
+
+                // The step-out lands on the engine's temp breakpoint at the return address, which surfaces as
+                // StopReason.Breakpoint; StopReason.Step is only the fallback taken when no temp breakpoint
+                // could be planted. Anything else is not our landing and must not be read as one:
+                // UnpackSession forwards every stop without an Owns gate, so treating a stray address as the
+                // step-out result would report it as the OEP.
+                bool landed = (_stepOutRet != 0 && stop.Address == _stepOutRet) || stop.Reason == StopReason.Step;
+                _stepOutRet = 0;
+                if (!landed)
+                {
+                    _phase = Phase.WaitApiCall;
+                    eng.Go();
+                    return null;
+                }
+
                 // We've stepped out of the API call. The return address is where execution resumes.
                 // Check if it looks like a prologue.
                 var head = eng.ReadMemory(stop.Address, 32);
@@ -219,8 +222,7 @@ public sealed class ApiBreakpointStrategy : IOepStrategy
                     return stop.Address;
                 }
 
-                // Not a prologue — set a breakpoint a few instructions ahead and run.
-                // Or just keep running and wait for the next API call.
+                // Not a prologue — keep running and wait for the next API call.
                 _log.Append($"    Step-out landed at {stop.Address:X} — not a prologue; continuing.\n");
                 _phase = Phase.WaitApiCall;
                 eng.Go();
@@ -233,9 +235,47 @@ public sealed class ApiBreakpointStrategy : IOepStrategy
         }
     }
 
+    /// <summary>Record the return address and issue the step-out. Reading it up front is what lets
+    /// <see cref="Owns"/> and <see cref="OnStop"/> tell the landing from any other breakpoint stop — at an API
+    /// entry breakpoint the return address is still the top of the stack, before the callee's prologue.</summary>
+    private ulong? BeginStepOut(DebuggerEngine eng, string why)
+    {
+        int n = eng.Is64 ? 8 : 4;
+        ulong sp = eng.GetRegisters()?.Sp ?? 0;
+        var retBytes = sp != 0 ? eng.ReadMemory(sp, n) : [];
+        _stepOutRet = retBytes.Length >= n
+            ? (eng.Is64 ? BitConverter.ToUInt64(retBytes, 0) : BitConverter.ToUInt32(retBytes, 0))
+            : 0;
+
+        if (_stepOutRet == 0)
+        {
+            // Without a return address the landing could not be recognised, and a step-out would be resolved by
+            // the engine's single-step fallback into an unbounded walk. Keep waiting for the next API call.
+            _log.Append($"    {why} — return address unreadable; continuing without stepping out.\n");
+            eng.Go();
+            return null;
+        }
+
+        _log.Append($"    {why} — return address {_stepOutRet:X}. Stepping out…\n");
+        _phase = Phase.StepOut;
+        eng.StepOut();
+        return null;
+    }
+
     public bool Owns(DebuggerEngine eng, StopInfo stop) =>
         (_phase == Phase.WaitApiCall && stop.Reason == StopReason.Breakpoint && _apiBps.ContainsKey(stop.Address))
-        || (_phase == Phase.StepOut && stop.Reason == StopReason.Step);
+        || (_phase == Phase.StepOut && OwnsStepOutStop(stop));
+
+    /// <summary>A stop during <see cref="Phase.StepOut"/> is ours in three shapes: the step-out landing on the
+    /// engine's temp breakpoint at the recorded return address (<see cref="StopReason.Breakpoint"/> — see
+    /// <c>DebuggerEngine</c>'s temp-breakpoint stop), its single-step fallback when no temp breakpoint could be
+    /// planted (<see cref="StopReason.Step"/>), or one of our own API breakpoints firing before the step-out
+    /// lands. That last one has to be claimed too: routed away as a user breakpoint it would be resumed with
+    /// <c>Go()</c>, which cancels the pending step-out and strands this phase for the rest of the run.</summary>
+    private bool OwnsStepOutStop(StopInfo stop) =>
+        stop.Reason == StopReason.Step
+        || (stop.Reason == StopReason.Breakpoint
+            && (stop.Address == _stepOutRet || _apiBps.ContainsKey(stop.Address)));
 
     public void Abort(DebuggerEngine eng)
     {
@@ -246,6 +286,7 @@ public sealed class ApiBreakpointStrategy : IOepStrategy
     private void Disarm(DebuggerEngine eng)
     {
         _phase = Phase.Done;
+        _stepOutRet = 0;
         foreach (var va in _apiBps.Keys)
             eng.RemoveBreakpoint(va);
         _apiBps.Clear();

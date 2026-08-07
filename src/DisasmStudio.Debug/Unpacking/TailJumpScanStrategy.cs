@@ -93,7 +93,14 @@ public sealed class TailJumpScanStrategy : IOepStrategy
 
     public ulong? OnStop(DebuggerEngine eng, StopInfo stop)
     {
-        if (_phase != Phase.WaitBreakpoint) return null;
+        // Armed but not yet at the candidate: keep running. Returning without a resume would freeze the
+        // ungated host (UnpackSession forwards every stop); once done, returning null is right — IsDone is
+        // what tells the host the hunt is over.
+        if (_phase != Phase.WaitBreakpoint)
+        {
+            if (!IsDone) eng.Go();
+            return null;
+        }
 
         if (stop.Reason == StopReason.Breakpoint && stop.Address == _bpVa)
         {
