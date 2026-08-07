@@ -306,6 +306,21 @@ public sealed class DebugSession
                     _oepPendingOutcome = null;
                     OepHuntFinished?.Invoke(new OepHuntResult(true, immediate, finder.ActiveMethod, 0, finder.Log, null));
                 }
+                return null;
+            }
+            // The strategy exhausted itself immediately (e.g. no valid OEP candidate found, no guardable
+            // sections, baseline entropy already low). Begin returned null without resuming, and the finder
+            // is already done — end the hunt now so the UI reports the failure instead of leaving the
+            // debuggee stopped with an armed-but-dead hunt.
+            if (finder.IsDone)
+            {
+                if (ClaimOepHunt() is not null)
+                {
+                    _oepPendingOutcome = null;
+                    OepHuntFinished?.Invoke(new OepHuntResult(false, 0, finder.ActiveMethod, 0, finder.Log,
+                        $"Strategy {finder.ActiveMethod} could not be armed — see the log for details."));
+                }
+                return null;
             }
             return null;
         }
@@ -404,7 +419,19 @@ public sealed class DebugSession
                         FinishOepHuntLocked(new OepHuntResult(false, 0, finder.ActiveMethod, _oepSkippedBps, finder.Log, ex.Message));
                         return false;
                     }
-                    if (oep is null) { _oepResumePending = true; return true; }   // the finder resumed; no UI stop
+                    if (oep is null)
+                    {
+                        // The finder may have exhausted itself without finding the OEP (e.g. timeout, hit
+                        // limit, all candidates rejected). When IsDone is true the finder issued no resume
+                        // and the debuggee is still stopped — end the hunt so the failure is reported.
+                        if (finder.IsDone)
+                        {
+                            FinishOepHuntLocked(new OepHuntResult(false, 0, finder.ActiveMethod, _oepSkippedBps, finder.Log,
+                                $"Strategy {finder.ActiveMethod} exhausted without finding the OEP."));
+                            return false;
+                        }
+                        _oepResumePending = true; return true;   // the finder resumed; no UI stop
+                    }
                     // Found. The finder issued no resume, so let the stop fall through the normal path and land
                     // the caret, registers and stack on the OEP.
                     FinishOepHuntLocked(new OepHuntResult(true, oep.Value, finder.ActiveMethod, _oepSkippedBps, finder.Log, null));

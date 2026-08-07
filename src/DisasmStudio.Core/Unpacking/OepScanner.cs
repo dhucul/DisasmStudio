@@ -16,7 +16,6 @@ namespace DisasmStudio.Core.Unpacking;
 public static class OepScanner
 {
     private const int StubScanBytes = 0x4000;   // how much of the stub to scan
-    private const int MaxInstructions = 6000;
     private const ulong FarThreshold = 0x1000;  // a transfer this far from the stub entry is "leaving the stub"
 
     /// <summary>How far past a candidate to look for the prologue it approaches (see <see cref="RefineToPrologue"/>).</summary>
@@ -94,54 +93,18 @@ public static class OepScanner
         var code = mem(stubEntry, StubScanBytes);
         if (code.Length < 2) return 0;
 
-        var dec = Decoder.Create(is64 ? 64 : 32, new ByteArrayCodeReader(code));
-        dec.IP = stubEntry;
-        ulong end = stubEntry + (ulong)code.Length;
-        int ptr = is64 ? 8 : 4;
-        var regs = new Dictionary<Register, ulong>();
-        ulong lastPush = 0; bool havePush = false;
+        // Delegate instruction-level tracking to the shared StubInstructionTracker; apply our own acceptance
+        // criteria (far threshold, executable section, prologue validation).
+        var transfer = StubInstructionTracker.FindFirstTransfer(
+            mem, code, stubEntry, is64,
+            t => Accept(mem, view, imageBase, is64, stubEntry, t.Target));
 
-        for (int n = 0; n < MaxInstructions && dec.IP < end; n++)
-        {
-            dec.Decode(out var ins);
-            if (ins.IsInvalid) continue;
-
-            switch (ins.Mnemonic)
-            {
-                case Mnemonic.Mov when ins.Op0Kind == OpKind.Register && IsImm(ins.Op1Kind):
-                    regs[ins.Op0Register] = ins.GetImmediate(1);
-                    break;
-
-                case Mnemonic.Push when IsImm(ins.Op0Kind):
-                    lastPush = ins.GetImmediate(0); havePush = true;
-                    break;
-                case Mnemonic.Push when ins.Op0Kind == OpKind.Register:
-                    havePush = regs.TryGetValue(ins.Op0Register, out lastPush);
-                    break;
-
-                case Mnemonic.Ret when havePush:                       // push oep; ret
-                    if (Accept(mem, view, imageBase, is64, stubEntry, lastPush)) return lastPush;
-                    havePush = false;
-                    break;
-
-                case Mnemonic.Jmp:
-                    ulong target = ins.Op0Kind switch
-                    {
-                        OpKind.NearBranch16 or OpKind.NearBranch32 or OpKind.NearBranch64 => ins.NearBranchTarget,
-                        OpKind.Register => regs.GetValueOrDefault(ins.Op0Register),
-                        OpKind.Memory => DerefJmp(mem, ins, ptr),
-                        _ => 0,
-                    };
-                    if (target != 0 && Accept(mem, view, imageBase, is64, stubEntry, target)) return target;
-                    break;
-            }
-        }
-        return 0;
+        return transfer?.Target ?? 0;
     }
 
     /// <summary>A candidate OEP is accepted when it is executable, lies well outside the stub, and decodes as a
     /// plausible function entry.</summary>
-    private static bool Accept(MemReader mem, PeView view, ulong imageBase, bool is64, ulong stubEntry, ulong target)
+    public static bool Accept(MemReader mem, PeView view, ulong imageBase, bool is64, ulong stubEntry, ulong target)
     {
         if (target == 0) return false;
         ulong delta = target > stubEntry ? target - stubEntry : stubEntry - target;
@@ -151,16 +114,8 @@ public static class OepScanner
         return head.Length >= 2 && OepValidator.LooksLikeOep(head, is64);
     }
 
-    private static ulong DerefJmp(MemReader mem, in Instruction ins, int ptr)
-    {
-        ulong addr = ins.IsIPRelativeMemoryOperand ? ins.IPRelativeMemoryAddress
-            : ins.MemoryBase == Register.None && ins.MemoryIndex == Register.None ? ins.MemoryDisplacement64 : 0;
-        if (addr == 0) return 0;
-        var p = mem(addr, ptr);
-        return p.Length < ptr ? 0 : ptr == 8 ? BitConverter.ToUInt64(p, 0) : BitConverter.ToUInt32(p, 0);
-    }
-
-    private static bool IsExecutableVa(PeView view, ulong imageBase, ulong va)
+    /// <summary>Check whether a VA falls within an executable section of the PE.</summary>
+    public static bool IsExecutableVa(PeView view, ulong imageBase, ulong va)
     {
         foreach (var s in view.Sections)
         {
@@ -171,7 +126,4 @@ public static class OepScanner
         }
         return false;
     }
-
-    private static bool IsImm(OpKind k) => k is OpKind.Immediate8 or OpKind.Immediate8to16 or OpKind.Immediate8to32
-        or OpKind.Immediate8to64 or OpKind.Immediate16 or OpKind.Immediate32 or OpKind.Immediate32to64 or OpKind.Immediate64;
 }

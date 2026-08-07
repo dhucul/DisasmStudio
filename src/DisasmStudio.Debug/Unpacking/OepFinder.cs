@@ -28,18 +28,44 @@ public enum OepMethod
     /// <summary>Intrusive VM diagnostics: single-step a bounded window and recover runtime dispatch sites,
     /// concrete handler targets and short handler-body samples. Produces a trace report, not an unpacked PE.</summary>
     TraceVm,
+    /// <summary>Instruction-level stub scanning: decode the stub, track register values, and break at the
+    /// first far control transfer (jmp/push+ret/call) to a prologue-looking target. Works on any packer
+    /// whose stub ends with a recognizable terminal jump, regardless of section layout.</summary>
+    TailJumpScan,
+    /// <summary>Periodically sample section entropy while the stub runs; when entropy drops below a
+    /// threshold (decryption complete), scan the decrypted region for a prologue and break there.
+    /// Handles in-place decryptors that never cross section boundaries.</summary>
+    EntropyWatch,
+    /// <summary>Break on key post-unpacking API calls (VirtualProtect, GetProcAddress, VirtualAlloc);
+    /// the final call before the OEP transfer reveals where execution goes next. Works on protectors
+    /// that use the Windows loader APIs to prepare the original code.</summary>
+    ApiBreakpoint,
+    /// <summary>Arm execute memory-breakpoints on ALL executable pages; track which pages get hit and
+    /// when. The OEP page is hit once, late, after all stub activity. No prior section knowledge needed.</summary>
+    ExecutionHeatmap,
+    /// <summary>Watch the stack pointer: when it returns near its entry value after the stub deallocates
+    /// its workspace, and the instruction at the return address looks like a prologue, that's the OEP.</summary>
+    StackTransition,
+    /// <summary>Chain multiple strategies in priority order. When one strategy is exhausted without
+    /// finding the OEP, the next one starts automatically. The chain is determined by the packer detector
+    /// or a sensible default.</summary>
+    MultiPass,
 }
 
 /// <summary>
 /// Drives the debugger to the Original Entry Point. Strategies build on existing engine primitives — the
 /// ESP-trick uses a hardware ReadWrite watchpoint on the pushad-saved registers; the section-guard uses
 /// <see cref="DebuggerEngine.GuardRegion"/> to break (<see cref="StopReason.GuardExec"/>) the moment
-/// execution transfers into an originally-non-stub section. State machine: callers invoke <see cref="Begin"/>
-/// on the entry-point stop, then <see cref="OnStop"/> on each subsequent stop until it returns the OEP.
+/// execution transfers into an originally-non-stub section. New strategies (<see cref="TailJumpScan"/>,
+/// <see cref="EntropyWatch"/>, <see cref="ApiBreakpoint"/>, <see cref="ExecutionHeatmap"/>,
+/// <see cref="StackTransition"/>) each implement <see cref="IOepStrategy"/> and are composed by
+/// <see cref="MultiPass"/>.
+/// State machine: callers invoke <see cref="Begin"/> on the entry-point stop, then <see cref="OnStop"/>
+/// on each subsequent stop until it returns the OEP.
 /// </summary>
 public sealed class OepFinder
 {
-    private enum Phase { Init, StepPushad, WaitPopad, WaitGuard, WaitMemBp, WaitManual, Done }
+    private enum Phase { Init, StepPushad, WaitPopad, WaitGuard, WaitMemBp, WaitManual, WaitStrategy, Done }
 
     private readonly OepMethod _requested;
     private ulong? _manualOep;
@@ -57,16 +83,23 @@ public sealed class OepFinder
     /// faulting can re-query them and tell "the target undid our guard" from "it never reached the OEP".</summary>
     private readonly List<(string Name, ulong Lo, ulong Size)> _guardedSections = [];
 
+    // ---- new strategy infrastructure ----
+    private IOepStrategy? _activeStrategy;
+    private readonly Queue<OepMethod> _multiPassQueue = new();
+    private IReadOnlyList<OepMethod>? _multiPassChain;
+
     public string Log => _log.ToString();
     public OepMethod ActiveMethod { get; private set; }
     /// <summary>The hunt has finished (found the OEP, or was aborted) and holds no armed state.</summary>
     public bool IsDone => _phase == Phase.Done;
 
-    public OepFinder(OepMethod method, ulong? manualOep, ulong staticImageBase = 0)
+    public OepFinder(OepMethod method, ulong? manualOep, ulong staticImageBase = 0,
+        IReadOnlyList<OepMethod>? multiPassChain = null)
     {
         _requested = method;
         _manualOep = manualOep;
         _staticImageBase = staticImageBase;
+        _multiPassChain = multiPassChain;
     }
 
     /// <summary>Arm the chosen strategy and issue the first resume. Call on the entry-point stop. Returns a
@@ -75,18 +108,17 @@ public sealed class OepFinder
     {
         if (_requested == OepMethod.Manual && _manualOep is { } moep)
         {
-            // The user types a static VA (file image base); rebase it to the runtime load base for ASLR.
             if (_staticImageBase != 0 && eng.ImageBase != 0 && moep >= _staticImageBase)
                 moep = moep - _staticImageBase + eng.ImageBase;
             _manualOep = moep;
             ActiveMethod = OepMethod.Manual;
-            if (moep == eng.EntryPoint)   // already at the requested OEP — no breakpoint needed
+            if (moep == eng.EntryPoint)
             {
                 _phase = Phase.Done;
                 _log.Append($"Manual OEP {moep:X} is the entry point — already there.\n");
                 return moep;
             }
-            _manualWasUserBp = eng.HasBreakpoint(moep);   // don't delete the user's own breakpoint on abort
+            _manualWasUserBp = eng.HasBreakpoint(moep);
             if (!eng.TrySetBreakpoint(moep))
                 throw new InvalidOperationException($"Could not arm manual OEP breakpoint at {moep:X}.");
             _phase = Phase.WaitManual;
@@ -95,27 +127,15 @@ public sealed class OepFinder
             return null;
         }
 
-        // The ESP-trick relies on pushad, which is x86-only.
-        if ((_requested is OepMethod.Auto or OepMethod.EspTrick) && eng.Is32)
+        if (_requested == OepMethod.MultiPass)
         {
-            ActiveMethod = OepMethod.EspTrick;
-            _entrySp = eng.GetRegisters()?.Sp ?? 0;
-            _phase = Phase.StepPushad;
-            _log.Append("ESP-trick: single-stepping the stub's first instruction.\n");
-            eng.StepInto();
-            return null;
+            var chain = _multiPassChain ?? DefaultMultiPassChain(eng.Is32);
+            foreach (var m in chain) _multiPassQueue.Enqueue(m);
+            _log.Append($"MultiPass: {_multiPassQueue.Count} strategies queued: {string.Join(" → ", chain)}.\n");
+            return StartNextMultiPass(eng);
         }
 
-        if (_requested == OepMethod.SectionExecBp)
-        {
-            ActiveMethod = OepMethod.SectionExecBp;
-            StartSectionExecBp(eng);
-            return null;
-        }
-
-        ActiveMethod = OepMethod.SectionGuard;
-        StartSectionGuard(eng);
-        return null;
+        return StartStrategy(_requested, eng);
     }
 
     /// <summary>Process a stop. Returns the OEP VA once found, or null when it has issued the next resume.</summary>
@@ -146,16 +166,12 @@ public sealed class OepFinder
             {
                 if (stop.Reason == StopReason.Watchpoint)
                 {
-                    // A hardware watchpoint stop carries no indication of which register fired it, so a user's
-                    // own watchpoint landing here is indistinguishable from the popad hit and is consumed as
-                    // one. Recorded rather than hidden: if the guard then reports a surprising OEP, the log says
-                    // this is where the state machine could have been misled.
                     if (_espWatch != 0) { eng.RemoveBreakpoint(_espWatch); _espWatch = 0; }
                     _log.Append($"ESP-trick: watchpoint at {stop.Address:X} taken as the popad hit (a user watchpoint "
                               + "would be indistinguishable here); guarding non-stub sections.\n");
-                    StartSectionGuard(eng);   // keep ActiveMethod = EspTrick for reporting
+                    StartSectionGuard(eng);
                 }
-                else eng.Go();                // unrelated stop — keep running toward popad
+                else eng.Go();
                 return null;
             }
             case Phase.WaitGuard:
@@ -191,11 +207,149 @@ public sealed class OepFinder
                 eng.Go();
                 return null;
             }
+            case Phase.WaitStrategy:
+            {
+                if (_activeStrategy is null) { eng.Go(); return null; }
+                var result = _activeStrategy.OnStop(eng, stop);
+                if (result is { } oep)
+                {
+                    _log.Append(_activeStrategy.Log);
+                    _activeStrategy = null;
+                    _phase = Phase.Done;
+                    return oep;
+                }
+                if (_activeStrategy.IsDone)
+                {
+                    // Strategy exhausted without finding OEP.
+                    _log.Append(_activeStrategy.Log);
+                    _log.Append($"Strategy {_activeStrategy.Method} exhausted without finding OEP.\n");
+                    _activeStrategy.Abort(eng);
+                    _activeStrategy = null;
+
+                    if (_multiPassQueue.Count > 0)
+                    {
+                        // MultiPass: try the next strategy in the chain.
+                        return StartNextMultiPass(eng);
+                    }
+
+                    _phase = Phase.Done;
+                    return null;
+                }
+                return null;
+            }
             default:
                 eng.Go();
                 return null;
         }
     }
+
+    private ulong? StartStrategy(OepMethod method, DebuggerEngine eng)
+    {
+        ActiveMethod = method;
+
+        switch (method)
+        {
+            case OepMethod.EspTrick when eng.Is32:
+                _entrySp = eng.GetRegisters()?.Sp ?? 0;
+                _phase = Phase.StepPushad;
+                _log.Append("ESP-trick: single-stepping the stub's first instruction.\n");
+                eng.StepInto();
+                return null;
+
+            case OepMethod.SectionExecBp:
+                StartSectionExecBp(eng);
+                return null;
+
+            case OepMethod.SectionGuard:
+                StartSectionGuard(eng);
+                return null;
+
+            case OepMethod.TailJumpScan:
+                _activeStrategy = new TailJumpScanStrategy();
+                break;
+
+            case OepMethod.EntropyWatch:
+                _activeStrategy = new EntropyWatchStrategy();
+                break;
+
+            case OepMethod.ApiBreakpoint:
+                _activeStrategy = new ApiBreakpointStrategy();
+                break;
+
+            case OepMethod.ExecutionHeatmap:
+                _activeStrategy = new ExecutionHeatmapStrategy();
+                break;
+
+            case OepMethod.StackTransition:
+                _activeStrategy = new StackTransitionStrategy();
+                break;
+
+            default:
+                // Fall back to section guard for Auto on x64, or when EspTrick isn't applicable.
+                ActiveMethod = OepMethod.SectionGuard;
+                StartSectionGuard(eng);
+                return null;
+        }
+
+        if (_activeStrategy is not null)
+        {
+            _phase = Phase.WaitStrategy;
+            var immediate = _activeStrategy.Begin(eng);
+            if (immediate is { } v)
+            {
+                _log.Append(_activeStrategy.Log);
+                _activeStrategy = null;
+                _phase = Phase.Done;
+                return v;
+            }
+            if (_activeStrategy.IsDone)
+            {
+                _log.Append(_activeStrategy.Log);
+                _activeStrategy = null;
+                _phase = Phase.Done;
+            }
+        }
+        return null;
+    }
+
+    private ulong? StartNextMultiPass(DebuggerEngine eng)
+    {
+        while (_multiPassQueue.Count > 0)
+        {
+            var method = _multiPassQueue.Dequeue();
+            _log.Append($"MultiPass: trying {method}…\n");
+            var result = StartStrategy(method, eng);
+            if (result is { } oep) return oep;
+            if (_phase == Phase.WaitStrategy && _activeStrategy is not null && !_activeStrategy.IsDone)
+                return null; // strategy is running; wait for stops
+            // Strategy finished immediately without finding OEP; loop to next.
+        }
+        _log.Append("MultiPass: all strategies exhausted; no OEP found.\n");
+        _phase = Phase.Done;
+        return null;
+    }
+
+    /// <summary>Default priority-ordered chain for MultiPass when no packer-specific chain is provided.</summary>
+    public static IReadOnlyList<OepMethod> DefaultMultiPassChain(bool is32) => is32
+        ? (IReadOnlyList<OepMethod>)new OepMethod[]
+        {
+            OepMethod.EspTrick,        // fast, works on most x86 compressors
+            OepMethod.TailJumpScan,    // instruction-level, works on custom packers
+            OepMethod.EntropyWatch,    // in-place decryptors
+            OepMethod.ApiBreakpoint,   // protectors with API calls
+            OepMethod.SectionGuard,    // cross-section jumps
+            OepMethod.ExecutionHeatmap,// complex multi-page
+            OepMethod.StackTransition, // niche but cheap
+        }
+        : new OepMethod[]
+        {
+            OepMethod.TailJumpScan,
+            OepMethod.EntropyWatch,
+            OepMethod.ApiBreakpoint,
+            OepMethod.SectionGuard,
+            OepMethod.ExecutionHeatmap,
+            OepMethod.StackTransition,
+        };
 
     private void StartSectionGuard(DebuggerEngine eng)
     {
@@ -214,13 +368,6 @@ public sealed class OepFinder
                     _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — skipped ({(size == 0 ? "empty" : "holds the entry point")}).\n");
                     continue;
                 }
-                // Only executable sections can be an OEP: reaching it is an instruction fetch, and the loader
-                // only permits that where it mapped the section executable. Walking the rest is not merely
-                // useless, it is ruinous — guarding is per 4 KB page, so a resource section (routinely hundreds
-                // of megabytes) costs hundreds of thousands of VirtualQueryEx/VirtualProtectEx calls and
-                // shatters the target's VA descriptor tree. Cost aside, a non-executable section already faults
-                // on a fetch without our help; the only case skipped here is a packer that re-protects a data
-                // section to executable at runtime, which by definition would no longer fault anyway.
                 if (!s.IsExecutable)
                 {
                     _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — skipped (not executable; an OEP cannot be fetched from it).\n");
@@ -265,9 +412,6 @@ public sealed class OepFinder
              + "ESP-trick on a 32-bit target.";
     }
 
-    /// <summary>Arm a whole-section <see cref="MemAccess.Execute"/> memory breakpoint on every non-stub section
-    /// (the same engine path as the Memory Map's "Break on execute (section)"), then run. Execution into any of
-    /// them faults on the instruction fetch and surfaces a <see cref="StopReason.MemoryBreakpoint"/> — the OEP.</summary>
     private void StartSectionExecBp(DebuggerEngine eng)
     {
         _execBps.Clear();
@@ -279,9 +423,6 @@ public sealed class OepFinder
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
                 bool containsEntry = eng.EntryPoint >= lo && eng.EntryPoint - lo < size;
-                // Executable sections only, for the same reason as the section guard: an OEP is an instruction
-                // fetch, and arming a whole resource/reloc section costs a page-granular walk over hundreds of
-                // megabytes for something that can never be the answer.
                 if (size == 0 || containsEntry || !s.IsExecutable) continue;
                 if (eng.TrySetMemoryBreakpoint(lo, size, MemAccess.Execute))
                     _execBps.Add((lo, lo + size));
@@ -298,7 +439,8 @@ public sealed class OepFinder
     }
 
     /// <summary>Whether <paramref name="stop"/> is one this finder's current phase produced itself — its own
-    /// single-step, ESP watch, section guard, section execute-breakpoint or manual OEP breakpoint.
+    /// single-step, ESP watch, section guard, section execute-breakpoint, manual OEP breakpoint, or active
+    /// strategy's stop.
     /// <para>
     /// An interactive host needs this because <see cref="StopReason"/> is ambiguous: a section execute-breakpoint
     /// and a user memory breakpoint both report <see cref="StopReason.MemoryBreakpoint"/>, and the ESP-trick watch
@@ -313,6 +455,7 @@ public sealed class OepFinder
         Phase.WaitGuard => stop.Reason == StopReason.GuardExec,
         Phase.WaitMemBp => stop.Reason == StopReason.MemoryBreakpoint && OwnsExecBp(eng.LastMemoryHitVa),
         Phase.WaitManual => stop.Reason == StopReason.Breakpoint && _manualOep is { } m && stop.Address == m,
+        Phase.WaitStrategy => _activeStrategy?.Owns(eng, stop) ?? false,
         _ => false,
     };
 
@@ -331,6 +474,9 @@ public sealed class OepFinder
     /// </para></summary>
     public void Abort(DebuggerEngine eng)
     {
+        _activeStrategy?.Abort(eng);
+        _activeStrategy = null;
+        _multiPassQueue.Clear();
         Disarm(eng);
         _log.Append("Hunt aborted; guards and breakpoints disarmed.\n");
     }
@@ -339,12 +485,10 @@ public sealed class OepFinder
     private void Disarm(DebuggerEngine eng)
     {
         _phase = Phase.Done;
-        // Guards are only ever armed by this class, so clearing them all is safe.
         if (eng.HasGuards) eng.ClearGuards();
         foreach (var (lo, _) in _execBps) eng.RemoveMemoryBreakpoint(lo);
         _execBps.Clear();
         if (_espWatch != 0) { eng.RemoveBreakpoint(_espWatch); _espWatch = 0; }
-        // Leave a breakpoint the user had already set at the manual OEP alone.
         if (_manualOep is { } m && !_manualWasUserBp) { eng.RemoveBreakpoint(m); _manualOep = null; }
     }
 }

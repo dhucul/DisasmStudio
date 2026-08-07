@@ -554,10 +554,15 @@ public partial class MainWindow : Window
             mi.Click += (_, _) => { _oepMethod = m; if (m != OepMethod.Manual) _oepManualVa = null; UpdateOepMethodCaption(); };
             cm.Items.Add(mi);
         }
-        Add("Auto", OepMethod.Auto, "x86: the ESP-trick (watch the stub's pushad-saved registers for the matching popad), then the section guard. x64: the section guard.");
+        Add("Auto", OepMethod.MultiPass, "Smart multi-strategy chain: tries the fastest/most-likely strategy first, then falls back through the others in priority order until one finds the OEP.");
         Add("Section guard", OepMethod.SectionGuard, "Strip execute permission from every section the stub doesn't live in, so only the first code fetch into the unpacked code faults.");
         Add("Section execute breakpoint", OepMethod.SectionExecBp, "The same idea through the re-armable memory-breakpoint path; the stop lands one instruction into the OEP.");
         Add("ESP-trick", OepMethod.EspTrick, "x86 only, and only from the entry-point stop: watch the stack slot the stub's pushad wrote, then guard the remaining sections after the popad.");
+        Add("Tail-jump scan", OepMethod.TailJumpScan, "Instruction-level stub scanning: decode the stub, track register values, and break at the first far control transfer to a prologue-looking target.");
+        Add("Entropy watch", OepMethod.EntropyWatch, "Periodically sample section entropy while the stub runs; when entropy drops (decryption complete), scan for a prologue and break there.");
+        Add("API breakpoint", OepMethod.ApiBreakpoint, "Break on key post-unpacking API calls (VirtualProtect, GetProcAddress); the final call before the OEP transfer reveals where execution goes next.");
+        Add("Execution heatmap", OepMethod.ExecutionHeatmap, "Arm execute memory-breakpoints on ALL executable pages; track which pages get hit and when. The OEP page is hit once, late, after all stub activity.");
+        Add("Stack transition", OepMethod.StackTransition, "Watch the stack pointer: when it returns near its entry value after the stub deallocates its workspace, and the instruction looks like a prologue, that's the OEP.");
         var manual = new MenuItem { Header = "Break at address…", IsCheckable = true, IsChecked = _oepMethod == OepMethod.Manual, ToolTip = "Break at an OEP you already know. Type it as it appears in the static listing — it is rebased onto the runtime image base for you." };
         manual.Click += (_, _) =>
         {
@@ -574,6 +579,11 @@ public partial class MainWindow : Window
             OepMethod.SectionGuard => "Guard ▾",
             OepMethod.SectionExecBp => "Exec-bp ▾",
             OepMethod.EspTrick => "ESP ▾",
+            OepMethod.TailJumpScan => "TailJump ▾",
+            OepMethod.EntropyWatch => "Entropy ▾",
+            OepMethod.ApiBreakpoint => "API-bp ▾",
+            OepMethod.ExecutionHeatmap => "Heatmap ▾",
+            OepMethod.StackTransition => "Stack ▾",
             OepMethod.Manual => $"{_oepManualVa:X} ▾",
             _ => "Auto ▾",
         };
@@ -619,7 +629,7 @@ public partial class MainWindow : Window
             StatusText.Text = "Run to OEP: the ESP-trick only works from the entry-point stop. Restart, or pick Section guard.";
             return;
         }
-        if (method == OepMethod.Auto && !atEntry) { method = OepMethod.SectionGuard; note = " (past the entry point — using the section guard)"; }
+        if (method == OepMethod.MultiPass && !atEntry) { method = OepMethod.SectionGuard; note = " (past the entry point — using the section guard)"; }
         if (method == OepMethod.Manual && _oepManualVa is null)
         {
             if (Dialogs.AskOepAddress(this, null) is not { } va) return;

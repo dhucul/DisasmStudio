@@ -7,7 +7,8 @@ namespace DisasmStudio.Debug.Unpacking;
 /// <summary>Options for an unpack run. <see cref="StaticImageBase"/> is the file's preferred image base, used
 /// to rebase a manual (static-VA) OEP to the runtime load base under ASLR.</summary>
 public sealed record UnpackOptions(OepMethod Strategy, ulong? ManualOep, bool Sandbox, string OutputPath,
-    ulong StaticImageBase = 0, bool UseApiHooks = true, bool InterceptRdtsc = true);
+    ulong StaticImageBase = 0, bool UseApiHooks = true, bool InterceptRdtsc = true,
+    IReadOnlyList<OepMethod>? MultiPassChain = null);
 
 /// <summary>The outcome of an unpack run.</summary>
 public sealed record UnpackResult(
@@ -58,7 +59,8 @@ public sealed class UnpackSession
     {
         _target = targetPath;
         _opt = options;
-        _finder = new OepFinder(options.Strategy, options.ManualOep, options.StaticImageBase);
+        _finder = new OepFinder(options.Strategy, options.ManualOep, options.StaticImageBase,
+            multiPassChain: options.MultiPassChain);
     }
 
     public Task<UnpackResult> RunAsync()

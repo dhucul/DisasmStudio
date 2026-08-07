@@ -19,6 +19,10 @@ public static class OepValidator
             && i0.Op0Register == i0.Op1Register)
             dec.Decode(out i0);
 
+        // endbr64 / endbr32 — CET landing pad (Intel CET / IBT); look past it
+        if (i0.Mnemonic == Mnemonic.Endbr64 || i0.Mnemonic == Mnemonic.Endbr32)
+            dec.Decode(out i0);
+
         // push ebp/rbp [; mov ebp/rbp, esp/rsp]
         if (i0.Mnemonic == Mnemonic.Push && i0.Op0Kind == OpKind.Register
             && i0.Op0Register is Register.EBP or Register.RBP)
@@ -29,7 +33,7 @@ public static class OepValidator
             && i0.Op0Register is Register.ESP or Register.RSP)
             return true;
 
-        // push <callee-saved reg> — frequent x64 entry start
+        // push <callee-saved reg> — frequent x64 entry start (rbx, rsi, rdi, r12-r15)
         if (i0.Mnemonic == Mnemonic.Push && i0.Op0Kind == OpKind.Register)
             return true;
 
@@ -38,12 +42,21 @@ public static class OepValidator
             && i0.MemoryBase is Register.RSP or Register.ESP)
             return true;
 
-        // call rel — CRT startup thunk
+        // call rel — CRT startup thunk (MSVC __scrt_common_main_seh, MinGW __main, etc.)
         if (i0.Mnemonic == Mnemonic.Call && i0.Op0Kind is OpKind.NearBranch32 or OpKind.NearBranch64)
             return true;
 
-        // xor reg, reg — some entrypoints zero a register first
+        // jmp rel — some entry points (especially MinGW/GCC) jump to CRT init
+        if (i0.Mnemonic == Mnemonic.Jmp && i0.Op0Kind is OpKind.NearBranch32 or OpKind.NearBranch64)
+            return true;
+
+        // xor reg, reg — some entrypoints zero a register first (common in Delphi: xor eax, eax)
         if (i0.Mnemonic == Mnemonic.Xor && i0.Op0Kind == OpKind.Register && i0.Op0Register == i0.Op1Register)
+            return true;
+
+        // lea rcx, [rip+...] — x64 __security_init_cookie or similar CRT init pattern
+        if (i0.Mnemonic == Mnemonic.Lea && i0.Op0Kind == OpKind.Register
+            && i0.Op0Register == Register.RCX && i0.IsIPRelativeMemoryOperand)
             return true;
 
         return false;

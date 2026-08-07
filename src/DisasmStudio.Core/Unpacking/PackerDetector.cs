@@ -25,6 +25,60 @@ public sealed record PackerVerdict(string? Name, PackerKind Kind, IReadOnlyList<
     public bool IsPacked => Kind != PackerKind.None;
     /// <summary>True when generic run-dump-rebuild can plausibly recover the original — i.e. not a virtualizer.</summary>
     public bool IsUnpackable => Kind is PackerKind.Compressor or PackerKind.Protector or PackerKind.Unknown;
+
+    /// <summary>The recommended OEP strategy name for this packer class. The UI maps this to an
+    /// <c>OepMethod</c> enum value. Returns "MultiPass" for most packers (the smart auto-chain),
+    /// "RunFree" for virtualizers, and "Auto" for unpacked binaries.</summary>
+    public string RecommendedStrategy => Kind switch
+    {
+        PackerKind.Compressor => "MultiPass",
+        PackerKind.Protector => "MultiPass",
+        PackerKind.Unknown => "MultiPass",
+        PackerKind.Virtualizer => "RunFree",
+        _ => "Auto",
+    };
+
+    /// <summary>The recommended MultiPass strategy chain for this specific packer, as a list of
+    /// strategy names the UI maps to <c>OepMethod</c> values. Ordered by priority — the first
+    /// strategy is tried first. Returns null when MultiPass is not recommended.</summary>
+    public IReadOnlyList<string>? GetMultiPassChain(bool is32)
+    {
+        if (Kind == PackerKind.Virtualizer || Kind == PackerKind.None) return null;
+
+        // Build a chain tailored to the detected traits.
+        var chain = new List<string>();
+
+        // x86 compressors: ESP-trick is fast and reliable.
+        if (is32 && Kind == PackerKind.Compressor)
+            chain.Add("EspTrick");
+
+        // Tail-jump scan works on any packer with a recognizable terminal jump.
+        chain.Add("TailJumpScan");
+
+        // If the entry section is W+X and high-entropy, prioritize entropy watch
+        // (in-place decryption is likely).
+        if (HasTrait("a writable+executable section is high-entropy") ||
+            (HasTrait("entry section") && Notes.Contains("writable+executable")))
+            chain.Add("EntropyWatch");
+
+        // If imports are loader-stub only, API breakpoints are effective.
+        if (HasTrait("imports are loader-stub only") || HasTrait("import directory empty"))
+            chain.Add("ApiBreakpoint");
+
+        // Section guard catches cross-section jumps.
+        chain.Add("SectionGuard");
+
+        // Execution heatmap as a fallback for complex multi-page unpacking.
+        chain.Add("ExecutionHeatmap");
+
+        // Stack transition is niche but cheap.
+        if (is32) chain.Add("StackTransition");
+
+        return chain;
+    }
+
+    private bool HasTrait(string trait) =>
+        Notes.Contains(trait, StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>

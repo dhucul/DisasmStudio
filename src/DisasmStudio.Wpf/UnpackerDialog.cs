@@ -121,18 +121,21 @@ internal sealed class UnpackerDialog : Window
 
         opt.Children.Add(Label("OEP detection strategy"));
         _strategy = new ComboBox { Margin = new Thickness(0, 0, 0, 8) };
-        _strategy.Items.Add("Auto (ESP-trick → section guard)");
+        _strategy.Items.Add("Auto (smart multi-strategy chain)");
         _strategy.Items.Add("ESP-trick (x86 compressors)");
         _strategy.Items.Add("Section guard");
+        _strategy.Items.Add("Section execute breakpoint");
+        _strategy.Items.Add("Tail-jump scan (instruction-level stub analysis)");
+        _strategy.Items.Add("Entropy watch (in-place decryptors)");
+        _strategy.Items.Add("API breakpoint (VirtualProtect/GetProcAddress)");
+        _strategy.Items.Add("Execution heatmap (page-level tracking)");
+        _strategy.Items.Add("Stack transition (SP-based)");
         _strategy.Items.Add("Manual OEP");
         _strategy.Items.Add("Run free — no trace (VM protectors); dump on settle/fault");
         _strategy.Items.Add("Trace VM loop/handlers (single-step diagnostic)");
-        _strategy.Items.Add("Section execute breakpoint — memory-map engine (alt. to section guard)");
         _strategy.Items.Add("Static — auto-detect (UPX / VMProtect; no run, no debugger)");
         _staticIndex = _strategy.Items.Count - 1;
-        // Pre-select the dynamic strategy the detected packer class responds best to (the async static probe
-        // below still upgrades this to Static when a UPX/VMProtect layer is found). Auto stays the default for
-        // plain compressors, which its ESP-trick→section-guard chain already handles well.
+        // Pre-select based on the packer detector's recommendation.
         _strategy.SelectedIndex = RecommendedDynamicIndex(verdict);
         opt.Children.Add(_strategy);
 
@@ -287,13 +290,19 @@ internal sealed class UnpackerDialog : Window
         ulong? manualOep = null;
         var method = _strategy.SelectedIndex switch
         {
+            0 => OepMethod.MultiPass,       // Auto (smart multi-strategy chain)
             1 => OepMethod.EspTrick,
             2 => OepMethod.SectionGuard,
-            3 => OepMethod.Manual,
-            4 => OepMethod.RunFree,
-            5 => OepMethod.TraceVm,
-            6 => OepMethod.SectionExecBp,
-            _ => OepMethod.Auto,
+            3 => OepMethod.SectionExecBp,
+            4 => OepMethod.TailJumpScan,
+            5 => OepMethod.EntropyWatch,
+            6 => OepMethod.ApiBreakpoint,
+            7 => OepMethod.ExecutionHeatmap,
+            8 => OepMethod.StackTransition,
+            9 => OepMethod.Manual,
+            10 => OepMethod.RunFree,
+            11 => OepMethod.TraceVm,
+            _ => OepMethod.MultiPass,
         };
         if (method == OepMethod.Manual)
         {
@@ -309,8 +318,34 @@ internal sealed class UnpackerDialog : Window
         _devirtProbe.IsEnabled = false;
         _verify.IsEnabled = false;
 
+        // Build the MultiPass chain from the packer detector's recommendation when Auto is selected.
+        IReadOnlyList<OepMethod>? multiPassChain = null;
+        if (method == OepMethod.MultiPass)
+        {
+            var chain = _verdict.GetMultiPassChain(_bitness == 32);
+            if (chain is { Count: > 0 })
+            {
+                multiPassChain = chain
+                    .Select(name => name switch
+                    {
+                        "EspTrick" => OepMethod.EspTrick,
+                        "TailJumpScan" => OepMethod.TailJumpScan,
+                        "EntropyWatch" => OepMethod.EntropyWatch,
+                        "ApiBreakpoint" => OepMethod.ApiBreakpoint,
+                        "SectionGuard" => OepMethod.SectionGuard,
+                        "ExecutionHeatmap" => OepMethod.ExecutionHeatmap,
+                        "StackTransition" => OepMethod.StackTransition,
+                        _ => (OepMethod?)null,
+                    })
+                    .Where(m => m.HasValue)
+                    .Select(m => m!.Value)
+                    .ToList();
+            }
+        }
+
         var options = new UnpackOptions(method, manualOep, _sandbox.IsChecked == true, outPath, _imageBase,
-            UseApiHooks: _apiHooks.IsChecked == true, InterceptRdtsc: _rdtsc.IsChecked == true);
+            UseApiHooks: _apiHooks.IsChecked == true, InterceptRdtsc: _rdtsc.IsChecked == true,
+            MultiPassChain: multiPassChain);
         var session = new UnpackSession(_target, options);
         _session = session;
         _cts = new CancellationTokenSource();
@@ -490,13 +525,13 @@ internal sealed class UnpackerDialog : Window
         _verify.IsEnabled = true;
     }
 
-    // Phase-4 heuristics: pick a sensible dynamic strategy for the detected packer class, and suggest the next
-    // one to try after a failure. Pure UI guidance — the run mechanics themselves are unchanged.
-    private static int RecommendedDynamicIndex(PackerVerdict verdict) => verdict.Kind switch
+    // Map the packer detector's recommendation to a combo box index.
+    // Index 0 = Auto (MultiPass), 10 = Run free.
+    private static int RecommendedDynamicIndex(PackerVerdict verdict) => verdict.RecommendedStrategy switch
     {
-        PackerKind.Virtualizer => 4,   // Run free — a VM protector has no clean OEP moment; dump on settle/fault
-        PackerKind.Protector => 2,     // Section guard — protectors self-decrypt into their own sections
-        _ => 0,                        // Auto — ESP-trick → section guard, well-suited to compressors
+        "MultiPass" => 0,    // Auto (smart multi-strategy chain)
+        "RunFree" => 10,     // Run free
+        _ => 0,              // Default to Auto
     };
 
     private string NextStrategyHint(OepMethod tried) => _verdict.Kind switch
@@ -543,7 +578,7 @@ internal sealed class UnpackerDialog : Window
     private void UpdateOptionEnablement()
     {
         bool isStatic = _strategy.SelectedIndex == _staticIndex;
-        _manualOep.IsEnabled = !isStatic && _strategy.SelectedIndex == 3;
+        _manualOep.IsEnabled = !isStatic && _strategy.SelectedIndex == 9; // Manual OEP
         _sandbox.IsEnabled = true;
         _apiHooks.IsEnabled = true;
         _rdtsc.IsEnabled = true;
@@ -706,7 +741,7 @@ internal sealed class UnpackerDialog : Window
     private void SetInputsEnabled(bool on)
     {
         _strategy.IsEnabled = on;
-        _manualOep.IsEnabled = on && _strategy.SelectedIndex == 3;
+        _manualOep.IsEnabled = on && _strategy.SelectedIndex == 9; // Manual OEP
         _sandbox.IsEnabled = on;
         _apiHooks.IsEnabled = on;
         _rdtsc.IsEnabled = on;
