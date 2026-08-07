@@ -108,17 +108,18 @@ public sealed class OepFinder
     {
         if (_requested == OepMethod.Manual && _manualOep is { } moep)
         {
+            // The user types a static VA (file image base); rebase it to the runtime load base for ASLR.
             if (_staticImageBase != 0 && eng.ImageBase != 0 && moep >= _staticImageBase)
                 moep = moep - _staticImageBase + eng.ImageBase;
             _manualOep = moep;
             ActiveMethod = OepMethod.Manual;
-            if (moep == eng.EntryPoint)
+            if (moep == eng.EntryPoint)   // already at the requested OEP — no breakpoint needed
             {
                 _phase = Phase.Done;
                 _log.Append($"Manual OEP {moep:X} is the entry point — already there.\n");
                 return moep;
             }
-            _manualWasUserBp = eng.HasBreakpoint(moep);
+            _manualWasUserBp = eng.HasBreakpoint(moep);   // don't delete the user's own breakpoint on abort
             if (!eng.TrySetBreakpoint(moep))
                 throw new InvalidOperationException($"Could not arm manual OEP breakpoint at {moep:X}.");
             _phase = Phase.WaitManual;
@@ -166,12 +167,16 @@ public sealed class OepFinder
             {
                 if (stop.Reason == StopReason.Watchpoint)
                 {
+                    // A hardware watchpoint stop carries no indication of which register fired it, so a user's
+                    // own watchpoint landing here is indistinguishable from the popad hit and is consumed as
+                    // one. Recorded rather than hidden: if the guard then reports a surprising OEP, the log says
+                    // this is where the state machine could have been misled.
                     if (_espWatch != 0) { eng.RemoveBreakpoint(_espWatch); _espWatch = 0; }
                     _log.Append($"ESP-trick: watchpoint at {stop.Address:X} taken as the popad hit (a user watchpoint "
                               + "would be indistinguishable here); guarding non-stub sections.\n");
-                    StartSectionGuard(eng);
+                    StartSectionGuard(eng);   // keep ActiveMethod = EspTrick for reporting
                 }
-                else eng.Go();
+                else eng.Go();                // unrelated stop — keep running toward popad
                 return null;
             }
             case Phase.WaitGuard:
@@ -249,6 +254,8 @@ public sealed class OepFinder
 
         switch (method)
         {
+            // The ESP-trick relies on pushad, which is x86-only; on x64 the guard below drops through to the
+            // section guard rather than single-stepping for a popad that can never come.
             case OepMethod.EspTrick when eng.Is32:
                 _entrySp = eng.GetRegisters()?.Sp ?? 0;
                 _phase = Phase.StepPushad;
@@ -368,6 +375,13 @@ public sealed class OepFinder
                     _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — skipped ({(size == 0 ? "empty" : "holds the entry point")}).\n");
                     continue;
                 }
+                // Only executable sections can be an OEP: reaching it is an instruction fetch, and the loader
+                // only permits that where it mapped the section executable. Walking the rest is not merely
+                // useless, it is ruinous — guarding is per 4 KB page, so a resource section (routinely hundreds
+                // of megabytes) costs hundreds of thousands of VirtualQueryEx/VirtualProtectEx calls and
+                // shatters the target's VA descriptor tree. Cost aside, a non-executable section already faults
+                // on a fetch without our help; the only case skipped here is a packer that re-protects a data
+                // section to executable at runtime, which by definition would no longer fault anyway.
                 if (!s.IsExecutable)
                 {
                     _log.Append($"  {s.Name,-8} {lo:X}+{size:X} — skipped (not executable; an OEP cannot be fetched from it).\n");
@@ -412,6 +426,9 @@ public sealed class OepFinder
              + "ESP-trick on a 32-bit target.";
     }
 
+    /// <summary>Arm a whole-section <see cref="MemAccess.Execute"/> memory breakpoint on every non-stub section
+    /// (the same engine path as the Memory Map's "Break on execute (section)"), then run. Execution into any of
+    /// them faults on the instruction fetch and surfaces a <see cref="StopReason.MemoryBreakpoint"/> — the OEP.</summary>
     private void StartSectionExecBp(DebuggerEngine eng)
     {
         _execBps.Clear();
@@ -423,6 +440,9 @@ public sealed class OepFinder
                 ulong lo = eng.ImageBase + s.VirtualAddress;
                 ulong size = Math.Max(s.VirtualSize, s.SizeOfRawData);
                 bool containsEntry = eng.EntryPoint >= lo && eng.EntryPoint - lo < size;
+                // Executable sections only, for the same reason as the section guard: an OEP is an instruction
+                // fetch, and arming a whole resource/reloc section costs a page-granular walk over hundreds of
+                // megabytes for something that can never be the answer.
                 if (size == 0 || containsEntry || !s.IsExecutable) continue;
                 if (eng.TrySetMemoryBreakpoint(lo, size, MemAccess.Execute))
                     _execBps.Add((lo, lo + size));
@@ -485,10 +505,12 @@ public sealed class OepFinder
     private void Disarm(DebuggerEngine eng)
     {
         _phase = Phase.Done;
+        // Guards are only ever armed by this class, so clearing them all is safe.
         if (eng.HasGuards) eng.ClearGuards();
         foreach (var (lo, _) in _execBps) eng.RemoveMemoryBreakpoint(lo);
         _execBps.Clear();
         if (_espWatch != 0) { eng.RemoveBreakpoint(_espWatch); _espWatch = 0; }
+        // Leave a breakpoint the user had already set at the manual OEP alone.
         if (_manualOep is { } m && !_manualWasUserBp) { eng.RemoveBreakpoint(m); _manualOep = null; }
     }
 }
