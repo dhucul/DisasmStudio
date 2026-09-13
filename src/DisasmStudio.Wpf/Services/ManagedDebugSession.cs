@@ -10,6 +10,7 @@ internal sealed class ManagedDebugSession : IDisposable
 {
     private readonly Dispatcher _dispatcher;
     private readonly ManagedDebugClient _client;
+    private int _retired;
 
     public event Action? Launched;
     public event Action<string>? ModuleLoaded;   // module file name
@@ -51,17 +52,29 @@ internal sealed class ManagedDebugSession : IDisposable
     {
         _dispatcher.BeginInvoke(() =>
         {
+            if (Volatile.Read(ref _retired) != 0) return;
             switch (ev.Ev)
             {
                 case Mdbg.Launched: Launched?.Invoke(); break;
                 case Mdbg.ModuleLoaded: ModuleLoaded?.Invoke(ev.Module ?? ""); break;
                 case Mdbg.Stopped: IsStopped = true; LastStop = ev; Stopped?.Invoke(ev); break;
                 case Mdbg.Exited: IsRunning = false; IsStopped = false; Exited?.Invoke(ev.Code); break;
+                case Mdbg.ResumeFailed:
+                    IsStopped = true;
+                    if (LastStop is { } stop) Stopped?.Invoke(stop);
+                    Error?.Invoke(ev.Message ?? "Resume failed.");
+                    break;
                 case Mdbg.Error: Error?.Invoke(ev.Message ?? ""); break;
                 case Mdbg.Output: Output?.Invoke(ev.Text ?? ""); break;
             }
         });
     }
 
-    public void Dispose() => _client.Dispose();
+    public void Retire()
+    {
+        if (Interlocked.Exchange(ref _retired, 1) != 0) return;
+        _client.EventReceived -= OnEvent;
+        IsRunning = false; IsStopped = false;
+    }
+    public void Dispose() { Retire(); _client.Dispose(); }
 }

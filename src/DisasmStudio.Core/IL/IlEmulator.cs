@@ -54,7 +54,9 @@ public sealed class IlEmulator
     private readonly EmulationOptions _opts;
 
     private readonly Dictionary<RegId, long> _regKnown = [];   // canonical reg → value (present ⇒ known)
-    private readonly Dictionary<ulong, byte> _mem = [];        // written bytes (overlay over the image)
+    private readonly Dictionary<ulong, byte?> _mem = [];
+    private readonly Dictionary<Variable, long> _variables = [];
+    private bool _memoryUnknown;        // written bytes (overlay over the image)
     private readonly EmulationResult _result = new();
 
     // x86-64 volatile (caller-saved) registers a call clobbers, by canonical name — conservative for other arches.
@@ -147,7 +149,7 @@ public sealed class IlEmulator
         _result.StoppedAt = at;
         _result.Steps = steps;
         foreach (var (addr, b) in _mem)
-            if (_image.IsMappedVa(addr)) _result.MemoryWrites[addr] = b;   // only report writes to real image addresses
+            if (b is byte known && _image.IsMappedVa(addr)) _result.MemoryWrites[addr] = known;   // only report writes to real image addresses
     }
 
     private void ExecAssign(AssignStmt a)
@@ -169,13 +171,17 @@ public sealed class IlEmulator
     {
         switch (dest)
         {
+            case VarExpr variable:
+                if (v.Known) _variables[variable.Var] = IntegerSemantics.Mask(v.V, variable.Size);
+                else _variables.Remove(variable.Var);
+                break;
             case RegExpr re:
             {
                 var canon = _model.Canon(re.Reg);
                 if (!v.Known) { _regKnown.Remove(canon); break; }
                 if (re.Reg.Width >= 4) _regKnown[canon] = Mask(v.V, re.Reg.Width);       // 32-bit write zero-extends
                 else if (_regKnown.TryGetValue(canon, out var old))                       // sub-register merge into a known parent
-                    _regKnown[canon] = MergeLow(old, v.V, re.Reg.Width);
+                    _regKnown[canon] = MergeSlice(old, v.V, re.Reg.Width, RegisterOffset(re.Reg));
                 else _regKnown.Remove(canon);                                             // partial write over an unknown parent
                 break;
             }
@@ -183,6 +189,7 @@ public sealed class IlEmulator
             {
                 var addr = Eval(store.Addr);
                 if (addr.Known) WriteMem((ulong)addr.V, store.Width, v);
+                else InvalidateMemory();
                 break;
             }
         }
@@ -200,11 +207,12 @@ public sealed class IlEmulator
     {
         switch (e)
         {
-            case Const c: return Val.K(c.Value);
+            case Const c: return Val.K(Mask(c.Value, c.Width));
+            case VarExpr v: return _variables.TryGetValue(v.Var, out var known) ? Val.K(known) : Val.Unknown;
             case SymExpr s: return Val.K((long)s.Va);
             case RegExpr r:
             {
-                if (_regKnown.TryGetValue(_model.Canon(r.Reg), out var pv)) return Val.K(Mask(pv, r.Reg.Width));
+                if (_regKnown.TryGetValue(_model.Canon(r.Reg), out var pv)) return Val.K(Mask((long)((ulong)pv >> RegisterOffset(r.Reg)), r.Reg.Width));
                 return Val.Unknown;
             }
             case LoadExpr ld:
@@ -216,7 +224,14 @@ public sealed class IlEmulator
             {
                 var x = Eval(u.E);
                 if (!x.Known) return Val.Unknown;
-                long r = u.Op == UnOp.Neg ? -x.V : ~x.V;
+                long r = u.Op switch
+                {
+                    UnOp.Neg => unchecked(-x.V),
+                    UnOp.Not => ~x.V,
+                    UnOp.SignExtend => IntegerSemantics.SignExtend(x.V, u.E.Size),
+                    UnOp.ZeroExtend => IntegerSemantics.Mask(x.V, u.E.Size),
+                    _ => x.V,
+                };
                 return Val.K(Mask(r, u.Width));
             }
             case BinExpr b: return EvalBin(b);
@@ -235,41 +250,8 @@ public sealed class IlEmulator
     {
         var l = Eval(b.L); var r = Eval(b.R);
         if (!l.Known || !r.Known) return Val.Unknown;
-        int w = b.Width <= 0 ? 8 : b.Width;
-        long lv = l.V, rv = r.V;
-        long res;
-        switch (b.Op)
-        {
-            case BinOp.Add: res = lv + rv; break;
-            case BinOp.Sub: res = lv - rv; break;
-            case BinOp.Mul: case BinOp.UMul: res = lv * rv; break;
-            case BinOp.And: res = lv & rv; break;
-            case BinOp.Or: res = lv | rv; break;
-            case BinOp.Xor: res = lv ^ rv; break;
-            case BinOp.Shl: res = lv << (int)(rv & (w * 8 - 1)); break;
-            case BinOp.Shr: res = (long)(Zext(lv, w) >> (int)(rv & (w * 8 - 1))); break;   // logical
-            case BinOp.Sar: res = Sext(lv, w) >> (int)(rv & (w * 8 - 1)); break;           // arithmetic
-            case BinOp.Rol: { int s = (int)(rv & (w * 8 - 1)); ulong u = Zext(lv, w); int bits = w * 8; res = (long)(bits == 64 ? (u << s) | (u >> (64 - s == 64 ? 0 : 64 - s)) : ((u << s) | (u >> (bits - s))) & ((1UL << bits) - 1)); break; }
-            case BinOp.Ror: { int s = (int)(rv & (w * 8 - 1)); ulong u = Zext(lv, w); int bits = w * 8; res = (long)(bits == 64 ? (u >> s) | (u << (64 - s == 64 ? 0 : 64 - s)) : ((u >> s) | (u << (bits - s))) & ((1UL << bits) - 1)); break; }
-            case BinOp.UDiv: { ulong d = Zext(rv, w); if (d == 0) return Val.Unknown; res = (long)(Zext(lv, w) / d); break; }
-            case BinOp.UMod: { ulong d = Zext(rv, w); if (d == 0) return Val.Unknown; res = (long)(Zext(lv, w) % d); break; }
-            case BinOp.SDiv:
-            {
-                long n = Sext(lv, w), d = Sext(rv, w);
-                if (d == 0 || (d == -1 && n == MinSigned(w))) return Val.Unknown;
-                res = n / d;
-                break;
-            }
-            case BinOp.SMod:
-            {
-                long n = Sext(lv, w), d = Sext(rv, w);
-                if (d == 0 || (d == -1 && n == MinSigned(w))) return Val.Unknown;
-                res = n % d;
-                break;
-            }
-            default: return Val.Unknown;
-        }
-        return Val.K(Mask(res, w));
+        return IntegerSemantics.TryBinary(b.Op, l.V, r.V, b.Width, out long value)
+            ? Val.K(value) : Val.Unknown;
     }
 
     private Val EvalCmp(CmpExpr c)
@@ -310,7 +292,8 @@ public sealed class IlEmulator
 
     private bool TryReadByte(ulong va, out byte b)
     {
-        if (_mem.TryGetValue(va, out b)) return true;
+        if (_mem.TryGetValue(va, out var stored)) { b = stored ?? 0; return stored.HasValue; }
+        if (_memoryUnknown) { b = 0; return false; }
         if (_image.IsMappedVa(va))
         {
             var got = _image.ReadBytesAtVa(va, 1);
@@ -323,14 +306,17 @@ public sealed class IlEmulator
     private void WriteMem(ulong addr, int width, Val v)
     {
         if (width is <= 0 or > 8) return;
-        if (!v.Known) { for (int i = 0; i < width; i++) _mem.Remove(addr + (ulong)i); return; }
+        if (!v.Known) { for (int i = 0; i < width; i++) _mem[addr + (ulong)i] = null; return; }
         for (int i = 0; i < width; i++) _mem[addr + (ulong)i] = (byte)(v.V >> (i * 8));
     }
 
     // ---- helpers ----
 
+    private void InvalidateMemory() { _mem.Clear(); _memoryUnknown = true; }
+
     private void ClobberVolatiles()
     {
+        InvalidateMemory();
         var drop = _regKnown.Keys.Where(k => _model.CallerSaved.Contains(_model.Canon(k))).ToList();
         foreach (var k in drop) _regKnown.Remove(k);
     }
@@ -363,9 +349,11 @@ public sealed class IlEmulator
     }
 
     /// <summary>Merge the low <paramref name="w"/> bytes of <paramref name="lo"/> into the known parent <paramref name="parent"/>.</summary>
-    private static long MergeLow(long parent, long lo, int w)
+    private static int RegisterOffset(RegId r) => r.Name is "ah" or "bh" or "ch" or "dh" ? 8 : 0;
+
+    private static long MergeSlice(long parent, long value, int width, int offset)
     {
-        long m = (1L << (w * 8)) - 1;
-        return (parent & ~m) | (lo & m);
+        long mask = ((1L << (width * 8)) - 1) << offset;
+        return (parent & ~mask) | ((value << offset) & mask);
     }
 }

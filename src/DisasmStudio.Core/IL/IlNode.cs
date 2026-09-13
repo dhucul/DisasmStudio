@@ -15,7 +15,7 @@ public enum BinOp
 }
 
 /// <summary>Unary operators.</summary>
-public enum UnOp { Neg, Not }
+public enum UnOp { Neg, Not, SignExtend, ZeroExtend }
 
 /// <summary>Comparison operators (the U/S prefixes pick unsigned vs signed ordering).</summary>
 public enum CmpOp { Eq, Ne, ULt, ULe, UGt, UGe, SLt, SLe, SGt, SGe }

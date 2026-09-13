@@ -27,6 +27,7 @@ public sealed class Lifter : ILifter
     private readonly bool _is64;
 
     private FlagDef _flag;
+    private readonly List<Variable> _temporaries = [];
 
     /// <summary><paramref name="decoder"/> lets a caller supply a live/debugger decoder that reads process
     /// memory; when null the lifter builds the default file-backed <see cref="Disassembler"/>. The default
@@ -57,6 +58,7 @@ public sealed class Lifter : ILifter
     /// <summary>Lift a function (its CFG must already be built) into Low IL form.</summary>
     public LiftedFunction Lift(Function fn)
     {
+        _temporaries.Clear();
         var blocks = new List<LiftedBlock>();
         foreach (var bb in fn.Blocks)
         {
@@ -72,6 +74,7 @@ public sealed class Lifter : ILifter
 
         var lf = new LiftedFunction { Va = fn.EntryVa, Name = fn.Name, Blocks = blocks };
         foreach (var b in blocks) lf.ByStart[b.Start] = b;
+        lf.Variables.AddRange(_temporaries);
         return lf;
     }
 
@@ -83,7 +86,12 @@ public sealed class Lifter : ILifter
         {
             case Mnemonic.Mov or Mnemonic.Movzx or Mnemonic.Movsx or Mnemonic.Movsxd or Mnemonic.Movaps
                 or Mnemonic.Movups or Mnemonic.Movdqa or Mnemonic.Movdqu or Mnemonic.Movd or Mnemonic.Movq:
-                Emit(new AssignStmt { Dest = Dest(ins), Src = Src1(ins, DestWidth(ins)) });
+                var source = Src1(ins, DestWidth(ins));
+                if (ins.Mnemonic is Mnemonic.Movsx or Mnemonic.Movsxd)
+                    source = new UnaryExpr(UnOp.SignExtend, source, DestWidth(ins));
+                else if (ins.Mnemonic == Mnemonic.Movzx)
+                    source = new UnaryExpr(UnOp.ZeroExtend, source, DestWidth(ins));
+                Emit(new AssignStmt { Dest = Dest(ins), Src = source });
                 break;
 
             case Mnemonic.Lea:
@@ -121,8 +129,8 @@ public sealed class Lifter : ILifter
                 int w = DestWidth(ins);
                 var s = Src1(ins, w);
                 // xor r, r — the canonical zero idiom.
-                if (d.Equals(s)) { Emit(new AssignStmt { Dest = d, Src = new Const(0, w) }); _flag = new FlagDef(FlagSource.Result, d, new Const(0, w)); }
-                else { Emit(new AssignStmt { Dest = d, Src = new BinExpr(BinOp.Xor, d, s, w) }); _flag = new FlagDef(FlagSource.Result, d, new Const(0, w)); }
+                if (d.Equals(s)) { Emit(new AssignStmt { Dest = d, Src = new Const(0, w) }); DefineFlags(FlagSource.Result, d, new Const(0, w), Emit); }
+                else { Emit(new AssignStmt { Dest = d, Src = new BinExpr(BinOp.Xor, d, s, w) }); DefineFlags(FlagSource.Result, d, new Const(0, w), Emit); }
                 break;
             }
 
@@ -130,21 +138,21 @@ public sealed class Lifter : ILifter
             {
                 var d = Dest(ins); int w = DestWidth(ins);
                 Emit(new AssignStmt { Dest = d, Src = new BinExpr(BinOp.Add, d, new Const(1, w), w) });
-                _flag = new FlagDef(FlagSource.Result, d, new Const(0, w));
+                DefineFlags(FlagSource.Result, d, new Const(0, w), Emit);
                 break;
             }
             case Mnemonic.Dec:
             {
                 var d = Dest(ins); int w = DestWidth(ins);
                 Emit(new AssignStmt { Dest = d, Src = new BinExpr(BinOp.Sub, d, new Const(1, w), w) });
-                _flag = new FlagDef(FlagSource.Result, d, new Const(0, w));
+                DefineFlags(FlagSource.Result, d, new Const(0, w), Emit);
                 break;
             }
             case Mnemonic.Neg:
             {
                 var d = Dest(ins); int w = DestWidth(ins);
                 Emit(new AssignStmt { Dest = d, Src = new UnaryExpr(UnOp.Neg, d, w) });
-                _flag = new FlagDef(FlagSource.Result, d, new Const(0, w));
+                DefineFlags(FlagSource.Result, d, new Const(0, w), Emit);
                 break;
             }
             case Mnemonic.Not:
@@ -158,14 +166,14 @@ public sealed class Lifter : ILifter
             {
                 var d = Dest(ins); int w = DestWidth(ins);
                 Emit(new AssignStmt { Dest = d, Src = new BinExpr(BinOp.Mul, d, Src1(ins, w), w) });
-                _flag = new FlagDef(FlagSource.Result, d, new Const(0, w));
+                DefineFlags(FlagSource.Result, d, new Const(0, w), Emit);
                 break;
             }
             case Mnemonic.Imul when ins.OpCount == 3:
             {
                 var d = Dest(ins); int w = DestWidth(ins);
                 Emit(new AssignStmt { Dest = d, Src = new BinExpr(BinOp.Mul, Operand(ins, 1, w), Operand(ins, 2, w), w) });
-                _flag = new FlagDef(FlagSource.Result, d, new Const(0, w));
+                DefineFlags(FlagSource.Result, d, new Const(0, w), Emit);
                 break;
             }
             case Mnemonic.Imul or Mnemonic.Mul:   // one-operand: {a}x = {a}x * src at the operand width (high half dropped)
@@ -188,10 +196,10 @@ public sealed class Lifter : ILifter
             }
 
             case Mnemonic.Cmp:
-                _flag = new FlagDef(FlagSource.Compare, Operand(ins, 0, DestWidth(ins)), Operand(ins, 1, DestWidth(ins)));
+                DefineFlags(FlagSource.Compare, Operand(ins, 0, DestWidth(ins)), Operand(ins, 1, DestWidth(ins)), Emit);
                 break;
             case Mnemonic.Test:
-                _flag = new FlagDef(FlagSource.Test, Operand(ins, 0, DestWidth(ins)), Operand(ins, 1, DestWidth(ins)));
+                DefineFlags(FlagSource.Test, Operand(ins, 0, DestWidth(ins)), Operand(ins, 1, DestWidth(ins)), Emit);
                 break;
 
             case Mnemonic.Nop or Mnemonic.Endbr64 or Mnemonic.Endbr32 or Mnemonic.Pause or Mnemonic.Fnop:
@@ -255,7 +263,22 @@ public sealed class Lifter : ILifter
         var d = Dest(ins);
         int w = DestWidth(ins);
         emit(new AssignStmt { Dest = d, Src = new BinExpr(op, d, Src1(ins, w), w) });
-        _flag = new FlagDef(FlagSource.Result, d, new Const(0, w));
+        DefineFlags(FlagSource.Result, d, new Const(0, w), emit);
+    }
+
+    private void DefineFlags(FlagSource source, Expr left, Expr right, Action<Stmt> emit)
+    {
+        Expr Capture(Expr value)
+        {
+            if (value is Const) return value;
+            var temp = new Variable { Name = $"flag_value_{_temporaries.Count}", Size = value.Size, Class = VarClass.Temp };
+            _temporaries.Add(temp);
+            var expression = new VarExpr(temp);
+            emit(new AssignStmt { Dest = expression, Src = value });
+            return expression;
+        }
+        var capturedLeft = Capture(left);
+        _flag = new FlagDef(source, capturedLeft, left.Equals(right) ? capturedLeft : Capture(right));
     }
 
     // ---- call / argument resolution ----

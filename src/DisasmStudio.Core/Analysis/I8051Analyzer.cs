@@ -56,13 +56,13 @@ public static class I8051Analyzer
         // 3. Names: symbols, entry, call targets (sub_), branch targets (loc_), section starts.
         progress?.Report("Resolving symbols…");
         var funcStarts = new SortedSet<ulong>();
-        if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) funcStarts.Add(image.EntryVa);
+        if ((image.EntryVa != 0 || image.Format == BinaryFormat.Raw) && image.IsExecutableVa(image.EntryVa)) funcStarts.Add(image.EntryVa);
         foreach (var s in image.Symbols) if (image.IsExecutableVa(s.Va)) funcStarts.Add(s.Va);
         foreach (var t in callTargets) funcStarts.Add(t);
 
         var names = new Dictionary<ulong, string>();
         foreach (var sym in image.Symbols) names[sym.Va] = sym.Name;
-        if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) names.TryAdd(image.EntryVa, "start");
+        if ((image.EntryVa != 0 || image.Format == BinaryFormat.Raw) && image.IsExecutableVa(image.EntryVa)) names.TryAdd(image.EntryVa, "start");
         foreach (var t in funcStarts) names.TryAdd(t, $"sub_{t:X}");
         foreach (var t in branchTargets) names.TryAdd(t, $"loc_{t:X}");
         foreach (var sec in image.Sections) if (sec.FileSize > 0) names.TryAdd(sec.StartVa, sec.Name);

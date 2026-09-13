@@ -42,6 +42,57 @@ public sealed partial class DebuggerEngine
     /// the correct slide, since for a hosted DLL the launched process is the host, not the debugged module.</summary>
     public event Action? TargetLoaded;
 
+    private volatile bool _eventHeld;
+    private int _inspectionCount;
+    private long _stopGeneration;
+    public long StopGeneration => Interlocked.Read(ref _stopGeneration);
+    private bool CanAccessFrozenMemory => _eventHeld && (IsStopped || Thread.CurrentThread == _thread);
+
+    /// <summary>Keep a stopped process frozen while a background reader captures a snapshot.</summary>
+    public IDisposable? TryAcquireInspection()
+    {
+        lock (_lock)
+        {
+            if (!IsStopped || !_eventHeld || _stopping || _detaching) return null;
+            _inspectionCount++;
+            return new Inspection(this);
+        }
+    }
+    private sealed class Inspection(DebuggerEngine owner) : IDisposable
+    {
+        private DebuggerEngine? _owner = owner;
+        public void Dispose()
+        {
+            var engine = Interlocked.Exchange(ref _owner, null);
+            if (engine is not null) lock (engine._lock) engine._inspectionCount--;
+        }
+    }
+    private void ReportStop(StopInfo stop)
+    {
+        lock (_lock) { IsStopped = true; _stopGeneration++; }
+        Stopped?.Invoke(stop);
+    }
+    private void ContinueEvent(uint pid, uint tid, uint status)
+    {
+        lock (_lock)
+        {
+            _eventHeld = false;
+            Native.ContinueDebugEvent(pid, tid, status);
+        }
+    }
+    public bool TryResume(ResumeMode mode, ulong target = 0, IEnumerable<ulong>? targets = null)
+    {
+        lock (_lock)
+        {
+            if (!IsStopped || _inspectionCount != 0 || _stopping || _detaching) return false;
+            if (mode is ResumeMode.Stop or ResumeMode.Detach) return false;
+            if (mode == ResumeMode.RunToAny) _runToAnyTargets.Enqueue(targets?.Where(t => t != 0).Distinct().ToArray() ?? []);
+            IsStopped = false; // claim this stop before the command becomes visible
+            _resume.Add((mode, target));
+            return true;
+        }
+    }
+
     private Thread? _thread;
     private string? _launchPath;
     private string? _launchWorkingDir;
@@ -236,6 +287,7 @@ public sealed partial class DebuggerEngine
             while (!_ended)
             {
                 if (!Native.WaitForDebugEvent(out var ev, 0xFFFFFFFF)) break;
+                lock (_lock) _eventHeld = true;
                 CurrentThreadId = ev.dwThreadId;
                 ClearExecCache();   // the target just ran; its committed-memory map may have changed since the last stop
                 uint cont = Native.DBG_CONTINUE;
@@ -245,17 +297,16 @@ public sealed partial class DebuggerEngine
                 {
                     try { Output?.Invoke($"Debug-loop error on event {ev.dwDebugEventCode}: {ex}"); }
                     catch { }
-                    Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_EXCEPTION_NOT_HANDLED);
+                    ContinueEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_EXCEPTION_NOT_HANDLED);
                     continue;
                 }
-                if (_ended) { Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont); break; }
+                if (_ended) { ContinueEvent(ev.dwProcessId, ev.dwThreadId, cont); break; }
                 if (_stopping) { DoStop(ev); break; }
 
                 if (stop)
                 {
                     // Re-arm any breakpoints we stepped off (for step over/out/run-to) regardless of why we stopped.
                     if (_reArmOnNextStop.Count > 0) { foreach (var a in _reArmOnNextStop) ArmAddr(a); _reArmOnNextStop.Clear(); }
-                    IsStopped = true;
                     var (mode, target) = _resume.Take();
                     IsStopped = false;
                     if (mode == ResumeMode.Stop) { DoStop(ev); break; }
@@ -263,7 +314,7 @@ public sealed partial class DebuggerEngine
                     Running?.Invoke();
                     DoResume(mode, target, ev, cont);
                 }
-                else Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+                else ContinueEvent(ev.dwProcessId, ev.dwThreadId, cont);
             }
         }
         finally
@@ -320,7 +371,7 @@ public sealed partial class DebuggerEngine
                     _traceStep.Remove(ev.dwThreadId);
                     if (_memStep.Remove(ev.dwThreadId, out var ms))
                     {
-                        ApplyPageProtection(ms.Page);
+                        foreach (ulong page in ms.Pages) ApplyPageProtection(page);
                         ResumeThreads(ms.SuspendedPeers);
                     }
                     if (_pendingGuardReeval.Remove(ev.dwThreadId, out var gs))
@@ -358,7 +409,7 @@ public sealed partial class DebuggerEngine
                     TargetLoaded?.Invoke();   // bridge builds the rebased live analysis now ImageBase is the DLL
                     if (entry != 0) { AddTempBp(entry); return false; }   // run on; stop AT DllMain when it's reached
                     // No DllMain and no chosen export: stop right here so the user can set breakpoints and Go.
-                    Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, b, 0));
+                    ReportStop(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, b, 0));
                     return true;
                 }
                 return false;
@@ -435,7 +486,7 @@ public sealed partial class DebuggerEngine
                 _seenEntry = true;
                 // Phase-2 anti-debug hooks: kernelbase/kernel32/user32 are now fully initialized — install them.
                 if (HideFromDebugger && _adApplied && HideUseApiHooks) TryInstallLateHooks();
-                Stopped?.Invoke(new StopInfo(entry ? StopReason.EntryPoint : StopReason.Breakpoint, ev.dwThreadId, addr, code));
+                ReportStop(new StopInfo(entry ? StopReason.EntryPoint : StopReason.Breakpoint, ev.dwThreadId, addr, code));
                 return true;
             }
             // user software breakpoint
@@ -445,7 +496,7 @@ public sealed partial class DebuggerEngine
                 SetIp(hThread, addr);   // rewind over the 0xCC (registers now valid for condition eval)
                 if (ShouldStop(bp, ev.dwThreadId))
                 {
-                    Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
+                    ReportStop(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
                     return true;
                 }
                 // condition / hit-count not met: step off the 0xCC and keep running, without surfacing a stop
@@ -462,7 +513,7 @@ public sealed partial class DebuggerEngine
                 // beat the program's own anti-debug (TLS callbacks / entry run after this), and late enough
                 // that the PEB and the matching-bitness ntdll are mapped.
                 if (HideFromDebugger && !_adApplied && isWx86 == Is32) { ApplyAntiAntiDebug(); _adApplied = true; }
-                if (_attached) { Stopped?.Invoke(new StopInfo(StopReason.Attached, ev.dwThreadId, addr, code)); return true; }
+                if (_attached) { ReportStop(new StopInfo(StopReason.Attached, ev.dwThreadId, addr, code)); return true; }
                 // Optionally stop at the loader breakpoint of the target's bitness (the matching loader has
                 // mapped the modules) instead of skipping to the entry point, so capture can begin earlier.
                 // When hosting a DLL the target isn't mapped yet (ImageBase is still 0), so always run on to
@@ -471,7 +522,7 @@ public sealed partial class DebuggerEngine
                 {
                     RemoveTempBpIfPresent(EntryPoint);   // breaking earlier — drop the redundant entry-point stop
                     _seenEntry = true;
-                    Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
+                    ReportStop(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
                     return true;
                 }
                 return false;   // launched: skip past it toward the entry bp
@@ -498,14 +549,14 @@ public sealed partial class DebuggerEngine
             if (_breakinPending)
             {
                 _breakinPending = false;
-                if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }
+                if (_pauseRequested) { _pauseRequested = false; ReportStop(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }
                 return false;   // pause already surfaced — drop the duplicate breakin
             }
             // A genuine int3 in the program (__debugbreak / anti-debug). When hiding, pass it to the program's
             // SEH (no-debugger behaviour) instead of surfacing it.
             if (HideFromDebugger) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
-            if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }
-            Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
+            if (_pauseRequested) { _pauseRequested = false; ReportStop(new StopInfo(StopReason.Paused, ev.dwThreadId, addr, code)); return true; }
+            ReportStop(new StopInfo(StopReason.Breakpoint, ev.dwThreadId, addr, code));
             return true;
         }
 
@@ -519,44 +570,19 @@ public sealed partial class DebuggerEngine
             // the page disarmed, the page never re-protected, and _pendingGuardReeval/_guardDisarmedByPage leaked.
             // SmcHandleWriteStep is a no-op (returns false) when this thread has no pending write-fault re-eval,
             // so it is safe to consult first on every single-step event.
-            bool smcStep = SmcHandleWriteStep(ev.dwThreadId, out _, out bool smcRecovered);
-            if (smcStep && !smcRecovered)
+            bool smcStep = SmcHandleWriteStep(ev.dwThreadId, out _, out bool recovered);
+            bool memoryStep = MemHandleStep(ev.dwThreadId, out var memStep);
+            bool returnStep = _returnStep.ContainsKey(ev.dwThreadId);
+            if (returnStep) recovered &= CompleteReturnStep(ev.dwThreadId);
+            bool internalStep = _internalStep.Remove(ev.dwThreadId, out ulong internalRearm);
+            if (internalStep) ArmInternal(internalRearm);
+            if (!recovered || memoryStep && memStep.Stop)
             {
-                Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, CurrentIp(hThread), code));
+                if (_stepping.Remove(ev.dwThreadId, out var pending) && pending.ReArm != 0) ArmAddr(pending.ReArm);
+                if (_traceStep.Remove(ev.dwThreadId, out var traceRearm) && traceRearm != 0) ArmAddr(traceRearm);
+                ReportStop(new StopInfo(recovered ? StopReason.MemoryBreakpoint : StopReason.Exception,
+                    ev.dwThreadId, recovered ? memStep.InstrAddr : CurrentIp(hThread), code));
                 return true;
-            }
-
-            // Software memory-breakpoint trap-step: the faulting access has now completed, so re-protect its
-            // page and, if it was a real hit, stop at the accessing instruction. Like the SMC guard-step this is
-            // armed with a bare trap flag (no StepState), so it must be consulted before the internal-step /
-            // !stepping handling below — otherwise a hit is dropped and the page left unprotected. The Count
-            // guard keeps the hot trace loop lock-free when no memory-bp step is pending (_memStep is only ever
-            // touched on this debug-loop thread, so the read is safe).
-            if (_memStep.Count > 0 && MemHandleStep(ev.dwThreadId, out var memStep))
-            {
-                if (memStep.Stop)
-                {
-                    Stopped?.Invoke(new StopInfo(StopReason.MemoryBreakpoint, ev.dwThreadId, memStep.InstrAddr, code));
-                    return true;
-                }
-                return false;   // an unrelated access on a watched page — re-protected, keep running
-            }
-
-            if (_returnStep.ContainsKey(ev.dwThreadId))
-            {
-                if (!CompleteReturnStep(ev.dwThreadId))
-                {
-                    Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, CurrentIp(hThread), code));
-                    return true;
-                }
-                if (!_stepping.ContainsKey(ev.dwThreadId)) return false;
-            }
-
-            // A step armed only to run one instruction off an internal anti-debug hook, then re-arm it.
-            if (_internalStep.Remove(ev.dwThreadId, out ulong isAddr))
-            {
-                ArmInternal(isAddr);
-                if (!_stepping.ContainsKey(ev.dwThreadId)) return false;
             }
             bool tracing = _traceStep.ContainsKey(ev.dwThreadId);
             bool stepping = _stepping.TryGetValue(ev.dwThreadId, out var st) || tracing;   // a trace step is a step too (not a watchpoint)
@@ -566,7 +592,7 @@ public sealed partial class DebuggerEngine
             // arm a software step or SMC guard-step on this thread). Gating it here spares a Ctx allocation +
             // GetThreadContext syscall on every single-step we *did* arm — above all, on every instruction of a
             // continuous trace (the hottest loop in the app), whose own step reads the context separately.
-            if (!stepping && !smcStep)
+            if (!stepping && !smcStep && !memoryStep && !internalStep && !returnStep)
             {
                 using var c = new Ctx(Is32);
                 if (c.Get(hThread) && (c.Dr6 & 0xF) != 0)
@@ -577,7 +603,7 @@ public sealed partial class DebuggerEngine
                     if (hb is null || ShouldStop(hb, ev.dwThreadId))
                     {
                         c.Set(hThread);
-                        Stopped?.Invoke(new StopInfo(StopReason.Watchpoint, ev.dwThreadId, c.Ip, code));
+                        ReportStop(new StopInfo(StopReason.Watchpoint, ev.dwThreadId, c.Ip, code));
                         return true;
                     }
                     // condition / hit-count not met: keep running. An execute hw bp would re-fire on this same
@@ -589,7 +615,7 @@ public sealed partial class DebuggerEngine
             }
             if (!stepping)
             {
-                if (smcStep) return false;   // SMC guard-step during a Go: keep running (breakpoints re-armed above)
+                if (smcStep || memoryStep || internalStep || returnStep) return false;   // SMC guard-step during a Go: keep running (breakpoints re-armed above)
                 // ICEBP/int1 (or a debuggee-set trap flag) anti-debug: when hiding, deliver to the program's
                 // handler instead of swallowing, so its single-step SEH fires as if undebugged.
                 if (HideFromDebugger && IsProgramDebugInstruction(addr, step: true)) { cont = Native.DBG_EXCEPTION_NOT_HANDLED; return false; }
@@ -602,7 +628,7 @@ public sealed partial class DebuggerEngine
             // write-protected page: SmcHandleWriteStep already re-armed the page's breakpoints, so ArmAddr below
             // is a harmless no-op for any it already armed, and the user's StopAfter is still honored.
             if (st.ReArm != 0) ArmAddr(st.ReArm);   // re-arm the breakpoint this thread stepped off
-            if (st.StopAfter) { Stopped?.Invoke(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
+            if (st.StopAfter) { ReportStop(new StopInfo(StopReason.Step, ev.dwThreadId, CurrentIp(hThread), code)); return true; }
             return false;   // step-off of a breakpoint during a Go — keep running
         }
 
@@ -650,7 +676,7 @@ public sealed partial class DebuggerEngine
             if (ipGuarded)
             {
                 ClearGuards();   // execution reached a guarded (originally non-stub) page → OEP candidate
-                Stopped?.Invoke(new StopInfo(StopReason.GuardExec, ev.dwThreadId, er.ExceptionAddress, code));
+                ReportStop(new StopInfo(StopReason.GuardExec, ev.dwThreadId, er.ExceptionAddress, code));
                 return true;
             }
         }
@@ -681,7 +707,7 @@ public sealed partial class DebuggerEngine
         // While capturing, let the program handle all its own first-chance exceptions without stopping.
         if (PassFirstChanceExceptions && firstChance) return false;
         if (!brk) return false;   // filter: don't break — exception was passed/swallowed per `pass`
-        Stopped?.Invoke(new StopInfo(StopReason.Exception, ev.dwThreadId, addr, code));
+        ReportStop(new StopInfo(StopReason.Exception, ev.dwThreadId, addr, code));
         return true;
     }
 
@@ -702,7 +728,7 @@ public sealed partial class DebuggerEngine
         using var c = new Ctx(Is32);
         if (!c.Get(hThread))
         {
-            Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+            ContinueEvent(ev.dwProcessId, ev.dwThreadId, cont);
             Resumed?.Invoke();
             return;
         }
@@ -788,21 +814,19 @@ public sealed partial class DebuggerEngine
                 break;
             }
         }
-        Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+        ContinueEvent(ev.dwProcessId, ev.dwThreadId, cont);
         Resumed?.Invoke();
     }
 
     // ---- public commands (UI thread) ----
-    public void Go() => _resume.Add((ResumeMode.Go, 0));
-    public void StepInto() => _resume.Add((ResumeMode.StepInto, 0));
-    public void StepOver() => _resume.Add((ResumeMode.StepOver, 0));
-    public void StepOut() => _resume.Add((ResumeMode.StepOut, 0));
-    public void RunToCursor(ulong va) => _resume.Add((ResumeMode.RunToCursor, va));
+    public void Go() => TryResume(ResumeMode.Go);
+    public void StepInto() => TryResume(ResumeMode.StepInto);
+    public void StepOver() => TryResume(ResumeMode.StepOver);
+    public void StepOut() => TryResume(ResumeMode.StepOut);
+    public void RunToCursor(ulong va) => TryResume(ResumeMode.RunToCursor, va);
     public void RunToAny(IEnumerable<ulong> targets)
     {
-        ulong[] copy = targets.Where(t => t != 0).Distinct().ToArray();
-        lock (_lock) _runToAnyTargets.Enqueue(copy);
-        _resume.Add((ResumeMode.RunToAny, 0));
+        TryResume(ResumeMode.RunToAny, targets: targets);
     }
     public void Pause()
     {
@@ -830,7 +854,7 @@ public sealed partial class DebuggerEngine
             ReleaseJob();
             Native.DebugActiveProcessStop(_pid);
         }
-        else { Native.TerminateProcess(_proc, 0); Native.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_CONTINUE); }
+        else { Native.TerminateProcess(_proc, 0); ContinueEvent(ev.dwProcessId, ev.dwThreadId, Native.DBG_CONTINUE); }
         _ended = true;
         Exited?.Invoke(0);
     }
@@ -902,7 +926,7 @@ public sealed partial class DebuggerEngine
 
     private void Cleanup()
     {
-        IsActive = false; IsStopped = false;
+        lock (_lock) { IsActive = false; IsStopped = false; _eventHeld = false; }
         _loopCtx?.Dispose(); _loopCtx = null;   // free the pooled trace CONTEXT buffer (loop thread is ending)
         // Release the OS handles the debug events handed us: any thread handles still open (threads that never
         // delivered EXIT_THREAD because the process was terminated) and the process handle itself.
@@ -978,6 +1002,11 @@ public sealed partial class DebuggerEngine
     /// </summary>
     public IReadOnlyCollection<ulong> SetBreakpoints(IReadOnlyCollection<ulong> addresses)
     {
+        lock (_lock) return CanAccessFrozenMemory ? SetBreakpointsCore(addresses) : [];
+    }
+
+    private IReadOnlyCollection<ulong> SetBreakpointsCore(IReadOnlyCollection<ulong> addresses)
+    {
         if (_proc == IntPtr.Zero || addresses.Count == 0) return [];
         var armed = new List<ulong>();
 
@@ -1019,6 +1048,7 @@ public sealed partial class DebuggerEngine
             }
             // Don't leave breakpoints we couldn't arm registered as phantoms (listed but never fire).
             if (tail is not null) lock (_lock) foreach (var va in tail) _swBps.Remove(va);
+            OverlayTraps(page, buf); // ReadMemory masks traps; retain every existing owner in the page write.
             bool wrote = Native.WriteProcessMemory(_proc, page, buf, (nuint)n, out nuint written)
                          && written == (nuint)n;
             if (!Native.VirtualProtectEx(_proc, page, (nuint)n, old, out _))
@@ -1319,12 +1349,12 @@ public sealed partial class DebuggerEngine
         ulong ip = c.Ip;
 
         // Pause requested: surface it at the instruction we're about to execute.
-        if (_pauseRequested) { _pauseRequested = false; Stopped?.Invoke(new StopInfo(StopReason.Paused, tid, ip, 0)); return true; }
+        if (_pauseRequested) { _pauseRequested = false; ReportStop(new StopInfo(StopReason.Paused, tid, ip, 0)); return true; }
 
         // A user breakpoint at the next instruction → stop here (its int3 hasn't executed; IP already points at it).
         Breakpoint? ub; lock (_lock) _swBps.TryGetValue(ip, out ub);
         bool ubArmed = ub is { Armed: true };
-        if (ubArmed && ShouldStop(ub!, tid)) { Stopped?.Invoke(new StopInfo(StopReason.Breakpoint, tid, ip, 0)); return true; }
+        if (ubArmed && ShouldStop(ub!, tid)) { ReportStop(new StopInfo(StopReason.Breakpoint, tid, ip, 0)); return true; }
 
         // Left the loaded module (a call/jump into a system DLL): run the foreign code at full speed and resume
         // tracing when it returns to our module, instead of single-stepping through the whole library.
@@ -1429,6 +1459,11 @@ public sealed partial class DebuggerEngine
     // ---- memory & registers (safe while stopped) ----
     public byte[] ReadMemory(ulong addr, int count)
     {
+        lock (_lock) return CanAccessFrozenMemory ? ReadMemoryCore(addr, count) : [];
+    }
+
+    private byte[] ReadMemoryCore(ulong addr, int count)
+    {
         if (_proc == IntPtr.Zero || count <= 0) return [];
         var buf = new byte[count];
         nuint read;
@@ -1495,9 +1530,45 @@ public sealed partial class DebuggerEngine
         }
     }
 
-    public bool WriteMemory(ulong addr, byte[] bytes) => WriteCode(addr, bytes);
+    private void OverlayTraps(ulong address, byte[] bytes)
+    {
+        void Plant(ulong va) { if (va >= address && va - address < (ulong)bytes.Length) bytes[(int)(va - address)] = 0xCC; }
+        foreach (var bp in _swBps.Values) if (bp.Armed) Plant(bp.Address);
+        foreach (var va in _tempBps.Keys) Plant(va);
+        foreach (var va in _coverageBps.Keys) Plant(va);
+        foreach (var va in _traceResumeBps.Keys) Plant(va);
+        foreach (var (va, bp) in _internalBps) if (bp.Armed) Plant(va);
+        foreach (var (va, bp) in _pendingReturns) if (bp.Armed) Plant(va);
+    }
+
+    public bool WriteMemory(ulong addr, byte[] bytes)
+    {
+        lock (_lock)
+        {
+            if (!CanAccessFrozenMemory) return false;
+            var physical = (byte[])bytes.Clone();
+            OverlayTraps(addr, physical);
+            if (!WriteCode(addr, physical)) return false;
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                ulong va = addr + (ulong)i; byte value = bytes[i];
+                if (_swBps.TryGetValue(va, out var sw)) sw.Original = value;
+                if (_tempBps.ContainsKey(va)) _tempBps[va] = value;
+                if (_coverageBps.ContainsKey(va)) _coverageBps[va] = value;
+                if (_traceResumeBps.ContainsKey(va)) _traceResumeBps[va] = value;
+                if (_internalBps.TryGetValue(va, out var ib)) ib.Original = value;
+                if (_pendingReturns.TryGetValue(va, out var pr)) pr.Original = value;
+            }
+            return true;
+        }
+    }
 
     private bool WriteCode(ulong addr, byte[] bytes)
+    {
+        lock (_lock) return CanAccessFrozenMemory && WriteCodeCore(addr, bytes);
+    }
+
+    private bool WriteCodeCore(ulong addr, byte[] bytes)
     {
         if (_proc == IntPtr.Zero) return false;
         if (bytes.Length == 0) return true;

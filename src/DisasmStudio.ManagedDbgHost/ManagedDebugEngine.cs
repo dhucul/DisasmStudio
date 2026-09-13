@@ -33,6 +33,7 @@ internal sealed class ManagedDebugEngine
     private readonly ManualResetEvent _lifecycleRequested = new(false);
     private volatile bool _stopRequested;
     private CorDebugController? _stoppedController;   // non-null while the target is stopped
+    private long _stopGeneration;
     private CorDebugThread? _stoppedThread;
 
     private readonly Dictionary<string, CorDebugModule> _modules = new(StringComparer.OrdinalIgnoreCase);
@@ -308,7 +309,7 @@ internal sealed class ManagedDebugEngine
     // Shared stop handler: capture the stopped controller/thread, ask to stay stopped, and report the stack.
     private void OnStop(CorDebugManagedCallbackEventArgs baseArgs, CorDebugThread thread, string reason)
     {
-        lock (_gate) { _stoppedController = baseArgs.Controller; _stoppedThread = thread; }
+        lock (_gate) { _stoppedController = baseArgs.Controller; _stoppedThread = thread; _stopGeneration++; }
         baseArgs.Continue = false;                       // stay stopped; OnAnyEvent won't resume
         _emit(BuildStopped(thread, reason));
     }
@@ -318,7 +319,7 @@ internal sealed class ManagedDebugEngine
         // Only surface an UNHANDLED (fatal) managed exception as a stop; first-chance/handled ones keep running.
         if (e.EventType != CorDebugExceptionCallbackType.DEBUG_EXCEPTION_UNHANDLED) return;
         string? detail = DescribeException(e.Thread);   // "Type: message" so the stop says WHAT, not just a token
-        lock (_gate) { _stoppedController = e.Controller; _stoppedThread = e.Thread; }
+        lock (_gate) { _stoppedController = e.Controller; _stoppedThread = e.Thread; _stopGeneration++; }
         e.Continue = false;
         _emit(BuildStopped(e.Thread, Mdbg.ReasonException, detail));
     }
@@ -429,40 +430,56 @@ internal sealed class ManagedDebugEngine
 
     // ---- resume / step / control (called from the pipe-command thread) ----
 
-    public void Go()
-    {
-        CorDebugController? c;
-        lock (_gate) { c = _stoppedController; _stoppedController = null; _stoppedThread = null; }
-        if (c is not null) SafeContinue(c);
-    }
+    public void Go() => ResumeStopped(null);
 
-    public void Step(string kind, int[]? range)
+    public void Step(string kind, int[]? range) => ResumeStopped(thread =>
     {
-        CorDebugThread? t; CorDebugController? c;
-        lock (_gate) { t = _stoppedThread; c = _stoppedController; _stoppedController = null; _stoppedThread = null; }
-        if (t is null || c is null) return;
+        var stepper = thread.CreateStepper();
         try
         {
-            var stepper = t.CreateStepper();
-            try { stepper.SetJMC(true); } catch { }                                       // step into MY code, over the framework
-            try { stepper.SetUnmappedStopMask(CorDebugUnmappedStop.STOP_NONE); } catch { } // never stop in unmapped/compiler IL
-            if (kind == Mdbg.StepOut)
-            {
-                stepper.StepOut();
-            }
+            try { stepper.SetJMC(true); } catch { }
+            try { stepper.SetUnmappedStopMask(CorDebugUnmappedStop.STOP_NONE); } catch { }
+            if (kind == Mdbg.StepOut) stepper.StepOut();
             else if (range is { Length: 2 } && range[1] > range[0])
             {
                 stepper.SetRangeIL(true);
-                var ranges = new[] { new COR_DEBUG_STEP_RANGE { startOffset = range[0], endOffset = range[1] } };
-                stepper.StepRange(kind == Mdbg.StepInto, ranges, 1);   // step over the whole C# statement (its IL range)
+                stepper.StepRange(kind == Mdbg.StepInto,
+                    [new COR_DEBUG_STEP_RANGE { startOffset = range[0], endOffset = range[1] }], 1);
             }
-            else
-            {
-                stepper.Step(kind == Mdbg.StepInto);                   // no range → single-IL step fallback
-            }
+            else stepper.Step(kind == Mdbg.StepInto);
+            return () => { try { stepper.Deactivate(); } catch { } };
         }
-        catch (Exception ex) { _emit(new MdbgEvent { Ev = Mdbg.Error, Message = "step failed: " + ex.Message }); }
-        SafeContinue(c);
+        catch { try { stepper.Deactivate(); } catch { } throw; }
+    });
+
+    private void ResumeStopped(Func<CorDebugThread, Action>? prepareStep)
+    {
+        CorDebugController? controller; CorDebugThread? thread; long generation;
+        lock (_gate)
+        {
+            controller = _stoppedController; thread = _stoppedThread; generation = _stopGeneration;
+            if (controller is null || thread is null) return;
+            _stoppedController = null; _stoppedThread = null;
+        }
+        Action? cancelStep = null;
+        try
+        {
+            cancelStep = prepareStep?.Invoke(thread); // failure leaves the target frozen
+            controller.Continue(false);
+        }
+        catch (Exception ex)
+        {
+            cancelStep?.Invoke();
+            bool restored = false;
+            lock (_gate)
+            {
+                if (_stopGeneration == generation && !_stopRequested && !_detachRequested && _stoppedController is null)
+                {
+                    _stoppedController = controller; _stoppedThread = thread; restored = true;
+                }
+            }
+            if (restored) _emit(new MdbgEvent { Ev = Mdbg.ResumeFailed, Message = "Resume failed: " + ex.Message });
+        }
     }
 
     private static readonly string[] FrameworkNamePrefixes =
@@ -497,7 +514,7 @@ internal sealed class ManagedDebugEngine
                 // A real callback stop may have landed in the same instant — if so it owns the stop; otherwise, if
                 // there's no thread to present, don't leave the target frozen. Either way, undo our extra Stop.
                 if (_stoppedController is not null || thread is null) own = false;
-                else { _stoppedController = p; _stoppedThread = thread; own = true; }
+                else { _stoppedController = p; _stoppedThread = thread; _stopGeneration++; own = true; }
             }
             if (own) _emit(BuildStopped(thread!, Mdbg.ReasonPause));
             else { try { p.Continue(false); } catch { } }

@@ -149,6 +149,7 @@ public sealed class UnpackSession
                 Report($"Entry point at {stop.Address:X}; locating OEP (strategy: {_opt.Strategy}).");
                 var immediate = _finder.Begin(_eng);
                 if (immediate is { } v) CompleteAtOep(v);
+                else if (_finder.IsDone) Fail("The OEP strategy could not be armed or found no candidate. " + _finder.Log);
                 return;
             }
             if (traceVm)
@@ -211,6 +212,7 @@ public sealed class UnpackSession
             }
             var oep = _finder.OnStop(_eng, stop);
             if (oep is { } oepVa) CompleteAtOep(oepVa);
+            else if (_finder.IsDone) Fail("The OEP strategy exhausted without finding an entry point. " + _finder.Log);
         }
         catch (Exception ex) { Fail("Unpack error: " + ex.Message); }
     }

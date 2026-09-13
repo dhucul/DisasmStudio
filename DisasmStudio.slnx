@@ -9,5 +9,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DisasmStudio.Core.Tests/DisasmStudio.Core.Tests.csproj" />
+    <Project Path="tests/DisasmStudio.Wpf.Tests/DisasmStudio.Wpf.Tests.csproj" />
   </Folder>
 </Solution>

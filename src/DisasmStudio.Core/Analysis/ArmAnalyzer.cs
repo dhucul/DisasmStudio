@@ -35,7 +35,7 @@ public static class ArmAnalyzer
         //    collecting call/branch targets + xrefs along the way.
         progress?.Report("Disassembling (recursive descent)…");
         var roots = new List<ulong>();
-        if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) roots.Add(image.EntryVa);
+        if ((image.EntryVa != 0 || image.Format == BinaryFormat.Raw) && image.IsExecutableVa(image.EntryVa)) roots.Add(image.EntryVa);
         foreach (var s in image.Symbols) if (image.IsExecutableVa(s.Va)) roots.Add(s.Va);
         Descend(image, dis, code, roots, callTargets, branchTargets, xrefs, null, token);
 
@@ -75,14 +75,14 @@ public static class ArmAnalyzer
         // 4. Names: symbols, entry, bl targets (sub_), prologue functions (sub_), branch targets (loc_).
         progress?.Report("Resolving symbols…");
         var funcStarts = new SortedSet<ulong>();
-        if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) funcStarts.Add(image.EntryVa);
+        if ((image.EntryVa != 0 || image.Format == BinaryFormat.Raw) && image.IsExecutableVa(image.EntryVa)) funcStarts.Add(image.EntryVa);
         foreach (var s in image.Symbols) if (image.IsExecutableVa(s.Va)) funcStarts.Add(s.Va);
         foreach (var t in callTargets) funcStarts.Add(t);
         foreach (var p in prologues) if (code.IsCode(p)) funcStarts.Add(p);
 
         var names = new Dictionary<ulong, string>();
         foreach (var sym in image.Symbols) names[sym.Va] = sym.Name;
-        if (image.EntryVa != 0 && image.IsExecutableVa(image.EntryVa)) names.TryAdd(image.EntryVa, "start");
+        if ((image.EntryVa != 0 || image.Format == BinaryFormat.Raw) && image.IsExecutableVa(image.EntryVa)) names.TryAdd(image.EntryVa, "start");
         foreach (var t in funcStarts) names.TryAdd(t, $"sub_{t:X}");
         foreach (var t in branchTargets) names.TryAdd(t, $"loc_{t:X}");
         foreach (var sec in image.Sections) if (sec.FileSize > 0) names.TryAdd(sec.StartVa, sec.Name);

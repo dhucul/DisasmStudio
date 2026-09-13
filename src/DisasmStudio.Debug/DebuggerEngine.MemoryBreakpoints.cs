@@ -33,7 +33,7 @@ public sealed partial class DebuggerEngine
     /// <summary>A pending trap-step: after a faulting access on <see cref="Page"/> is let through, re-protect the
     /// page and — if it was a real hit (<see cref="Stop"/>) — surface a stop at the accessing instruction.</summary>
     private readonly record struct MemStepState(
-        ulong Page, bool Stop, ulong InstrAddr, ulong DataVa, int Access, IntPtr[] SuspendedPeers);
+        HashSet<ulong> Pages, bool Stop, ulong InstrAddr, ulong DataVa, int Access, IntPtr[] SuspendedPeers);
 
     private readonly List<MemBp> _memBps = [];
     private readonly Dictionary<ulong, MemPage> _memPages = [];    // page VA -> protection state
@@ -173,13 +173,15 @@ public sealed partial class DebuggerEngine
         IntPtr hThread = ThreadHandle(tid);
         if (hThread == IntPtr.Zero) return false;
 
-        IntPtr[]? suspended = SuspendPeerThreads(tid);
+        bool continuing = _memStep.TryGetValue(tid, out var previous);
+        IntPtr[]? suspended = continuing ? previous.SuspendedPeers : SuspendPeerThreads(tid);
         if (suspended is null) return false;
         lock (_lock)
         {
             if (!_memPages.TryGetValue(page, out var mp)
                 || !Native.VirtualProtectEx(_proc, page, (nuint)0x1000, mp.OriginalProtect, out _))
             {
+                if (continuing) { _memStep.Remove(tid); foreach (ulong prior in previous.Pages) ApplyPageProtection(prior); }
                 ResumeThreads(suspended);
                 return false;
             }
@@ -189,6 +191,7 @@ public sealed partial class DebuggerEngine
             if (!c.Get(hThread))
             {
                 lock (_lock) ApplyPageProtection(page);
+                if (continuing) { _memStep.Remove(tid); foreach (ulong prior in previous.Pages) ApplyPageProtection(prior); }
                 ResumeThreads(suspended);
                 return false;
             }
@@ -196,11 +199,19 @@ public sealed partial class DebuggerEngine
             if (!c.Set(hThread))
             {
                 lock (_lock) ApplyPageProtection(page);
+                if (continuing) { _memStep.Remove(tid); foreach (ulong prior in previous.Pages) ApplyPageProtection(prior); }
                 ResumeThreads(suspended);
                 return false;
             }
         }
-        lock (_lock) _memStep[tid] = new MemStepState(page, stop, instrAddr, faultVa, accessType, suspended);
+        lock (_lock)
+        {
+            var pages = continuing ? previous.Pages : [];
+            pages.Add(page);
+            _memStep[tid] = continuing && previous.Stop
+                ? previous with { Pages = pages }
+                : new MemStepState(pages, stop, instrAddr, faultVa, accessType, suspended);
+        }
 
         cont = Native.DBG_CONTINUE;
         return true;
@@ -214,13 +225,13 @@ public sealed partial class DebuggerEngine
         lock (_lock)
         {
             if (!_memStep.Remove(tid, out step)) return false;
-            bool protectedAgain = _memPages.TryGetValue(step.Page, out var mp)
-                && Native.VirtualProtectEx(_proc, step.Page, (nuint)0x1000, mp.AppliedProtect, out _);
+            bool protectedAgain = true;
+            foreach (ulong page in step.Pages) protectedAgain &= ApplyPageProtection(page);
             ResumeThreads(step.SuspendedPeers);
             if (!protectedAgain)
             {
                 step = step with { Stop = true };
-                Output?.Invoke($"Failed to re-protect memory-breakpoint page 0x{step.Page:X}.");
+                Output?.Invoke("Failed to re-protect a memory-breakpoint page.");
             }
             if (step.Stop) { LastMemoryHitVa = step.DataVa; LastMemoryHitAccess = step.Access; }
             return true;

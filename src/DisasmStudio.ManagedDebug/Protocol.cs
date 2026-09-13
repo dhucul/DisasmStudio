@@ -56,7 +56,7 @@ public static class Mdbg
         Pause = "pause", Stop = "stop", Detach = "detach", Quit = "quit";
     // events
     public const string Launched = "launched", ModuleLoaded = "moduleLoaded", Stopped = "stopped",
-        Output = "output", Exited = "exited", Error = "error", Ack = "ack";
+        Output = "output", Exited = "exited", Error = "error", Ack = "ack", ResumeFailed = "resumeFailed";
     // stop reasons
     public const string ReasonEntry = "entry", ReasonBreakpoint = "breakpoint", ReasonStep = "step",
         ReasonException = "exception", ReasonPause = "pause";

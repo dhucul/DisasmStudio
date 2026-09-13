@@ -80,6 +80,7 @@ public sealed class HexView : Grid
     /// <summary>When set (debugging), byte edits are written by VA through this hook (e.g. to process
     /// memory) instead of the file-offset patch path — which can't address a live 64-bit process.</summary>
     public Func<ulong, byte, bool>? WriteByteAt { get; set; }
+    public Func<bool>? CanEdit { get; set; }
 
     private static readonly Brush BgBrush = Palette.BaseBrush;
     private static readonly Brush AddrBrush = SyntaxTheme.Address;
@@ -483,6 +484,7 @@ public sealed class HexView : Grid
     /// <summary>Overwrite the high or low nibble of the caret byte and advance after a full byte.</summary>
     private void TypeHex(int nibble)
     {
+        if (CanEdit?.Invoke() == false) return;
         if (_image is null || !_hasSelection) return;
         ulong editVa = _selCaret;
         var cur = _image.ReadBytesAtVa(editVa, 1);

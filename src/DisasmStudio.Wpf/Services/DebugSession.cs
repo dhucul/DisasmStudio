@@ -15,6 +15,8 @@ namespace DisasmStudio.Wpf.Services;
 public sealed class DebugSession
 {
     private readonly Dispatcher _ui;
+    private readonly CancellationTokenSource _lifetime = new();
+    public CancellationToken LifetimeToken => _lifetime.Token;
     private readonly AnalysisResult? _static;   // null when attaching with no file open
     private AnalysisResult? _synthStatic;        // analysis synthesized from the live image (attach-without-file)
     private bool _synthAttempted;                // synthesize once, even if it fails, so stops don't re-analyze
@@ -120,6 +122,7 @@ public sealed class DebugSession
     {
         _ui = ui; _static = staticResult;
         Engine.Stopped += OnStopped;
+        Engine.Completed += () => _lifetime.Cancel();
         Engine.Running += () =>
         {
             // Resumes the *hunt* issued are dropped rather than posted to the UI: for a packed target under the
@@ -249,9 +252,11 @@ public sealed class DebugSession
     /// times (it may only be mid-initialization) before being cached as a permanent miss.</summary>
     private readonly Dictionary<ulong, int> _foreignAttempts = [];
     private const int MaxForeignAnalysisAttempts = 3;
+    public void AdoptForeignAnalysis(AnalysisResult result) => _foreignModules[result.Image.ImageBase] = result;
 
     private void OnStoppedUi(StopInfo s)
     {
+        if (_lifetime.IsCancellationRequested || !Engine.IsStopped) return;
         // Build the rebased live analysis once the debugged module's base is known. For a launched EXE that is
         // the process base, set at process-create (so true on the first stop); for a DLL hosted in an EXE the
         // slide is only known when the DLL maps, so Engine.ImageBase stays 0 until then — defer the build.
@@ -524,24 +529,39 @@ public sealed class DebugSession
     // commands
     // Each user-facing resume clears the finder's ownership of the next stop, so a stop the user asked for
     // always surfaces even while a hunt is armed.
-    public void Go() { _oepResumePending = false; Engine.Go(); }
-    public void StepInto() { _oepResumePending = false; Engine.StepInto(); }
-    public void StepOver() { _oepResumePending = false; Engine.StepOver(); }
-    public void StepOut() { _oepResumePending = false; Engine.StepOut(); }
+    public void Go() => Resume(ResumeMode.Go);
+    public void StepInto() => Resume(ResumeMode.StepInto);
+    public void StepOver() => Resume(ResumeMode.StepOver);
+    public void StepOut() => Resume(ResumeMode.StepOut);
     public void Pause() => Engine.Pause();   // not a resume — leave the flag alone
     /// <summary>End the session. Any in-flight hunt is dropped first so its engine state (passed first-chance
     /// exceptions) is restored rather than leaking into whatever runs next. The hunt is NOT disarmed: the
     /// process is about to be terminated, so restoring its page protections is pure latency on the caller —
     /// and this is the UI thread, straight off the Stop button.</summary>
-    public void Stop() { EndOepHunt(disarm: false, "Stopped."); Engine.Stop(); }
+    public void Stop() { _lifetime.Cancel(); EndOepHunt(disarm: false, "Stopped."); Engine.Stop(); }
     /// <summary>Detach the debugger but keep the debuggee running. Only meaningful while stopped. Cancelling the
     /// hunt first matters here: the guards and breakpoints it planted must come out before the process is
     /// released, or it runs on with sections we made non-executable.</summary>
-    public void Detach() { CancelOepHunt(); Engine.Detach(); }
-    public void RunToCursor(ulong va) { _oepResumePending = false; Engine.RunToCursor(va); }
+    public void Detach() { _lifetime.Cancel(); CancelOepHunt(); Engine.Detach(); }
+    public void RunToCursor(ulong va) => Resume(ResumeMode.RunToCursor, va);
     /// <summary>Run until any of <paramref name="targets"/> is reached (used by "Continue to return" with the
     /// current function's ret sites). Stops at the first one hit; the function's calls run at full speed.</summary>
-    public void RunToAny(IEnumerable<ulong> targets) { _oepResumePending = false; Engine.RunToAny(targets); }
+    public void RunToAny(IEnumerable<ulong> targets) => Resume(ResumeMode.RunToAny, targets: targets);
+    private void Resume(ResumeMode mode, ulong target = 0, IEnumerable<ulong>? targets = null)
+    {
+        bool accepted;
+        lock (_oepLock)
+        {
+            bool previousOwner = _oepResumePending;
+            _oepResumePending = false;
+            accepted = Engine.TryResume(mode, target, targets);
+            if (!accepted) _oepResumePending = previousOwner;
+            else IsStopped = false;
+        }
+        if (!accepted)
+        { if (Engine.IsStopped) Output?.Invoke("Memory inspection is still in progress; wait before resuming."); return; }
+        Running?.Invoke();
+    }
 
     // ---- execution coverage ----
     public void SetCoveragePoints(IEnumerable<ulong> leaders) => Engine.SetCoveragePoints(leaders);

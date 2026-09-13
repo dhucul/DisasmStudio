@@ -186,15 +186,20 @@ internal sealed class ManagedDebugClient : IDisposable
         _disposed = true;
         try { Send(new MdbgCommand { Cmd = Mdbg.Quit }); } catch { }
         try { _connectCts?.Cancel(); } catch { }
-        try { if (_pipe is { IsConnected: true }) _pipe.WaitForPipeDrain(); } catch { }
         try { _pipe?.Dispose(); } catch { }
+        Exception? shutdownFailure = null;
         try
         {
             if (_host is { HasExited: false } && !_host.WaitForExit(5000) && !_detached)
+            {
                 _host.Kill(entireProcessTree: true);
+                if (!_host.WaitForExit(5000)) throw new TimeoutException("The managed-debug host did not exit after termination.");
+            }
         }
-        catch { }
+        catch (Exception ex) { shutdownFailure = ex; }
         try { _host?.Dispose(); } catch { }
         try { _connectCts?.Dispose(); } catch { }
+        if (shutdownFailure is not null)
+            throw new IOException("The managed-debug host could not be shut down.", shutdownFailure);
     }
 }

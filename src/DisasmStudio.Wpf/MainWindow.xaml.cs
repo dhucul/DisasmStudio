@@ -41,6 +41,107 @@ public partial class MainWindow : Window
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);
 
     private readonly NavigationService _nav = new();
+    private readonly CancellationTokenSource _lifetime = new();
+    private readonly List<Task> _activeExports = [];
+    private Task _managedTeardown = Task.CompletedTask;
+    private bool _managedRestartPending;
+    private bool _closed;
+    private long _documentGeneration;
+    private int _openOperations;
+    private bool _analysisStale;
+    private readonly DispatcherTimer _analysisRefreshTimer = new() { Interval = TimeSpan.FromMilliseconds(300) };
+
+    private sealed class DocumentLoad : IDisposable
+    {
+        private readonly MainWindow _owner;
+        public long Generation { get; }
+        public DocumentLoad(MainWindow owner)
+        {
+            _owner = owner; owner._openOperations++;
+            Generation = ++owner._documentGeneration;
+            owner._cts?.Cancel();
+        }
+        public void Dispose() => _owner._openOperations--;
+    }
+
+    private bool CanStartDebug()
+    {
+        if (_managedTeardown.IsFaulted)
+        { StatusText.Text = "Previous managed debugger shutdown failed: " + _managedTeardown.Exception!.GetBaseException().Message; return false; }
+        if (_closed || _openOperations != 0 || _cts is not null || _analysisStale || !_managedTeardown.IsCompleted || _managedRestartPending)
+        { StatusText.Text = "Wait for the current load, analysis, or debugger shutdown to finish."; return false; }
+        return true;
+    }
+    private bool CanEditBytes => !_closed && _openOperations == 0 && _activeExports.Count == 0
+        && (_dbg is null || _dbgViewLive && _dbg.IsStopped);
+
+    private void RetireImage(IBinaryImage image, Task analysis)
+    {
+        var readers = _activeExports.Append(analysis).ToArray();
+        _ = Task.WhenAll(readers).ContinueWith(completed =>
+        {
+            _ = completed.Exception;
+            (image as IDisposable)?.Dispose();
+        }, TaskScheduler.Default);
+    }
+
+    private void QueueAnalysisRefresh()
+    {
+        if (_result is null || !_dbgViewLive && _image is null) return;
+        _analysisStale = true;
+        _cts?.Cancel();
+        Graph.Clear(); _graphFn = null; Decompiler.Clear(); _callGraph = null;
+        _analysisRefreshTimer.Stop(); _analysisRefreshTimer.Start();
+        StatusText.Text = "Bytes changed; rebuilding code analysis…";
+    }
+
+    private async Task RefreshEditedLiveAnalysis()
+    {
+        if (_dbg is not { IsStopped: true } session || _result is not { } previous) return;
+        using var inspection = session.Engine.TryAcquireInspection();
+        if (inspection is null) return;
+        long stop = session.Engine.StopGeneration;
+        _cts?.Cancel();
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, session.LifetimeToken);
+        _cts = operation;
+        ulong current = _nav.Current ?? session.CurrentIp;
+        var options = _loadOptions;
+        try
+        {
+            var job = Task.Run(() =>
+            {
+                var bytes = session.Engine.DumpImage(previous.Image.ImageBase, out _);
+                operation.Token.ThrowIfCancellationRequested();
+                if (!PeMemoryImage.TryLoadFromBytes(bytes, previous.Image.ImageBase, previous.Image.FilePath,
+                    out var image, entryVaOverride: previous.Image.EntryVa))
+                    throw new InvalidDataException("The edited module could not be captured for analysis.");
+                return AnalysisEngine.Analyze(image, options, token: operation.Token);
+            }, operation.Token);
+            _analysisDone = SilentlyAwait(job);
+            var snapshot = await job;
+            if (operation.IsCancellationRequested || _closed || !ReferenceEquals(_dbg, session)
+                || !session.Engine.IsStopped || session.Engine.StopGeneration != stop) return;
+            AnalysisResult shown;
+            if (snapshot.Image.ImageBase == session.Engine.ImageBase)
+            {
+                shown = LiveAnalysis.Build(session.Engine, snapshot).Result;
+                session.AdoptUnpackedAnalysis(snapshot, shown);
+            }
+            else { shown = snapshot; session.AdoptForeignAnalysis(shown); }
+            shown.UseMarkup(previous.Markup);
+            _result = shown; _analysisStale = false;
+            _funcStarts = shown.Functions.Select(fn => fn.Va).ToArray();
+            PopulateLists(shown);
+            Linear.SetResult(shown, session.LiveDecoder);
+            Hex.SetImage(shown.Image);
+            _nav.Navigate(current);
+            StatusText.Text = "Code analysis refreshed from edited process memory.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { if (!_closed && ReferenceEquals(_dbg, session)) StatusText.Text = "Live analysis refresh failed: " + ex.Message; }
+        finally { if (ReferenceEquals(_cts, operation)) _cts = null; }
+    }
+
     private IBinaryImage? _image;
     private AnalysisResult? _result;
     private CancellationTokenSource? _cts;
@@ -168,6 +269,15 @@ public partial class MainWindow : Window
             }
             else await RefreshStaticStringsAsync();
         };
+        _analysisRefreshTimer.Tick += async (_, _) =>
+        {
+            _analysisRefreshTimer.Stop();
+            if (_closed || !_analysisStale || _openOperations != 0) return;
+            if (_dbgViewLive) await RefreshEditedLiveAnalysis();
+            else if (_dbg is null && _image is { } image)
+                await StartAnalysis(image, _nav.Current, CenterTabs.SelectedIndex, fresh: false);
+        };
+        Hex.CanEdit = () => CanEditBytes;
         WireControls();
         EnableFileDrop();
         _nav.Navigated += OnNavigated;
@@ -474,6 +584,7 @@ public partial class MainWindow : Window
     {
         if (_mdbg is not null) { if (_mdbg.IsStopped) _mdbg.Go(); return true; }   // managed: continue from a stop
         if (_dbg is not null) { if (_dbg.IsStopped) _dbg.Go(); return true; }   // native: continue only from a stop (else it skips the next stop)
+        if (!CanStartDebug()) return false;
         if (_result is null || _image is null) { MessageBox.Show(this, "Open a binary first.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return false; }
         if (_image.Format != BinaryFormat.Pe) { MessageBox.Show(this, "Only Windows PE targets can be debugged.", "Debug", MessageBoxButton.OK, MessageBoxImage.Information); return false; }
         // A .NET assembly → source-level (C# line) debugging via the out-of-process ICorDebug host, not the
@@ -730,11 +841,15 @@ public partial class MainWindow : Window
     {
         using var _watch = Diagnostics.UiWatchdog.Scope("ReanalyzeFromUnpackedMemory");
         if (_dbg is not { IsStopped: true } d) return;
+        using var inspection = d.Engine.TryAcquireInspection();
+        if (inspection is null) return;
+        long generation = _documentGeneration, stopGeneration = d.Engine.StopGeneration;
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, d.LifetimeToken);
 
         Progress.Visibility = Visibility.Visible; Progress.IsIndeterminate = true;
         DbgRunBtn.IsEnabled = false; SetStepButtons(false); RunToOepBtn.IsEnabled = false;
         StatusText.Text = "Dumping the unpacked image…";
-        var progress = new Progress<string>(s => StatusText.Text = s);
+        var progress = new Progress<string>(s => { if (!_closed && ReferenceEquals(_dbg, d) && d.Engine.StopGeneration == stopGeneration) StatusText.Text = s; });
         try
         {
             var opts = _loadOptions;   // keep the user's folded data sections / PE header choice
@@ -746,8 +861,9 @@ public partial class MainWindow : Window
                 var dump = d.DumpMainImage();
                 return dump is null || dump.Length == 0
                     ? null
-                    : d.BuildUnpackedAnalysis(dump, oepVa, opts, progress, CancellationToken.None);
+                    : d.BuildUnpackedAnalysis(dump, oepVa, opts, progress, operation.Token);
             });
+            if (_closed || !ReferenceEquals(_dbg, d) || !d.Engine.IsStopped || d.Engine.StopGeneration != stopGeneration || generation != _documentGeneration) return;
             if (built is not { } b) { StatusText.Text = "Re-analyze: the live image could not be dumped or parsed as a PE."; return; }
             d.AdoptUnpackedAnalysis(b.Static, b.Live);
             _dbgViewLive = false;   // re-open the one-shot gate so the whole UI rebinds to the new analysis
@@ -759,12 +875,16 @@ public partial class MainWindow : Window
             StatusText.Text = $"Re-analyzed from unpacked memory at OEP {oepVa:X} ({method}) — " +
                               $"{_result!.Functions.Count:N0} functions, {_result.Strings.Count:N0} strings.";
         }
-        catch (Exception ex) { StatusText.Text = "Re-analyze failed: " + ex.Message; }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { if (!_closed && ReferenceEquals(_dbg, d)) StatusText.Text = "Re-analyze failed: " + ex.Message; }
         finally
         {
-            Progress.Visibility = Visibility.Collapsed; Progress.IsIndeterminate = false;
-            DbgRunBtn.IsEnabled = true; SetStepButtons(_dbg is { IsStopped: true });
-            UpdateRunToOepEnabled();
+            if (!_closed && ReferenceEquals(_dbg, d))
+            {
+                Progress.Visibility = Visibility.Collapsed; Progress.IsIndeterminate = false;
+                DbgRunBtn.IsEnabled = true; SetStepButtons(_dbg is { IsStopped: true });
+                UpdateRunToOepEnabled();
+            }
         }
     }
 
@@ -1277,6 +1397,7 @@ public partial class MainWindow : Window
     /// the change stack) and re-analyze so the decrypted strings surface in the Strings list.</summary>
     private async void ApplyEmulationPatch(EmulationResult er)
     {
+        if (!CanEditBytes) return;
         if (_result is null || _image is null || er.MemoryWrites.Count == 0) return;
         int patched = 0;
         foreach (var (start, bytes) in ContiguousRuns(er.MemoryWrites))
@@ -1284,6 +1405,7 @@ public partial class MainWindow : Window
         if (patched > 0) MarkSessionDirty();
         UpdatePatchButtons();
         StatusText.Text = $"Patched {patched:N0} decrypted byte(s); re-analyzing to surface decrypted strings…";
+        QueueAnalysisRefresh();
         await StartAnalysis(_image, _nav.Current, CenterTabs.SelectedIndex, fresh: false);
     }
 
@@ -1356,6 +1478,9 @@ public partial class MainWindow : Window
         _liveStringsPending = false;
         var img = live.Image;
         var eng = _dbg.Engine;
+        var inspection = eng.TryAcquireInspection();
+        if (inspection is null) { _liveStringsScanning = false; return; }
+        long stopGeneration = eng.StopGeneration;
         var regs = eng.GetRegisters();   // captured on the UI thread; only memory reads happen off-thread below
         int gen = ++_liveStringsGen;
         Task.Run(() =>
@@ -1377,10 +1502,11 @@ public partial class MainWindow : Window
                 foreach (var s in section) if (seen.Add(s.Va)) found.Add(s);
             }
             catch { /* a memory read raced a resume / exit */ }
-            finally { _liveStringsScanning = false; }
+            finally { inspection.Dispose(); _liveStringsScanning = false; }
             Dispatcher.BeginInvoke(() =>
             {
-                if (found is not null && gen == _liveStringsGen && _dbgViewLive)   // else superseded / raced exit
+                if (!_closed && found is not null && gen == _liveStringsGen && _dbgViewLive
+                    && ReferenceEquals(_dbg?.Engine, eng) && eng.IsStopped && eng.StopGeneration == stopGeneration)   // else superseded / raced exit
                 {
                     _strings = new ObservableCollection<StringItem>(found.Take(MaxStringRows).Select(s => new StringItem(s)));
                     _stringsView = CollectionViewSource.GetDefaultView(_strings);
@@ -1410,8 +1536,9 @@ public partial class MainWindow : Window
 
     /// <summary>Mark the static byte-derived string state stale and coalesce rapid edits before rescanning.
     /// <paramref name="immediate"/> bypasses the debounce for a committed string edit/manual refresh.</summary>
-    private void QueueStringRefresh(bool immediate = false)
+    private void QueueStringRefresh(bool immediate = false, bool bytesChanged = false)
     {
+        if (bytesChanged) QueueAnalysisRefresh();
         if (_dbgViewLive)
         {
             _stringRefreshTimer.Stop();
@@ -1744,6 +1871,7 @@ public partial class MainWindow : Window
 
     private void BeginDebug(Action<DebugSession> start)
     {
+        if (!CanStartDebug()) return;
         DeferStaticStringRefreshForDebug();
         _debugStartFailure = null;
         _savedResult = _result;
@@ -1936,6 +2064,7 @@ public partial class MainWindow : Window
 
     private void StartManagedDebug()
     {
+        if (!CanStartDebug()) return;
         if (_image is null || _managed is null) return;
         string dll = _image.FilePath;
         string module = Path.GetFileName(dll);
@@ -1982,17 +2111,19 @@ public partial class MainWindow : Window
         var mdbg = new ManagedDebugSession(Dispatcher, hostPath, consoleApp);
         mdbg.Launched += () =>
         {
+            if (!ReferenceEquals(_mdbg, mdbg)) return;
             StatusText.Text = $"Managed debug: running {module}…";
             SignalElevationReady();
         };
-        mdbg.Stopped += OnManagedStopped;
-        mdbg.Exited += OnManagedExited;
-        mdbg.Error += OnManagedError;
+        mdbg.Stopped += stop => { if (ReferenceEquals(_mdbg, mdbg)) OnManagedStopped(stop); };
+        mdbg.Exited += code => { if (ReferenceEquals(_mdbg, mdbg)) OnManagedExited(code); };
+        mdbg.Error += error => { if (ReferenceEquals(_mdbg, mdbg)) OnManagedError(error); };
         _mdbg = mdbg;
         _mdbgFramework = framework;
         _mdbgTargetIsGui = !consoleApp;
         _mdbgNativeOfferDeclined = false;
 
+        RestartBtn.IsEnabled = true;
         ManagedDebugDock.Visibility = Visibility.Visible;
         ManagedDebug.Clear();
         StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = DetachBtn.IsEnabled = true;
@@ -2303,9 +2434,11 @@ public partial class MainWindow : Window
         ManagedDebugDock.Visibility = Visibility.Collapsed;
         StepIntoBtn.IsEnabled = StepOverBtn.IsEnabled = StepOutBtn.IsEnabled = DetachBtn.IsEnabled = false;
         var m = _mdbg; _mdbg = null;
+        m?.Retire();
+        RestartBtn.IsEnabled = false;
         // Tear down off the UI thread — quitting/killing the host (and any stuck ICorDebug cleanup) must never
         // freeze the app.
-        if (m is not null) Task.Run(() => { try { m.Dispose(); } catch { } });
+        if (m is not null) _managedTeardown = Task.Run(() => m.Dispose());
     }
 
     /// <summary>Double-click a call-stack frame → navigate to its method and highlight its C# line.</summary>
@@ -2496,8 +2629,20 @@ public partial class MainWindow : Window
         if (_dbg is not null) _dbg.Engine.ExceptionFilter = edited;   // atomic reference swap; in-flight Decide() finishes on the old one
     }
 
-    private void OnDebugRestart(object sender, RoutedEventArgs e)
+    private async void OnDebugRestart(object sender, RoutedEventArgs e)
     {
+        if (_mdbg is not null)
+        {
+            var image = _image;
+            _managedRestartPending = true;
+            EndManagedDebug();
+            StatusText.Text = "Restarting managed debugger…";
+            try { await _managedTeardown; }
+            catch (Exception ex) { StatusText.Text = "Managed shutdown failed: " + ex.Message; return; }
+            finally { _managedRestartPending = false; }
+            if (!_closed && ReferenceEquals(_image, image) && _dbg is null && _mdbg is null) StartManagedDebug();
+            return;
+        }
         if (_dbg is null) return;
         _restartPending = true;   // OnDbgExited relaunches the target once this debuggee is gone
         StatusText.Text = "Restarting…";
@@ -2670,7 +2815,7 @@ public partial class MainWindow : Window
         Linear.SetResult(_result, _dbg.LiveDecoder);
         Decompiler.LiveDecoder = _dbg.LiveDecoder;   // decompile over process memory (the file decoder can't read it)
         Hex.SetImage(_result.Image);
-        Hex.WriteByteAt = (va, b) => _dbg?.Engine.WriteMemory(va, [b]) ?? false;   // editable live memory
+        Hex.WriteByteAt = (va, b) => _dbg is { IsStopped: true } stopped && stopped.Engine.WriteMemory(va, [b]);   // editable live memory
         CaptureBtn.IsEnabled = true; CaptureFnBtn.IsEnabled = true; OnceCheck.IsEnabled = true; RetCheck.IsEnabled = true; DerefCheck.IsEnabled = true;
         CoverageToggle.IsEnabled = true;   // execution-coverage recording can now be armed
         RestartBtn.IsEnabled = _image is not null;   // a fileless attach has no binary to relaunch
@@ -2756,6 +2901,7 @@ public partial class MainWindow : Window
     /// hides the debugger dock. The caller sets the status line (exit code vs. "still running").</summary>
     private void TeardownDebugSessionUi()
     {
+        _analysisStale = false; _analysisRefreshTimer.Stop(); _cts?.Cancel();
         using var _watch = Diagnostics.UiWatchdog.Scope("TeardownDebugSessionUi");
         _captureTimer?.Stop();
         _captureFlushTimer?.Dispose(); _captureFlushTimer = null;
@@ -2894,6 +3040,8 @@ public partial class MainWindow : Window
     // ---- patching ----
     private void OnPatchInstruction(ulong va)
     {
+        if (!CanEditBytes) return;
+        if (_dbgViewLive) { StatusText.Text = "Edit live process bytes in the Hex view."; return; }
         if (_image is null) return;
         if (_image.IsArm || _image.Is8051)
         {
@@ -2976,7 +3124,7 @@ public partial class MainWindow : Window
         _changeStack.Push(new ByteEdit(va, end, true));
         MarkSessionDirty();
         RepairIndex(va, end);          // local re-decode of just this region — no full re-sweep
-        QueueStringRefresh();
+        QueueStringRefresh(bytesChanged: true);
         UpdatePatchButtons();
     }
 
@@ -2987,7 +3135,7 @@ public partial class MainWindow : Window
             // LiveProcessImage has no file patch/undo map. Do not create a dead entry that could later undo an
             // unrelated static-file patch; live edits exist only in the stopped process.
             Hex.RefreshWithChangeHighlight(highlight: false);
-            QueueStringRefresh();
+            QueueStringRefresh(bytesChanged: true);
             StatusText.Text = $"Edited live memory at {va:X} (memory-only; not saved or undoable).";
             return;
         }
@@ -2995,7 +3143,7 @@ public partial class MainWindow : Window
         // tracked so undo stays in lock-step with the image's undo stack.
         _changeStack.Push(new ByteEdit(va, va + 1, false));
         MarkSessionDirty();
-        QueueStringRefresh();
+        QueueStringRefresh(bytesChanged: true);
         UpdatePatchButtons();
     }
 
@@ -3045,6 +3193,7 @@ public partial class MainWindow : Window
     /// a "create function" (the function is removed). LIFO across both kinds.</summary>
     private void UndoLastEdit()
     {
+        if (!CanEditBytes) return;
         if (_changeStack.Count == 0) return;
         // Peek first: a byte edit that can't be reverted right now must stay on the stack (don't drop it).
         switch (_changeStack.Peek())
@@ -3054,7 +3203,7 @@ public partial class MainWindow : Window
                 _changeStack.Pop();
                 _image.Undo();
                 if (b.IsPatch) RepairIndex(b.Start, b.End); else Hex.InvalidateView();
-                QueueStringRefresh();
+                QueueStringRefresh(bytesChanged: true);
                 break;
             case CreateFunctionEdit c:
                 _changeStack.Pop();
@@ -3182,6 +3331,7 @@ public partial class MainWindow : Window
     {
         if (!CanReplaceDocument("Open project")) return;
         if (!ConfirmDiscardSessionChanges()) return;
+        using var load = new DocumentLoad(this);
 
         ProjectFile proj;
         try
@@ -3209,6 +3359,7 @@ public partial class MainWindow : Window
                     "Open project failed", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
+            if (_closed || load.Generation != _documentGeneration) return;
             if (!string.Equals(actualHash, proj.BinarySha256, StringComparison.OrdinalIgnoreCase))
             {
                 MessageBox.Show(this,
@@ -3269,7 +3420,7 @@ public partial class MainWindow : Window
             return;
         }
         var outcome = await StartAnalysis(image, proj.CurrentVa != 0 ? proj.CurrentVa : null, proj.CenterTab,
-            freshMarkup: markup, freshOptions: options);
+            freshMarkup: markup, freshOptions: options, documentGeneration: load.Generation);
         // The fresh analysis wiped the cross-run breakpoint / trace / jump-toggle sets (they belonged to the old
         // file); re-arm them from the project now that the new result exists.
         if (outcome != AnalyzeOutcome.Applied) return;
@@ -3466,6 +3617,7 @@ public partial class MainWindow : Window
     // ---- export to .asm / .c ----
     private async void OnSaveAsm(object sender, RoutedEventArgs e)
     {
+        if (_analysisStale) { StatusText.Text = "Wait for code analysis to finish before exporting."; return; }
         // Works on _result (the live analysis when fileless-attached), so only that is required — the default
         // filename comes from _result.Image (the file, or the attached process's module path).
         if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save ASM", MessageBoxButton.OK, MessageBoxImage.Information); return; }
@@ -3474,11 +3626,13 @@ public partial class MainWindow : Window
             FileName = ExportBaseName() + ".asm" };
         if (dlg.ShowDialog(this) != true) return;
         var r = _result;
-        await RunExport(dlg.FileName, "disassembly", (w, p, ct) => SourceExporter.WriteAsm(w, r, p, ct));
+        var decoder = _dbgViewLive ? _dbg?.LiveDecoder : null;
+        await RunExport(dlg.FileName, "disassembly", (w, p, ct) => SourceExporter.WriteAsm(w, r, p, ct, decoder));
     }
 
     private async void OnSaveC(object sender, RoutedEventArgs e)
     {
+        if (_analysisStale) { StatusText.Text = "Wait for code analysis to finish before exporting."; return; }
         if (_result is null) { MessageBox.Show(this, "Open a binary or attach to a process first.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         if (_result.Image.Is8051) { MessageBox.Show(this, "C export isn't available for 8051/MCS-51 (no IL/decompiler). Use \"Save disassembly\" for the ASM listing.", "Save C", MessageBoxButton.OK, MessageBoxImage.Information); return; }
         var dlg = new SaveFileDialog
@@ -3489,10 +3643,11 @@ public partial class MainWindow : Window
         };
         if (dlg.ShowDialog(this) != true) return;
         var r = _result;
+        var decoder = _dbgViewLive ? _dbg?.LiveDecoder : null;
         bool comp = dlg.FilterIndex == 2;
         await RunExport(dlg.FileName, comp ? "compilable C" : "Pseudo-C",
-            comp ? (w, p, ct) => SourceExporter.WriteCompilableC(w, r, p, ct)
-                 : (w, p, ct) => SourceExporter.WriteC(w, r, p, ct));
+            comp ? (w, p, ct) => SourceExporter.WriteCompilableC(w, r, p, ct, decoder)
+                 : (w, p, ct) => SourceExporter.WriteC(w, r, p, ct, decoder));
     }
 
     /// <summary>Default filename base for whole-program exports: the loaded file's name, or the attached
@@ -3513,25 +3668,34 @@ public partial class MainWindow : Window
         Progress.IsIndeterminate = false;
         Progress.Value = 0;
         StatusText.Text = $"Exporting {what}…";
-        var prog = new Progress<int>(v => Progress.Value = v);
+        var prog = new Progress<int>(v => { if (!_closed) Progress.Value = v; });
+        using var inspection = _dbg?.Engine.TryAcquireInspection();
+        if (_dbgViewLive && inspection is null) { Progress.Visibility = Visibility.Collapsed; StatusText.Text = "Pause the process before exporting."; return; }
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, _dbg?.LifetimeToken ?? CancellationToken.None);
+        var token = operation.Token;
+        Task export = Task.CompletedTask;
         try
         {
-            await Task.Run(() =>
+            export = Task.Run(() =>
             {
-                AtomicFile.WriteText(path, sw => body(sw, prog, CancellationToken.None));
-            });
-            StatusText.Text = $"Saved {what} to {path}";
+                AtomicFile.WriteText(path, sw => { body(sw, prog, token); token.ThrowIfCancellationRequested(); });
+            }, token);
+            _activeExports.Add(export);
+            await export;
+            if (!_closed) StatusText.Text = $"Saved {what} to {path}";
         }
         catch (Exception ex)
         {
+            if (_closed || ex is OperationCanceledException) return;
             MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
             StatusText.Text = "Export failed.";
         }
-        finally { Progress.Visibility = Visibility.Collapsed; Progress.Value = 0; }
+        finally { _activeExports.Remove(export); if (!_closed) { Progress.Visibility = Visibility.Collapsed; Progress.Value = 0; } }
     }
 
     private void SaveFunctionAsm(ulong va)
     {
+        if (_analysisStale || _dbgViewLive && _dbg is not { IsStopped: true }) return;
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
         var dlg = new SaveFileDialog { Title = "Save function disassembly", Filter = "Assembly listing|*.asm|Text|*.txt|All files|*.*",
@@ -3539,7 +3703,7 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog(this) != true) return;
         try
         {
-            AtomicFile.WriteText(dlg.FileName, sw => SourceExporter.WriteAsmFunction(sw, _result, fn));
+            AtomicFile.WriteText(dlg.FileName, sw => SourceExporter.WriteAsmFunction(sw, _result, fn, AnalysisDecoder));
             StatusText.Text = $"Saved {fn.Name} to {dlg.FileName}";
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error); }
@@ -3547,6 +3711,7 @@ public partial class MainWindow : Window
 
     private void SaveFunctionC(ulong va)
     {
+        if (_analysisStale || _dbgViewLive && _dbg is not { IsStopped: true }) return;
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
         var dlg = new SaveFileDialog
@@ -3603,6 +3768,7 @@ public partial class MainWindow : Window
 
         if (!CanReplaceDocument("Open")) return;
         if (!ConfirmDiscardSessionChanges()) return;
+        using var load = new DocumentLoad(this);
         SignatureLibrary.Reload();   // re-scan signatures/*.sig so newly-added files apply to this binary
         IBinaryImage image;
         FirmwareScan? firmware = null;
@@ -3656,7 +3822,7 @@ public partial class MainWindow : Window
         var opts = Dialogs.AskLoadSections(this, image, AnalysisOptions.None);
         if (opts is null) { (image as IDisposable)?.Dispose(); return; }   // cancelled
         if (assumeUnpacked) opts = opts with { AssumeUnpacked = true };
-        var outcome = await StartAnalysis(image, freshMarkup: new Markup(), freshOptions: opts);
+        var outcome = await StartAnalysis(image, freshMarkup: new Markup(), freshOptions: opts, documentGeneration: load.Generation);
         if (outcome != AnalyzeOutcome.Applied) return;
         _projectPath = null;
         _sessionDirty = false;
@@ -3713,8 +3879,15 @@ public partial class MainWindow : Window
     private enum AnalyzeOutcome { Applied, Cancelled, Failed }
 
     private async Task<AnalyzeOutcome> StartAnalysis(IBinaryImage image, ulong? initialVa = null, int initialTab = 0,
-        bool fresh = true, Markup? freshMarkup = null, AnalysisOptions? freshOptions = null)
+        bool fresh = true, Markup? freshMarkup = null, AnalysisOptions? freshOptions = null, long? documentGeneration = null)
     {
+        long generation = documentGeneration ?? _documentGeneration;
+        if (_closed || generation != _documentGeneration || fresh && (_dbg is not null || _mdbg is not null))
+        {
+            if (fresh && !ReferenceEquals(image, _image)) (image as IDisposable)?.Dispose();
+            return AnalyzeOutcome.Cancelled;
+        }
+        _analysisRefreshTimer.Stop();
         // On a fresh load, retire the previous file-backed image once the new one is up and its analysis stopped.
         var prevImage = fresh ? _image : null;
         var prevDone = _analysisDone;
@@ -3769,7 +3942,8 @@ public partial class MainWindow : Window
             var task = Task.Run(() => AnalysisEngine.Analyze(image, opts, progress, token), token);
             _analysisDone = SilentlyAwait(task);
             var result = await task;
-            if (token.IsCancellationRequested) return AnalyzeOutcome.Cancelled;
+            if (token.IsCancellationRequested || _closed || generation != _documentGeneration
+                || fresh && (_dbg is not null || _mdbg is not null)) return AnalyzeOutcome.Cancelled;
 
             if (fresh)
             {
@@ -3778,6 +3952,8 @@ public partial class MainWindow : Window
                 CommitFresh();
                 applied = true;
             }
+            _analysisStale = false;
+            Graph.Clear(); _graphFn = null; Decompiler.Clear();
             _result = result;
             result.UseMarkup(_markup);   // overlay user renames/comments (and re-apply function-start renames) onto the fresh analysis
             _callGraph = null;           // rebuilt lazily against the new result on the next Call Graph tab view
@@ -3803,8 +3979,7 @@ public partial class MainWindow : Window
             // (a disposed mapping reads as 0), so even a stray reader can't crash.
             if (prevImage is not null && !ReferenceEquals(prevImage, image) && _dbg is null)
             {
-                await prevDone;
-                (prevImage as IDisposable)?.Dispose();
+                RetireImage(prevImage, prevDone);
             }
             return AnalyzeOutcome.Applied;
         }
@@ -3844,7 +4019,7 @@ public partial class MainWindow : Window
 
     private bool CanReplaceDocument(string title)
     {
-        if (_dbg is null && _mdbg is null) return true;
+        if (_dbg is null && _mdbg is null && !_managedRestartPending) return true;
         MessageBox.Show(this, "Stop the current debug session before opening another file.", title,
             MessageBoxButton.OK, MessageBoxImage.Information);
         return false;
@@ -3859,6 +4034,8 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
+        _closed = true; _documentGeneration++;
+        _lifetime.Cancel(); _analysisRefreshTimer.Stop(); _findInsnCts?.Cancel();
         CancelStaticStringRefresh();
         _cts?.Cancel();
         _captureTimer?.Stop();
@@ -3873,8 +4050,8 @@ public partial class MainWindow : Window
         catch { }
         try { _mdbg?.Dispose(); } catch { }   // stop the out-of-process managed-debug host (+ its debuggee) cleanly
         _managed?.Dispose();
-        (_image as IDisposable)?.Dispose();
-        (_savedResult?.Image as IDisposable)?.Dispose();   // static image held across a debug session
+        if (_image is { } image) RetireImage(image, _analysisDone);
+        if (_savedResult?.Image is { } saved && !ReferenceEquals(saved, _image)) RetireImage(saved, _analysisDone);   // static image held across a debug session
     }
 
     private void PopulateLists(AnalysisResult result)
@@ -4124,6 +4301,7 @@ public partial class MainWindow : Window
 
     private void OpenGraph(ulong va, bool center)
     {
+        if (_analysisStale) return;
         var fn = FindFunction(va);
         if (fn is null || _result is null) return;
         // Rebuild only when the function changes (object identity differs across the static↔live swap too).
@@ -4161,6 +4339,7 @@ public partial class MainWindow : Window
 
     private void OpenDecompiler(ulong va)
     {
+        if (_analysisStale) return;
         // The decompiler covers x86/x64 (Iced) and the whole ARM family (Capstone). 8051 has no IL/pseudo-C
         // path — gate it here so DecompilerView never builds an Iced decoder over 8051 bytes.
         if (_result?.Image.Is8051 == true)
@@ -4275,6 +4454,7 @@ public partial class MainWindow : Window
     /// step); live rows write only to the stopped process and deliberately do not enter the file undo/save path.</summary>
     private void EditSelectedString()
     {
+        if (!CanEditBytes) return;
         if (StringList.SelectedItem is not StringItem si) return;
         if (!CanEditSelectedString())
         {
@@ -4314,7 +4494,7 @@ public partial class MainWindow : Window
                 return;
             }
             Hex.RefreshWithChangeHighlight(highlight: false);
-            QueueStringRefresh(immediate: true);
+            QueueStringRefresh(immediate: true, bytesChanged: true);
             StatusText.Text = $"Edited live {si.Kind} string at {si.Va:X} (memory-only; not saved or undoable).";
             return;
         }
@@ -4333,7 +4513,7 @@ public partial class MainWindow : Window
         MarkSessionDirty();
         Hex.InvalidateView();
         UpdatePatchButtons();
-        QueueStringRefresh(immediate: true);
+        QueueStringRefresh(immediate: true, bytesChanged: true);
         StatusText.Text = $"Edited {si.Kind} string at {si.Va:X}; use Ctrl+Z to undo or Save Patched As… to export.";
     }
 
@@ -4890,7 +5070,6 @@ public partial class MainWindow : Window
             }
             return;
         }
-        if (outcome == AnalyzeOutcome.Applied)
         {
             MarkSessionDirty();
             StatusText.Text = on

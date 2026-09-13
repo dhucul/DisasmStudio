@@ -60,6 +60,7 @@ public sealed class MediumLifter
 
         var mid = new LiftedFunction { Va = low.Va, Name = low.Name, Blocks = blocks };
         foreach (var b in blocks) mid.ByStart[b.Start] = b;
+        mid.Variables.AddRange(low.Variables);
         mid.Variables.AddRange(slots.Values.OrderBy(v => v.Name, StringComparer.Ordinal));
         return mid;
     }
@@ -190,7 +191,9 @@ public sealed class MediumLifter
                         var loc = LocOf(dest);
                         // Invalidate anything that referenced the old value of this location.
                         foreach (var k in env.Where(kv => Mentions(kv.Value, loc)).Select(kv => kv.Key).ToList()) env.Remove(k);
-                        if (!(src is CallExpr) && IsInlinable(src) && NodeCount(src) <= 24) env[loc] = src; else env.Remove(loc);
+                        if (_model.IsFullDef(dest) && !Mentions(src, loc) && !(src is CallExpr) && IsInlinable(src) && NodeCount(src) <= 24)
+                            env[loc] = dest is RegExpr reg ? Fold(new UnaryExpr(UnOp.ZeroExtend, src, reg.Size)) : src;
+                        else env.Remove(loc);
                     }
                     break;
                 }
@@ -239,7 +242,12 @@ public sealed class MediumLifter
     {
         switch (e)
         {
-            case RegExpr or VarExpr:
+            case RegExpr reg:
+                if (!env.TryGetValue(LocOf(e), out var parent)) return e;
+                if (reg.Reg.Name is "ah" or "bh" or "ch" or "dh")
+                    parent = Fold(new BinExpr(BinOp.Shr, parent, new Const(8, 4), Math.Max(parent.Size, 4)));
+                return Fold(new UnaryExpr(UnOp.ZeroExtend, parent, reg.Size));
+            case VarExpr:
                 return env.TryGetValue(LocOf(e), out var v) ? v : e;
             case LoadExpr ld:
                 return new LoadExpr(Subst(ld.Addr, env), ld.Width);
@@ -264,19 +272,18 @@ public sealed class MediumLifter
 
     private static Expr Fold(Expr e)
     {
-        if (e is BinExpr { L: Const l, R: Const r } b)
+        if (e is UnaryExpr { E: Const c } u)
         {
-            long x = l.Value, y = r.Value;
-            long? z = b.Op switch
-            {
-                BinOp.Add => x + y, BinOp.Sub => x - y, BinOp.Mul or BinOp.UMul => x * y,
-                BinOp.And => x & y, BinOp.Or => x | y, BinOp.Xor => x ^ y,
-                BinOp.Shl => x << (int)(y & 63), BinOp.Shr => (long)((ulong)x >> (int)(y & 63)),
-                BinOp.Sar => x >> (int)(y & 63),
-                _ => null,
+            long value = u.Op switch {
+                UnOp.Neg => unchecked(-c.Value), UnOp.Not => ~c.Value,
+                UnOp.SignExtend => IntegerSemantics.SignExtend(c.Value, c.Width),
+                _ => IntegerSemantics.Mask(c.Value, c.Width),
             };
-            if (z is long zv) return new Const(zv, b.Width);
+            return new Const(IntegerSemantics.Mask(value, u.Width), u.Width);
         }
+        if (e is BinExpr { L: Const l, R: Const r } b
+            && IntegerSemantics.TryBinary(b.Op, l.Value, r.Value, b.Width, out long result))
+            return new Const(result, b.Width);
         // x + 0, x - 0, x | 0  → x
         if (e is BinExpr { R: Const { Value: 0 }, Op: BinOp.Add or BinOp.Sub or BinOp.Or or BinOp.Xor } b2) return b2.L;
         return e;

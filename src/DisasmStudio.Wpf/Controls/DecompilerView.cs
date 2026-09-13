@@ -242,6 +242,7 @@ public sealed class DecompilerView : Grid
     /// <summary>Show <paramref name="function"/> in the decompiler, building (and caching) it if needed.</summary>
     public void SetFunction(AnalysisResult result, Function function)
     {
+        int seq = ++_buildSeq;
         // A new image (e.g. the static↔live debugger swap) invalidates the decoder and the per-function
         // cache — both were built over the old address space.
         if (_dis is not null && !ReferenceEquals(_result?.AnalysisImage, result.AnalysisImage))
@@ -275,18 +276,17 @@ public sealed class DecompilerView : Grid
         }
 
         _shownFn = function.Va;
-        int seq = ++_buildSeq;
         ShowBuilding(function);
 
         var fn = function;
         var decoder = LiveDecoder;
-        Task.Run(() => Decompiler.Decompile(fn, result, decoder)).ContinueWith(t =>
+        PendingBuild = Task.Run(() => Decompiler.Decompile(fn, result, decoder)).ContinueWith(t =>
         {
             var dc = t.IsCompletedSuccessfully ? t.Result : null;
             string? failure = t.Exception?.GetBaseException().Message;
             Dispatcher.Invoke(() =>
             {
-                if (seq != _buildSeq || !ReferenceEquals(_result, result)) return;
+                if (seq != _buildSeq || _shownFn != fn.Va || !ReferenceEquals(_result, result)) return;
                 if (dc is null)
                 {
                     ShowFailure(failure ?? "Decompiler failed.");
@@ -299,6 +299,8 @@ public sealed class DecompilerView : Grid
             });
         });
     }
+
+    internal Task PendingBuild { get; private set; } = Task.CompletedTask;
 
     public void Clear()
     {

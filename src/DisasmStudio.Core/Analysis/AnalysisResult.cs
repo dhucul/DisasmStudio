@@ -76,7 +76,8 @@ public sealed class AnalysisResult
     public required XrefDatabase Xrefs { get; init; }
 
     /// <summary>Functions and call sites proven not to return normally.</summary>
-    public NoReturnInfo NoReturn { get; init; } = NoReturnInfo.Empty;
+    private NoReturnInfo _noReturn = NoReturnInfo.Empty;
+    public NoReturnInfo NoReturn { get => _noReturn; init => _noReturn = value; }
 
     private IReadOnlyList<FoundString> _strings = [];
     public required IReadOnlyList<FoundString> Strings
@@ -86,7 +87,14 @@ public sealed class AnalysisResult
     }
 
     /// <summary>Indirect-jmp VA → recovered switch/jump-table case targets (so the CFG can follow them).</summary>
-    public required IReadOnlyDictionary<ulong, ulong[]> JumpTables { get; init; }
+    private IReadOnlyDictionary<ulong, ulong[]> _jumpTables = new Dictionary<ulong, ulong[]>();
+    public required IReadOnlyDictionary<ulong, ulong[]> JumpTables { get => _jumpTables; init => _jumpTables = value; }
+    public void InvalidateCode()
+    {
+        _noReturn = NoReturnInfo.Empty;
+        _jumpTables = new Dictionary<ulong, ulong[]>();
+        foreach (var fn in _functions) fn.InvalidateBlocks();
+    }
 
     /// <summary>String VA → a data slot pointing at it (a pointer-table entry), for resolving strings
     /// reached only through a pointer. Precomputed so a double-click never scans on the UI thread.</summary>

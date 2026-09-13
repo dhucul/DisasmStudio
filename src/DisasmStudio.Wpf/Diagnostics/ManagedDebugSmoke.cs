@@ -101,7 +101,7 @@ internal static class ManagedDebugSmoke
         Log($"client.Dispose() returned after {dsw.ElapsedMilliseconds}ms");
 
         Console.WriteLine($"\nstops={stops} exited={exited} error={err ?? "(none)"}  total={sw.ElapsedMilliseconds}ms");
-        return exited ? 0 : 1;
+        return exited && stops > 0 && err is null ? 0 : 1;
     }
 
     private static int? PeBitness(string path)

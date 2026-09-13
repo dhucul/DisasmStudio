@@ -53,6 +53,12 @@ internal static class ExprWriter
                 else { w.Op("["); Write(w, ld.Addr, c); w.Op("]"); }
                 break;
 
+            case UnaryExpr u when u.Op is UnOp.SignExtend or UnOp.ZeroExtend:
+                int fromBits = Math.Clamp(u.E.Size, 1, 8) * 8;
+                int toBits = Math.Clamp(u.Width, 1, 8) * 8;
+                w.Op($"(uint{toBits}_t)({(u.Op == UnOp.SignExtend ? "int" : "uint")}{fromBits}_t)(");
+                Write(w, u.E, c, comp); w.Op(")");
+                break;
             case UnaryExpr u:
                 w.Op(u.Op == UnOp.Neg ? "-" : "~");
                 Child(w, u.E, c, comp);
